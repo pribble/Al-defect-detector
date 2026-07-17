@@ -22,6 +22,11 @@ import database
 from flask_cors import CORS
 from logger import setup_log
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+FILES_DIR = os.path.join(BASE_DIR, 'files')
+ORIGINAL_DIR = os.path.join(BASE_DIR, 'original_files')
+DETECT_DIR = os.path.join(BASE_DIR, 'detect_files')
+
 logger = setup_log('detect')
 # 缺陷对应关系，将拼音转化为中文
 cf = configparser.ConfigParser()
@@ -42,23 +47,18 @@ CORS(app, supports_credentials=True)
 # 保留缺陷图片数量
 save_image_num = 10
 # 缺陷图片路径
-defect_image_file = "/opt/MVS/Samples/aarch64/Python/GrabImage/files/"
+defect_image_file = FILES_DIR + '/'
 # 当前原始图片路径
-original_image_path = "/opt/MVS/Samples/aarch64/Python/GrabImage/original_files/original.jpg"
+original_image_path = os.path.join(ORIGINAL_DIR, 'original.jpg')
 # 当前缺陷图片存放路径
-detect_image_path = "/opt/MVS/Samples/aarch64/Python/GrabImage/detect_files/detect.jpg"
+detect_image_path = os.path.join(DETECT_DIR, 'detect.jpg')
 
 # 创建存放缺陷检测图片目录
-if(os.path.exists('/opt/MVS/Samples/aarch64/Python/GrabImage/files')==False):
-    os.mkdir('/opt/MVS/Samples/aarch64/Python/GrabImage/files')
-
+os.makedirs(FILES_DIR, exist_ok=True)
 # 创建存放当前缺陷检测图片存放目录
-if(os.path.exists('/opt/MVS/Samples/aarch64/Python/GrabImage/detect_files')==False):
-    os.mkdir('/opt/MVS/Samples/aarch64/Python/GrabImage/detect_files')
-
+os.makedirs(DETECT_DIR, exist_ok=True)
 # 创建存放当前原始图片存放目录
-if(os.path.exists('/opt/MVS/Samples/aarch64/Python/GrabImage/original_files')==False):
-    os.mkdir('/opt/MVS/Samples/aarch64/Python/GrabImage/original_files')
+os.makedirs(ORIGINAL_DIR, exist_ok=True)
 
 executor = ThreadPoolExecutor()
 
@@ -493,7 +493,7 @@ class Consumer(threading.Thread):
                             logger.info('diff_new:{},diff3:{},diff2:{},diff1:{},rate1:{}'.format(str(diff_new),str(diff3),str(diff2),str(diff1),str(rate1)))
                             if s1 > 0 and s2 < 0 and s3 < 0 and rate1 > 0.1:
                                 uid = str(uuid.uuid1())
-                                file_name = '/opt/MVS/Samples/aarch64/Python/GrabImage/files/{}.jpg'.format(uid)
+                                file_name = os.path.join(FILES_DIR, '{}.jpg'.format(uid))
                                 image2 = arr_img[0]
                                 original_image = image2.copy()
                                 bs = cv2.imencode(".jpg", image2)[1].tobytes()
@@ -548,7 +548,7 @@ class Consumer(threading.Thread):
                                                     img = Image.fromarray(cv2.cvtColor(image2,cv2.COLOR_GRAY2RGB))
                                                 except:
                                                     img = Image.fromarray(image2)
-                                                font = ImageFont.truetype('Font/platech.ttf', 9, encoding="utf-8")
+                                                font = ImageFont.truetype(os.path.join(BASE_DIR, 'Font/platech.ttf'), 9, encoding="utf-8")
                                                 draw = ImageDraw.Draw(img)
                                                 draw.text((x1-10, y1-10), '{} {:.2f}%'.format(class_names, score*100), font=font, fill="green")
                                                 image2 = np.array(img)
