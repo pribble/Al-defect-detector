@@ -6,7 +6,7 @@ After = rc.local.service
 Type = simple
 User = root
 Group = root
-ExecStart = /bin/sh -c "sudo bash /opt/MVS/Samples/aarch64/Python/GrabImage/run.sh"
+ExecStart = /bin/sh -c "sudo bash /opt/HaoYao/GrabImage/run.sh"
 Restart = always
 
 [Install]

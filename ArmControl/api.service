@@ -6,7 +6,7 @@ After = sshd.service
 Type = simple
 User = root
 Group = root
-ExecStart = /bin/sh -c "bash /home/jetson/Desktop/run.sh"
+ExecStart = /bin/sh -c "sudo bash /opt/HaoYao/ArmControl/run.sh"
 
 [Install]
 WantedBy = multi-user.target
