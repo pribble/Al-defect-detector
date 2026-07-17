@@ -20,6 +20,8 @@ import datetime
 import serial
 import database
 from flask_cors import CORS
+import sys
+sys.path.append(os.path.join(os.path.dirname(__file__), '../tools'))
 from logger import setup_log
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -27,7 +29,7 @@ FILES_DIR = os.path.join(BASE_DIR, 'files')
 ORIGINAL_DIR = os.path.join(BASE_DIR, 'original_files')
 DETECT_DIR = os.path.join(BASE_DIR, 'detect_files')
 
-logger = setup_log('detect')
+logger = setup_log('detect', 'detect_server.log')
 # 缺陷对应关系，将拼音转化为中文
 cf = configparser.ConfigParser()
 cf.read('config.ini', encoding='utf-8')

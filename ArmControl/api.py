@@ -1,13 +1,16 @@
 import time
 import serial
 import json
+import os
+import sys
 from Arm_Lib import Arm_Device
 from flask import Flask, request
 from queue import Queue
 import threading
+sys.path.append(os.path.join(os.path.dirname(__file__), '../tools'))
 from logger import setup_log
 
-logger = setup_log("arm")
+logger = setup_log("arm", "api_server.log")
 
 # 气泵继电器串口
 com = serial.Serial('/dev/XIPAN', 9600)
