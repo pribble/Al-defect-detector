@@ -1,0 +1,13 @@
+[Unit]
+Description = Robot Practical Training Server Service
+After = rc.local.service
+
+[Service]
+Type = simple
+User = root
+Group = root
+ExecStart = /bin/sh -c "sudo bash /opt/MVS/Samples/aarch64/Python/GrabImage/run.sh"
+Restart = always
+
+[Install]
+WantedBy = multi-user.target

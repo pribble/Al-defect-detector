@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+.ipynb_checkpoints/
+*.pyc
+*.pyo
+
+# Editor swap files
+*.sw?
+*.swo
+
+# Runtime database
+defect.db
+
+# Runtime generated images
+GrabImage/files/
+GrabImage/detect_files/
+GrabImage/original_files/
+
+# Build
+build/

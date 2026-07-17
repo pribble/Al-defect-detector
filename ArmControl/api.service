@@ -1,0 +1,12 @@
+[Unit]
+Description = Api Service
+After = sshd.service
+
+[Service]
+Type = simple
+User = root
+Group = root
+ExecStart = /bin/sh -c "bash /home/jetson/Desktop/run.sh"
+
+[Install]
+WantedBy = multi-user.target
