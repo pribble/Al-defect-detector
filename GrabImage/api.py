@@ -27,7 +27,6 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '../tools'))
 from logger import setup_log
 
 import database
-from camera import Producer
 import shared
 
 # ============================================================
@@ -234,7 +233,7 @@ class Consumer(threading.Thread):
             )
 
             if diff_curr > 0 > diff_prev2 and diff_prev < 0 and white_ratio > WHITE_RATIO_THRESHOLD:
-                self._run_inference_pipeline(image, frame_start_time)
+                self._run_inference_pipeline(frame_start_time)
 
         self._diff_3ago = self._diff_2ago
         self._diff_2ago = self._diff_1ago
@@ -265,7 +264,7 @@ class Consumer(threading.Thread):
                 processing_rate,
             )
         else:
-            shared._thread_pool.submit(trigger_grab, "OK")
+            shared.thread_pool.submit(trigger_grab, "OK")
             self._save_normal_result(uid, file_name, annotated_image, original_image, processing_rate)
 
     def _handle_inference_result(
@@ -276,7 +275,7 @@ class Consumer(threading.Thread):
         if action == "NG":
             self._handle_defect(inference_result, uid, file_name, annotated_image, original_image, processing_rate)
         else:
-            shared._thread_pool.submit(trigger_grab, "OK")
+            shared.thread_pool.submit(trigger_grab, "OK")
             self._save_normal_result(uid, file_name, annotated_image, original_image, processing_rate)
 
     @staticmethod
@@ -294,10 +293,10 @@ class Consumer(threading.Thread):
 
     def _handle_defect(self, inference_result, uid, file_name, annotated_image, original_image, processing_rate):
         logger.info("准备报警")
-        shared._thread_pool.submit(trigger_alarm)
+        shared.thread_pool.submit(trigger_alarm)
         logger.info("报警完成")
         time.sleep(0.1)
-        shared._thread_pool.submit(trigger_grab, "NG")
+        shared.thread_pool.submit(trigger_grab, "NG")
         logger.info("检测到缺陷，触发报警和抓取动作")
 
         for detection in inference_result['result']:

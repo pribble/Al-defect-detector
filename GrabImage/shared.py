@@ -27,4 +27,4 @@ GRAB_DELAY = None
 capture_started = []
 frame_queue = Queue(maxsize=0)
 stream_image_ref = [np.zeros((512, 512, 3), dtype=np.uint8)]
-_thread_pool = ThreadPoolExecutor()
+thread_pool = ThreadPoolExecutor()
