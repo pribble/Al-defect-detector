@@ -522,6 +522,9 @@ class Consumer(threading.Thread):
         执行 FPGA 推理并处理结果.
 
         使用前一帧 (recent_frames[0]) 进行标注, 确保看到的是完整的铝片图像.
+
+        FPGA 侧已承担: 后处理 + OK/NG 决策, 响应中携带 action 字段.
+        Pi 侧仅读取 action 并执行.
         """
         annotated_image = self._recent_frames[0]
         original_image = annotated_image.copy()
@@ -552,17 +555,14 @@ class Consumer(threading.Thread):
     def _handle_inference_result(
             self, inference_result, uid, file_name, annotated_image, original_image, processing_rate
     ):
-        """处理 FPGA 返回的推理结果"""
-        all_normal = all(
-            detection['class_name'] == LABEL_NORMAL
-            for detection in inference_result['result']
-        )
+        """处理 FPGA 返回的推理结果 (FPGA 已完成决策, action 字段指明 OK/NG)"""
+        action = inference_result.get('action', 'OK')
 
-        if all_normal:
+        if action == "NG":
+            self._handle_defect(inference_result, uid, file_name, annotated_image, original_image, processing_rate)
+        else:
             _thread_pool.submit(trigger_grab, "OK")
             self._save_normal_result(uid, file_name, annotated_image, original_image, processing_rate)
-        else:
-            self._handle_defect(inference_result, uid, file_name, annotated_image, original_image, processing_rate)
 
     def _save_normal_result(self, uid, file_name, annotated_image, original_image, processing_rate):
         """保存正常检测结果: 写入文件 + 数据库"""
