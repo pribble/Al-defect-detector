@@ -4,20 +4,25 @@ __pycache__/
 *.pyc
 *.pyo
 
-# Editor swap files
-*.sw?
-*.swo
-
-# Runtime database
-defect.db
-
-# Runtime generated images
-GrabImage/files/
-GrabImage/detect_files/
-GrabImage/original_files/
 
 # IDE
 .idea/
 
 # Build
 build/
+
+# lib
+fpga/ssd_detection/Paddlelite/
+fpga/ssd_detection/lib/
+fpga/ssd_detection/ocv3.1.0/
+fpga/paddle_frame/paddlelite_lib/
+fpga/paddle_frame/cmadrv.ko
+
+# FPGA build outputs
+fpga/ssd_detection/ssd_detection_src/build/
+
+# FPGA deployment images (large)
+fpga/paddle_frame/images/
+fpga/paddle_frame/data/
+
+fpga/paddle_frame/.last_time
