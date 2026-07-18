@@ -602,7 +602,7 @@ var app = new Vue({
       return {
         textStyle: {color:'#999'},
         grid: {top:10,left:40,right:10,bottom:20},
-        xAxis: {type:'category',show:true,data:Object.values(this.defectKeys),axisTick:{show:false},axisLine:{show:false}},
+        xAxis: {type:'category',show:true,data:DEFECT_ORDER.map(function(k){return PIE_LABELS[k]}),axisTick:{show:false},axisLine:{show:false}},
         yAxis: {type:'value',axisLine:{show:false},axisTick:{show:false},splitLine:{lineStyle:{color:'#e5e5e5'}}},
         tooltip: {trigger:'item'}
       };
