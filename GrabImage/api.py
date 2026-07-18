@@ -38,11 +38,11 @@ defect_name = dict(config.items('defect_name'))
 # 报警器串口指令
 alarm_cmd_hex = '7E FF 06 03 00 00 01 EF'
 alarm_cmd = bytes.fromhex(alarm_cmd_hex)
+alarm_serial = None
 
 sys.path.append("../MvImport")
 from MvCameraControl_class import *
 
-g_bExit = False
 app = Flask(__name__)
 CORS(app, supports_credentials=True)
 # 保留缺陷图片数量
@@ -70,24 +70,12 @@ frame_queue = Queue(maxsize=0)
 # 初始化图片
 stream_image = np.zeros((512, 512, 3), dtype=np.uint8)
 
-# 置信度修改
-def post_processing(out):
-    # 创建 'result' 列表的副本
-    new_result = out['result'][:]
-
-    # 根据条件过滤项目
-    new_result = [item for item in new_result if (item['score'] >= 0.7 and item['class_name'] != 'zhen_kong') or (item['class_name'] == 'zhen_kong' and item['score'] >= 0.2)]
-
-    # 更新输出字典中的 'result' 和 'len' 键
-    out['result'] = new_result
-    out['len'] = len(new_result)
-    return out
-
-
 # 报警 (异步)
 def trigger_alarm():
+    global alarm_serial
+    if alarm_serial is None:
+        alarm_serial = serial.Serial("/dev/BAOJING", 9600, 8, stopbits=1)
     try:
-        global alarm_serial
         alarm_serial.write(alarm_cmd)
     except Exception as e:
         logger.error('bao jing error：{}'.format(str(e)))
@@ -97,107 +85,111 @@ def trigger_alarm():
         logger.info("reboot init alarm serial")
 
 def initMvCamera():
-    SDKVersion = MvCamera.MV_CC_GetSDKVersion()
-    logger.info("SDKVersion[0x%x]" % SDKVersion)
+    while True:
+        SDKVersion = MvCamera.MV_CC_GetSDKVersion()
+        logger.info("SDKVersion[0x%x]" % SDKVersion)
 
-    deviceList = MV_CC_DEVICE_INFO_LIST()
-    tlayerType = MV_GIGE_DEVICE | MV_USB_DEVICE
+        deviceList = MV_CC_DEVICE_INFO_LIST()
+        tlayerType = MV_GIGE_DEVICE | MV_USB_DEVICE
 
-    # ch:枚举设备 | en:Enum device
-    ret = MvCamera.MV_CC_EnumDevices(tlayerType, deviceList)
-    if ret != 0:
-        logger.info("enum devices fail! ret[0x%x]" % ret)
-        sys.exit()
+        # ch:枚举设备 | en:Enum device
+        ret = MvCamera.MV_CC_EnumDevices(tlayerType, deviceList)
+        if ret != 0:
+            logger.error("enum devices fail! ret[0x%x], 10秒后重试..." % ret)
+            time.sleep(10)
+            continue
 
-    if deviceList.nDeviceNum == 0:
-        logger.info("find no device!")
-        sys.exit()
+        if deviceList.nDeviceNum == 0:
+            logger.error("find no device! 10秒后重试...")
+            time.sleep(10)
+            continue
 
-    logger.info("Find %d devices!" % deviceList.nDeviceNum)
+        logger.info("Find %d devices!" % deviceList.nDeviceNum)
 
-    for i in range(0, deviceList.nDeviceNum):
-        mvcc_dev_info = cast(deviceList.pDeviceInfo[i], POINTER(MV_CC_DEVICE_INFO)).contents
-        if mvcc_dev_info.nTLayerType == MV_GIGE_DEVICE:
-            logger.info("\ngige device: [%d]" % i)
-            strModeName = ""
-            for per in mvcc_dev_info.SpecialInfo.stGigEInfo.chModelName:
-                strModeName = strModeName + chr(per)
-            logger.info("device model name: %s" % strModeName)
+        for i in range(0, deviceList.nDeviceNum):
+            mvcc_dev_info = cast(deviceList.pDeviceInfo[i], POINTER(MV_CC_DEVICE_INFO)).contents
+            if mvcc_dev_info.nTLayerType == MV_GIGE_DEVICE:
+                logger.info("\ngige device: [%d]" % i)
+                strModeName = ""
+                for per in mvcc_dev_info.SpecialInfo.stGigEInfo.chModelName:
+                    strModeName = strModeName + chr(per)
+                logger.info("device model name: %s" % strModeName)
 
-            nip1 = ((mvcc_dev_info.SpecialInfo.stGigEInfo.nCurrentIp & 0xff000000) >> 24)
-            nip2 = ((mvcc_dev_info.SpecialInfo.stGigEInfo.nCurrentIp & 0x00ff0000) >> 16)
-            nip3 = ((mvcc_dev_info.SpecialInfo.stGigEInfo.nCurrentIp & 0x0000ff00) >> 8)
-            nip4 = (mvcc_dev_info.SpecialInfo.stGigEInfo.nCurrentIp & 0x000000ff)
-            logger.info("current ip: %d.%d.%d.%d\n" % (nip1, nip2, nip3, nip4))
-        elif mvcc_dev_info.nTLayerType == MV_USB_DEVICE:
-            logger.info("\nu3v device: [%d]" % i)
-            strModeName = ""
-            for per in mvcc_dev_info.SpecialInfo.stUsb3VInfo.chModelName:
-                if per == 0:
-                    break
-                strModeName = strModeName + chr(per)
-            logger.info("device model name: %s" % strModeName)
+                nip1 = ((mvcc_dev_info.SpecialInfo.stGigEInfo.nCurrentIp & 0xff000000) >> 24)
+                nip2 = ((mvcc_dev_info.SpecialInfo.stGigEInfo.nCurrentIp & 0x00ff0000) >> 16)
+                nip3 = ((mvcc_dev_info.SpecialInfo.stGigEInfo.nCurrentIp & 0x0000ff00) >> 8)
+                nip4 = (mvcc_dev_info.SpecialInfo.stGigEInfo.nCurrentIp & 0x000000ff)
+                logger.info("current ip: %d.%d.%d.%d\n" % (nip1, nip2, nip3, nip4))
+            elif mvcc_dev_info.nTLayerType == MV_USB_DEVICE:
+                logger.info("\nu3v device: [%d]" % i)
+                strModeName = ""
+                for per in mvcc_dev_info.SpecialInfo.stUsb3VInfo.chModelName:
+                    if per == 0:
+                        break
+                    strModeName = strModeName + chr(per)
+                logger.info("device model name: %s" % strModeName)
 
-            strSerialNumber = ""
-            for per in mvcc_dev_info.SpecialInfo.stUsb3VInfo.chSerialNumber:
-                if per == 0:
-                    break
-                strSerialNumber = strSerialNumber + chr(per)
-            logger.info("user serial number: %s" % strSerialNumber)
+                strSerialNumber = ""
+                for per in mvcc_dev_info.SpecialInfo.stUsb3VInfo.chSerialNumber:
+                    if per == 0:
+                        break
+                    strSerialNumber = strSerialNumber + chr(per)
+                logger.info("user serial number: %s" % strSerialNumber)
 
-    nConnectionNum = 0
+        nConnectionNum = 0
 
-    if int(nConnectionNum) >= deviceList.nDeviceNum:
-        logger.info("intput error!")
-        sys.exit()
+        if int(nConnectionNum) >= deviceList.nDeviceNum:
+            logger.error("intput error! 10秒后重试...")
+            time.sleep(10)
+            continue
 
-    # ch:创建相机实例 | en:Creat Camera Object
-    cam = MvCamera()
-    # ch:选择设备并创建句柄| en:Select device and create handle
-    stDeviceList = cast(deviceList.pDeviceInfo[int(nConnectionNum)], POINTER(MV_CC_DEVICE_INFO)).contents
+        # ch:创建相机实例 | en:Creat Camera Object
+        cam = MvCamera()
+        # ch:选择设备并创建句柄| en:Select device and create handle
+        stDeviceList = cast(deviceList.pDeviceInfo[int(nConnectionNum)], POINTER(MV_CC_DEVICE_INFO)).contents
 
-    ret = cam.MV_CC_CreateHandle(stDeviceList)
-    #cam.MV_CC_CreateHandle(stDeviceList)
-    #if ret != 0:
-    #    logger.info ("create handle fail! ret[0x%x]" % ret)
-    #    sys.exit()
+        ret = cam.MV_CC_CreateHandle(stDeviceList)
+        if ret != 0:
+            logger.error("create handle fail! ret[0x%x], 10秒后重试..." % ret)
+            time.sleep(10)
+            continue
 
-    # ch:打开设备 | en:Open device
-    ret = cam.MV_CC_OpenDevice(MV_ACCESS_Exclusive, 0)
-    #cam.MV_CC_OpenDevice(MV_ACCESS_Exclusive, 0)
-    #if ret != 0:
-    #    logger.info ("open device fail! ret[0x%x]" % ret)
-    #    sys.exit()
+        # ch:打开设备 | en:Open device
+        ret = cam.MV_CC_OpenDevice(MV_ACCESS_Exclusive, 0)
+        if ret != 0:
+            logger.error("open device fail! ret[0x%x], 10秒后重试..." % ret)
+            time.sleep(10)
+            continue
 
-    # ch:设置触发模式为off | en:Set trigger mode as off
-    ret = cam.MV_CC_SetEnumValue("TriggerMode", MV_TRIGGER_MODE_OFF)
-    #cam.MV_CC_SetEnumValue("TriggerMode", MV_TRIGGER_MODE_OFF)
-    #if ret != 0:
-    #    logger.info ("set trigger mode fail! ret[0x%x]" % ret)
-    #    sys.exit()
+        # ch:设置触发模式为off | en:Set trigger mode as off
+        ret = cam.MV_CC_SetEnumValue("TriggerMode", MV_TRIGGER_MODE_OFF)
+        if ret != 0:
+            logger.error("set trigger mode fail! ret[0x%x], 10秒后重试..." % ret)
+            time.sleep(10)
+            continue
 
-    # ch:获取数据包大小 | en:Get payload size
-    stParam =  MVCC_INTVALUE()
-    memset(byref(stParam), 0, sizeof(MVCC_INTVALUE))
+        # ch:获取数据包大小 | en:Get payload size
+        stParam =  MVCC_INTVALUE()
+        memset(byref(stParam), 0, sizeof(MVCC_INTVALUE))
 
-    ret = cam.MV_CC_GetIntValue("PayloadSize", stParam)
-    #cam.MV_CC_GetIntValue("PayloadSize", stParam)
-    #if ret != 0:
-    #    logger.info ("get payload size fail! ret[0x%x]" % ret)
-    #    sys.exit()
-    nPayloadSize = stParam.nCurValue
+        ret = cam.MV_CC_GetIntValue("PayloadSize", stParam)
+        if ret != 0:
+            logger.error("get payload size fail! ret[0x%x], 10秒后重试..." % ret)
+            time.sleep(10)
+            continue
+        nPayloadSize = stParam.nCurValue
 
-    # ch:开始取流 | en:Start grab image
-    ret = cam.MV_CC_StartGrabbing()
-    #cam.MV_CC_StartGrabbing()
-    #if ret != 0:
-    #    logger.info ("start grabbing fail! ret[0x%x]" % ret)
-    #    sys.exit()
+        # ch:开始取流 | en:Start grab image
+        ret = cam.MV_CC_StartGrabbing()
+        if ret != 0:
+            logger.error("start grabbing fail! ret[0x%x], 10秒后重试..." % ret)
+            time.sleep(10)
+            continue
 
-    data_buf = (c_ubyte * nPayloadSize)()
+        data_buf = (c_ubyte * nPayloadSize)()
 
-    stFrameInfo = MV_FRAME_OUT_INFO_EX()
-    return cam, data_buf, nPayloadSize, stFrameInfo
+        stFrameInfo = MV_FRAME_OUT_INFO_EX()
+        return cam, data_buf, nPayloadSize, stFrameInfo
 
 # 获取7天数据
 def day_get(d):
@@ -223,7 +215,7 @@ def trigger_grab(flags):
     delay = config.get("Configuration", "time")
     url = 'http://172.16.68.111:8899/grab'
     data = {"flags": flags, "speed": speed, "time": delay}
-    requests.post(url, json=data)
+    requests.post(url, json=data, timeout=30)
 
 
 @app.after_request
@@ -404,7 +396,7 @@ def get_statistics():
     total_rows = database.select_data(sql_total)
     total_num = total_rows[0][0]
     sql_defects = database.select_instructions('count(distinct uuid)', 'defect_list',
-        "where name='hua_shang' or name='zang_wu' or name='zhen_kong'")
+        "where name='ca_shang' or name='zang_wu' or name='zhe_zhou' or name='zhen_kong'")
     defect_rows = database.select_data(sql_defects)
     defect_num = defect_rows[0][0]
     result = {
@@ -521,13 +513,10 @@ class Consumer(threading.Thread):
                                 files = {'image_file': image_bytes}
                                 inference_start_time = time.time()
                                 logger.info('开始检测')
-                                response = requests.post(url, files=files)
+                                response = requests.post(url, files=files, timeout=30)
                                 logger.info('推理服务耗费：{}'.format(time.time() - inference_start_time))
-                                fps = 10 / (time.time() - frame_start_time)
+                                processing_rate = 10 / (time.time() - frame_start_time)
                                 inference_result = json.loads(response.text)
-                                logger.info(inference_result)
-                                inference_result = post_processing(inference_result)
-                                logger.info("处理后")
                                 logger.info(inference_result)
                                 if inference_result['len'] > 0:
                                     all_normal = all(
@@ -539,8 +528,8 @@ class Consumer(threading.Thread):
                                             annotated_image = cv2.cvtColor(annotated_image, cv2.COLOR_GRAY2RGB)
                                         except:
                                             annotated_image = annotated_image
-                                        fps_label = "(Capture) {:.1f} FPS".format(fps)
-                                        cv2.putText(annotated_image, fps_label, (180, 30),
+                                        processing_rate_label = "(Capture) {:.1f} FPS".format(processing_rate)
+                                        cv2.putText(annotated_image, processing_rate_label, (180, 30),
                                             cv2.FONT_HERSHEY_COMPLEX, 0.3, (38, 0, 255), 1)
                                         cv2.imwrite(file_name, annotated_image)
                                         database.insert_data(uid, file_name, 'zheng_chang', None, None)
@@ -561,7 +550,7 @@ class Consumer(threading.Thread):
                                                 score = detection['score']
                                                 loc = detection['loc']
                                                 inference_time = detection['prediction_time']
-                                                fps_label = "(Capture) {:.1f} FPS".format(fps)
+                                                processing_rate_label = "(Capture) {:.1f} FPS".format(processing_rate)
                                                 x1 = int(loc[0])
                                                 y1 = int(loc[1])
                                                 x2 = int(loc[2])
@@ -579,7 +568,7 @@ class Consumer(threading.Thread):
                                                     '{} {:.2f}%'.format(class_name_cn, score * 100),
                                                     font=font, fill="green")
                                                 annotated_image = np.array(pil_image)
-                                                cv2.putText(annotated_image, fps_label, (180, 30),
+                                                cv2.putText(annotated_image, processing_rate_label, (180, 30),
                                                     cv2.FONT_HERSHEY_COMPLEX, 0.3, (38, 0, 255), 1)
                                                 cv2.imwrite(file_name, annotated_image)
                                                 # 缺陷信息插入数据库
@@ -594,8 +583,8 @@ class Consumer(threading.Thread):
                                         annotated_image = cv2.cvtColor(annotated_image, cv2.COLOR_GRAY2RGB)
                                     except:
                                         annotated_image = annotated_image
-                                    fps_label = "(Capture) {:.1f} FPS".format(fps)
-                                    cv2.putText(annotated_image, fps_label, (180, 30),
+                                    processing_rate_label = "(Capture) {:.1f} FPS".format(processing_rate)
+                                    cv2.putText(annotated_image, processing_rate_label, (180, 30),
                                         cv2.FONT_HERSHEY_COMPLEX, 0.3, (38, 0, 255), 1)
                                     cv2.imwrite(file_name, annotated_image)
                                     database.insert_data(uid, file_name, 'zheng_chang', None, None)
@@ -642,7 +631,6 @@ def video_feed():
         p.start()
         c = Consumer()
         c.start()
-    frame_queue.queue.clear()
     return Response(gen(),
                     mimetype='multipart/x-mixed-replace;boundary=frame')
 
@@ -672,6 +660,6 @@ class ImageRetentionCleanup:
             if (defect_image_file + f) not in keep_files:
                 os.remove(defect_image_file + f)
 
-_image_cleanup = ImageRetentionCleanup()
 if __name__ == "__main__":
-    app.run(host='0.0.0.0', debug=True, use_reloader=False, port=7777)
+    ImageRetentionCleanup()
+    app.run(host='0.0.0.0', debug=False, use_reloader=False, port=7777)

@@ -259,7 +259,7 @@ class GrabTaskConsumer(threading.Thread):
 
 
 _consumer = GrabTaskConsumer()
-_consumer.setDaemon(True)
+_consumer.daemon = True
 _consumer.start()
 
 if __name__ == '__main__':
