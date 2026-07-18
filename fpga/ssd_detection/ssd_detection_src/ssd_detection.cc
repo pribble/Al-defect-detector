@@ -153,7 +153,11 @@ public:
     std::unique_ptr<Tensor> input_tensor1(std::move(predictor_->GetInput(1)));
     input_tensor1->Resize({ 1, 3, input_shape, input_shape});
     auto* data1 = input_tensor1->mutable_data<float>();
-    preprocessImg(frame, data1);
+    if (frame.channels() == 1) {
+      preprocessImgGray(frame, data1);
+    } else {
+      preprocessImg(frame, data1);
+    }
 
     // input2
     std::unique_ptr<Tensor> input_tensor2(std::move(predictor_->GetInput(2)));
@@ -265,11 +269,37 @@ private:
   }
 
   void preprocessImg(const cv::Mat& img, float* data) {
-    cv::resize(img, rgb_img, rgb_img.size(), 0.f, 0.f, cv::INTER_CUBIC);
+    // img is already 300×300 (Pi resizes before sending; detect_image_file resizes explicitly)
+    img.copyTo(rgb_img);
 
     rgb_img.convertTo(img_float, CV_32FC3, 1);
     const float* dimg = reinterpret_cast<const float*>(img_float.data);
     neon_mean_scale(dimg, data);
+  }
+
+  // Single-channel input → 3-channel NCHW tensor (no cvtColor, no redundant channel copy)
+  void preprocessImgGray(const cv::Mat& img, float* data) {
+    cv::Mat img_float;
+    img.convertTo(img_float, CV_32FC1, 1.0);
+    const float* din = reinterpret_cast<const float*>(img_float.data);
+
+    const int size = input_shape * input_shape;
+    float* dout_c0 = data;
+    float* dout_c1 = data + size;
+    float* dout_c2 = data + size * 2;
+
+    float mean = img_data.mean_[0];
+    float scale = 1.f / img_data.scale_[0];
+    float32x4_t vmean = vdupq_n_f32(mean);
+    float32x4_t vscale = vdupq_n_f32(scale);
+
+    for (int i = 0; i < size; i += 4) {
+      float32x4_t vin = vld1q_f32(din + i);
+      float32x4_t vscaled = vmulq_f32(vsubq_f32(vin, vmean), vscale);
+      vst1q_f32(dout_c0 + i, vscaled);
+      vst1q_f32(dout_c1 + i, vscaled);
+      vst1q_f32(dout_c2 + i, vscaled);
+    }
   }
 
   // fill tensor with mean and scale and trans layout: nhwc -> nchw, neon speed up
@@ -339,6 +369,9 @@ void detect_image_file(Detector& detector, std::string input_path){
 
     auto start = std::chrono::steady_clock::now();
 
+    // Resize to model input size
+    cv::resize(img, img, cv::Size(input_shape, input_shape), 0, 0, cv::INTER_CUBIC);
+
     auto objects = detector.Detect(img);
     detector.visualize_result(objects, img);
 
@@ -361,10 +394,13 @@ void detect_camera_frame(Detector& detector){
   svr.new_task_queue = [] { return new ThreadPool(1); };
   svr.Post("/predict", [&detector](const Request &req, Response &res) {
     auto image_file = req.get_file_value("image_file");
-    cv::Mat img_decode;
-    // 对获取的图片进行处理
-    std::vector<uchar> data(image_file.content.begin(), image_file.content.end());
-    img_decode = cv::imdecode(data, cv::IMREAD_COLOR);
+    // Pi sends raw 300×300 grayscale pixels (no JPEG encode/decode, no cvtColor)
+    if (image_file.content.size() != 300 * 300) {
+      std::cerr << "[ERROR] Invalid image data size: " << image_file.content.size() << "\n";
+      res.set_content("{\"len\":0,\"action\":\"OK\",\"result\":[]}", "application/json");
+      return;
+    }
+    cv::Mat img_decode(300, 300, CV_8UC1, (void*)image_file.content.data());
 
     if (img_decode.empty()) {
       std::cerr << "[ERROR] Failed to decode image\n";
@@ -379,7 +415,10 @@ void detect_camera_frame(Detector& detector){
 
     // Build JSON response matching HaoYao GrabImage expectations
     std::ostringstream json;
-    json << "{\"len\":" << objects.size() << ",\"result\":[";
+    bool has_defect = objects.size() > 0;
+    json << "{\"len\":" << objects.size()
+         << ",\"action\":\"" << (has_defect ? "NG" : "OK") << "\""
+         << ",\"result\":[";
     for (size_t i = 0; i < objects.size(); i++) {
       if (i > 0) json << ",";
       auto& obj = objects[i];

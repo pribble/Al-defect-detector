@@ -274,7 +274,11 @@ class Consumer(threading.Thread):
 
         uid = str(uuid.uuid1())
         file_name = os.path.join(FILES_DIR, '{}.jpg'.format(uid))
-        image_bytes = cv2.imencode(".jpg", annotated_image)[1].tobytes()
+
+        # Resize to 300×300 for FPGA inference (SSD MobileNet input size)
+        inference_image = cv2.resize(annotated_image, (300, 300))
+        # Send raw grayscale pixels — no JPEG encode/decode overhead
+        image_bytes = inference_image.tobytes()
 
         inference_start_time = time.time()
         logger.info('开始检测')
@@ -345,7 +349,11 @@ class Consumer(threading.Thread):
 
     @staticmethod
     def _draw_defect_box(image, loc, class_name_cn: str, score: float, fps: float):
-        x1, y1, x2, y2 = [int(v) for v in loc]
+        # Scale coordinates from 300×300 inference space to actual image size
+        h, w = image.shape[:2]
+        scale_x = w / 300.0
+        scale_y = h / 300.0
+        x1, y1, x2, y2 = [int(v * (scale_x if i % 2 == 0 else scale_y)) for i, v in enumerate(loc)]
         cv2.rectangle(image, (x1, y1), (x2, y2), (255, 0, 0), 1)
 
         try:
