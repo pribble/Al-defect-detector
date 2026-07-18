@@ -79,10 +79,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `grab_image.py` | Standalone grab + OpenCV display with keypress save. **Not used in production.** |
 
 Key runtime flows in `api.py`:
-- `Producer.run()` — reads camera frames via MVS SDK, puts resized frames in `q1` Queue, updates `stream_image` for video feed
-- `Consumer.run()` — processes 1 in 10 frames: SSIM trigger logic (compare with `yuanshi.jpg`) → POST to FPGA server → parse results → save images → trigger arm via HTTP / alarm via `/dev/BAOJING`
+- `Producer.run()` — reads camera frames via MVS SDK, puts resized frames in `frame_queue`, updates `stream_image` for video feed. Auto-retries on init failure (10s interval).
+- `Consumer.run()` — processes 1 in 10 frames: SSIM trigger logic (compare with `yuanshi.jpg`) → POST to FPGA server (`timeout=30`) → parse results → save images → trigger arm via HTTP / alarm via `/dev/BAOJING`
 - `compare_image()` — SSIM between current frame and reference (`yuanshi.jpg`, committed in repo)
-- `DeleteImg` — cleanup thread: keeps 10 most recent images, deletes rest (runs **once** at import time)
+- `ImageRetentionCleanup` — cleanup thread: keeps 10 most recent images, deletes rest (starts with service, not at import)
 - Flask routes: `/` (UI), `/img` (video stream), `/get_history`, `/get_detect_pic`, `/get_num`, `/get_statistics`, `/get_seven_days_num`, `/get_conf`, `/change_conf`
 
 ### ArmControl/ — Robotic arm controller (Flask :8899)
@@ -154,7 +154,7 @@ MvImport          # Hikvision MVS SDK (in-repo wrapper)
 | `/dev/XIPAN` | `ttyUSB0` | Serial port (arm control) |
 | `/dev/BAOJING` | `input/event0` | Input event device (alarm) |
 
-**`/dev/BAOJING` is NOT a serial port** — it's a Linux input event device. The code in `api.py` opens it with `serial.Serial()` and writes raw bytes, which likely does not work as intended. The exception handler in `bao_jing_async()` silently catches the failure.
+**`/dev/BAOJING` — 接线未知**, 代码用 `serial.Serial()` 操作。硬件类型待确认。
 
 ## Frontend
 
@@ -172,18 +172,6 @@ The Pi has a Docker container `yahboomtechnology/ros-melodic:dofbot` with:
 
 Old stopped containers from 16 months ago: `ros-melodic:1.2`, `ros2-foxy:2.0.1`.
 
-## Known Issues (verified bugs)
-
-1. **`requests.post` missing timeout** — Consumer blocks forever if FPGA server hangs (`GrabImage/api.py:504`). Also affects arm control POST (`GrabImage/api.py:225`). Fix: add `timeout=30`.
-2. **`initMvCamera()` error checks commented out** — Camera init silently fails (`GrabImage/api.py:158-186`). Fix: restore return value checks.
-3. **Camera reconnect calls `sys.exit()`** — If re-init fails, entire process dies (`GrabImage/api.py:427-431`). Fix: retry loop instead of exit.
-4. **`/dev/BAOJING` is `input/event0`, not a serial port** — `serial.Serial()` opens it but writes likely have no effect (`GrabImage/api.py:32, 87-96`). Alarm may never actually sound. Fix: investigate the actual alarm hardware, use correct interface.
-5. **`hua_shang` vs `ca_shang` in SQL** — Statistics query uses `hua_shang` but model returns `ca_shang` (`GrabImage/api.py:393`). `ca_shang` defects never counted.
-6. **`q1.queue.clear()` on video feed** — Every `/img` request discards pending processing frames (`GrabImage/api.py:616`).
-7. **`debug=True` in production** — Flask debug mode exposes info (`GrabImage/api.py:645`).
-8. **Hardcoded IPs** — `172.16.68.111` and `172.16.68.110` hardcoded (`GrabImage/api.py:223, 500`).
-
-## Missing from this repository
 
 - `requirements.txt` — dependencies not consolidated
 - `nginx.conf` — mentioned in ArmControl README but not in repo
