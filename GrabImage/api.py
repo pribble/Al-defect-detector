@@ -397,8 +397,8 @@ def cleanup():
 # ============================================================
 
 from routes import bp
-app.register_blueprint(bp)
 
+app.register_blueprint(bp)
 
 # ============================================================
 # 入口

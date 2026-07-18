@@ -24,46 +24,14 @@ from logger import setup_log
 logger = setup_log("arm", "api_server.log")
 
 # ============================================================
-# 物理布局 (俯视图, 机械臂基座中心为 XY 原点)
-# ============================================================
-#
-#          NG区 (左侧)                    OK区 (右侧)
-#     ┌──────────────────┐          ┌──────────────────┐
-#     │   150 × 120 mm   │          │   150 × 120 mm   │
-#     │ 长边 ⊥ 机械臂朝向 │          │ 长边 ⊥ 机械臂朝向 │
-#     │ 中心 (-60, 0)    │          │ 中心 (+60, 0)    │
-#     └────────┬─────────┘          └────────┬─────────┘
-#              │                             │
-#              └─────────────┬───────────────┘
-#                            │
-#                       ┌────┴────┐
-#                       │ 机械臂   │
-#                       │  基座    │
-#                       └────┬────┘
-#                            │ Y+
-#                       ┌────┴────┐
-#                       │ 吸取点   │
-#                       │ (0, 200) │
-#                       └─────────┘
-#
-# Z=0 参考面 = 传送带 / 工作台面
-# 舵机 ID 对应 (以幻尔 5-DOF 总线舵机臂为例):
-#   ID 1: 基座旋转 (yaw)
-#   ID 2: 肩部俯仰 (pitch)
-#   ID 3: 肘部俯仰 (pitch)
-#   ID 4: 腕部俯仰 (pitch)
-#   ID 5: 末端旋转 (控制吸盘朝向)
-# ============================================================
-
-# ============================================================
 # 常量
 # ============================================================
 
 # --- 吸盘时序 (秒) ---
-SUCTION_HOLD = 0.6      # 吸取后保持, 确保真空建立
-RELEASE_HOLD = 0.4      # 释放后保持, 确保气压释放完毕
-LIFT_PAUSE = 0.3        # 放置后抬起前短暂停顿, 避免带偏工件
-POST_RELEASE = 0.3      # 释放后等待吸盘完全脱离
+SUCTION_HOLD = 0.6  # 吸取后保持, 确保真空建立
+RELEASE_HOLD = 0.4  # 释放后保持, 确保气压释放完毕
+LIFT_PAUSE = 0.3  # 放置后抬起前短暂停顿, 避免带偏工件
+POST_RELEASE = 0.3  # 释放后等待吸盘完全脱离
 
 # --- 舵机角度预设 (以下为占位值, 必须现场标定) ---
 # 格式: [ID1_基座, ID2_肩, ID3_肘, ID4_腕, ID5_末端]
@@ -72,37 +40,36 @@ POST_RELEASE = 0.3      # 释放后等待吸盘完全脱离
 HOME = [90, 90, 90, 0, 90]
 
 # 吸取位: 基座居中, 末端到达正前方 200mm 传送带面
-PICKUP = [90, 38, 26, 22, 90]           # ← 需标定
+PICKUP = [90, 38, 26, 22, 90]  # ← 需标定
 
 # 吸取后抬高: 从吸取点垂直抬起, 基座保持居中, 留出旋转空间
 PICKUP_LIFT = [90, 90, 0, 90, 90]
 
 # OK 放置位上方: 基座右转, 末端在 OK 区正上方 (安全高度)
-OK_ABOVE = [-10, 90, 90, 0, 90]         # ← 需标定
+OK_ABOVE = [-10, 90, 90, 0, 90]  # ← 需标定
 
 # OK 放置位: 基座右转, 末端到达右侧区域中心 (+60, 0) 传送带面
-OK_PLACE = [-10, 65, 0, 30, 90]         # ← 需标定
+OK_PLACE = [-10, 65, 0, 30, 90]  # ← 需标定
 
 # NG 放置位上方: 基座左转, 末端在 NG 区正上方 (安全高度)
-NG_ABOVE = [196, 90, 90, 0, 90]         # ← 需标定
+NG_ABOVE = [196, 90, 90, 0, 90]  # ← 需标定
 
 # NG 放置位: 基座左转, 末端到达左侧区域中心 (-60, 0) 传送带面
-NG_PLACE = [196, 55, 11, 24, 90]        # ← 需标定
+NG_PLACE = [196, 55, 11, 24, 90]  # ← 需标定
 
 # --- 串口 ---
 SERIAL_PORT = '/dev/XIPAN'
 SERIAL_BAUD = 9600
 
 # 气泵控制指令 (Modbus-RTU)
-GRIP_ON = bytes.fromhex('A0 01 01 A2')      # 继电器吸合 → 气泵吸气
-GRIP_OFF = bytes.fromhex('A0 01 00 A1')     # 继电器断开 → 气泵释放
+GRIP_ON = bytes.fromhex('A0 01 01 A2')  # 继电器吸合 → 气泵吸气
+GRIP_OFF = bytes.fromhex('A0 01 00 A1')  # 继电器断开 → 气泵释放
 
 # --- 舵机运动参数 ---
-SLOW_SERVO_ID = 5           # 末端旋转舵机, 运动稍慢
-SLOW_SERVO_FACTOR = 1.2     # 补偿系数
-SLOW_SERVO_DELAY = 0.1      # 启动前延迟 (秒)
-FAST_SERVO_DELAY = 0.01     # 普通舵机间延迟 (秒)
-
+SLOW_SERVO_ID = 5  # 末端旋转舵机, 运动稍慢
+SLOW_SERVO_FACTOR = 1.2  # 补偿系数
+SLOW_SERVO_DELAY = 0.1  # 启动前延迟 (秒)
+FAST_SERVO_DELAY = 0.01  # 普通舵机间延迟 (秒)
 
 # ============================================================
 # 初始化
@@ -200,9 +167,9 @@ def grab_task(data: dict):
     """
     logger.info("分拣开始, flags=%s", data.get('flags'))
 
-    speed = int(data['speed'])          # 舵机运动速度 (ms)
-    delay = int(data.get('time', 0))    # 传送带延迟 (秒)
-    flags = data['flags']               # "OK" 或 "NG"
+    speed = int(data['speed'])  # 舵机运动速度 (ms)
+    delay = int(data.get('time', 0))  # 传送带延迟 (秒)
+    flags = data['flags']  # "OK" 或 "NG"
 
     # --- 步骤0: 等待铝片从相机位置行进到吸取点 ---
     if delay > 0:
@@ -210,7 +177,7 @@ def grab_task(data: dict):
         time.sleep(delay)
 
     # --- 步骤1: HOME → 吸取点 ---
-    logger.info("→ 移动到吸取点 (正前方 200mm)")
+    logger.info("→ 移动到吸取点")
     arm_move(HOME, speed)
     arm_move(PICKUP, speed)
 
@@ -225,11 +192,11 @@ def grab_task(data: dict):
 
     # --- 步骤4: 平移 → 放置 ---
     if flags == "OK":
-        logger.info("→ 移至 OK 区 (右侧 +60mm)")
+        logger.info("→ 移至 OK 区")
         arm_move(OK_ABOVE, speed)
         arm_move(OK_PLACE, speed)
     else:
-        logger.info("→ 移至 NG 区 (左侧 -60mm)")
+        logger.info("→ 移至 NG 区")
         arm_move(NG_ABOVE, speed)
         arm_move(NG_PLACE, speed)
 
@@ -299,6 +266,7 @@ def grab():
 
 class GrabTaskConsumer(threading.Thread):
     """队列消费者: 串行执行抓取任务, 防止并发冲突"""
+
     def run(self):
         while True:
             try:
@@ -312,7 +280,6 @@ class GrabTaskConsumer(threading.Thread):
 _consumer = GrabTaskConsumer()
 _consumer.daemon = True
 _consumer.start()
-
 
 if __name__ == '__main__':
     app.run(debug=False, host='0.0.0.0', port=8899)
