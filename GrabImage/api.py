@@ -32,7 +32,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '../tools'))
 from logger import setup_log
 
 import database
-from camera import init_camera, Producer, CAMERA_NEED_RESTART
+from camera import Producer
 
 # ============================================================
 # 路径常量
@@ -517,7 +517,7 @@ class Consumer(threading.Thread):
 
     # ---- 推理管线 ----
 
-    def _run_inference_pipeline(self, image, frame_start_time: float):
+    def _run_inference_pipeline(self, frame_start_time: float):
         """
         执行 FPGA 推理并处理结果.
 
@@ -564,7 +564,8 @@ class Consumer(threading.Thread):
         else:
             self._handle_defect(inference_result, uid, file_name, annotated_image, original_image, processing_rate)
 
-    def _save_normal_result(self, uid, file_name, annotated_image, original_image, processing_rate):
+    @staticmethod
+    def _save_normal_result(uid, file_name, annotated_image, original_image, processing_rate):
         """保存正常检测结果: 写入文件 + 数据库"""
         try:
             annotated_image = cv2.cvtColor(annotated_image, cv2.COLOR_GRAY2RGB)
@@ -607,7 +608,8 @@ class Consumer(threading.Thread):
         cv2.imwrite(original_image_path, original_image)
         cv2.imwrite(detect_image_path, annotated_image)
 
-    def _draw_defect_box(self, image, loc, class_name_cn: str, score: float, fps: float):
+    @staticmethod
+    def _draw_defect_box(image, loc, class_name_cn: str, score: float, fps: float):
         """在图片上绘制缺陷边框和标签"""
         x1, y1, x2, y2 = [int(v) for v in loc]
         cv2.rectangle(image, (x1, y1), (x2, y2), (255, 0, 0), 1)
