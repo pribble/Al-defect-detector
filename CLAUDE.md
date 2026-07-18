@@ -65,11 +65,16 @@ GrabImage/
 ArmControl/
 ├── api.py        # Flask app, grab_task sequence, GrabTaskConsumer queue
 ├── api.service   # systemd unit
-├── run.sh        # Starts api.py
-└── dist/         # Pre-built Vue.js SPA (Element UI), served by nginx
-    ├── index.html
-    ├── config.json  # Points to 172.16.68.111:8899 (ArmControl API) and :7777 (GrabImage API)
-    └── js/, css/    # Compiled Vue.js assets
+└── run.sh        # Starts api.py
+```
+
+### frontend/ (SPA)
+
+```
+frontend/
+├── index.html    # Self-contained app (Vue 2 + Element UI + ECharts), no build step
+├── config.json   # API endpoints: ArmControl :8899, GrabImage :7777
+└── vendor/       # Local libraries (Vue 2, Element UI, ECharts, Axios)
 ```
 
 ### fpga/ (inference server — see fpga/CLAUDE.md for full details)
@@ -212,17 +217,86 @@ export MVCAM_COMMON_RUNENV=/opt/MVS/lib
 export CRYPTOGRAPHY_ALLOW_OPENSSL_102=1
 ```
 
+## Common Commands
+
+### Deploy & Restart
+
+```bash
+# Push Pi code (dry-run first, then confirms)
+bash deploy.sh [user@pi-ip] [/opt/HaoYao]
+
+# Restart both services on Pi
+bash restart.sh
+
+# Service control on Pi
+systemctl start|stop|restart|status detect-api.service   # GrabImage :7777
+systemctl start|stop|restart|status api.service           # ArmControl :8899
+systemctl status nginx.service                            # Frontend :80/:8080
+```
+
+### FPGA Build & Deploy
+
+```bash
+# Cross-compile SSD detection binary (x86_64 host → armv7hf target)
+cd fpga && bash detect_build.sh
+
+# Incrementally sync to FPGA board (172.16.68.110)
+cd fpga && bash upload.sh
+
+# On FPGA board: start/stop inference service
+systemctl start|stop|status detect.service
+```
+
+### Logs
+
+```bash
+journalctl -u detect-api.service -n 50 --no-pager -l   # Pi detect service
+journalctl -u api.service -n 50 --no-pager -l           # Pi arm service
+tail -f /var/logs/detect_server.log                     # GrabImage debug log
+tail -f /var/logs/api_server.log                        # ArmControl debug log
+```
+
+### Tests & Lint
+
+No test framework or linter is configured in this repository.
+
+### Image Inference Pipeline
+
+Current optimized flow (300×300 grayscale raw pixels, no JPEG):
+
+```
+Pi: 768×512 gray → cv2.resize(300×300) → .tobytes() → POST
+FPGA: Mat(300×300, CV_8UC1) → preprocessImgGray (1-ch NEON → 3-ch NCHW tensor) → model
+```
+
+Detection coordinates (in 300×300 space from FPGA) are scaled back to 768×512 for result image annotation via `_draw_defect_box`.
+
+### FPGA Inference Server (cross-reference)
+
+The `fpga/` directory is a separate C++ cross-compiled project (Cyclone V SoC FPGA, Paddle-Lite, SSD MobileNet V1). See `fpga/CLAUDE.md` for full build/deploy instructions, HTTP API reference, and FPGA architecture details. Key points:
+
+- Build: cross-compile on x86_64 → deploy to `172.16.68.110:/opt/paddle_frame`
+- HTTP `/predict`: POST multipart with field `image_file` (raw 300×300 grayscale bytes)
+- Response: `{"len":N, "action":"OK"/"NG", "result":[{"class_name","loc","score","prediction_time"}]}`
+- Confidence threshold: 0.45 (hardcoded)
+- Label classes: ca_shang (scratch), zang_wu (dirt), zhe_zhou (wrinkle), zhen_kong (pinhole)
+
 ## Frontend
 
-Two paths to the same Vue.js SPA:
+Self-contained single-page application at `frontend/index.html`. No build step — libraries (Vue 2, Element UI, ECharts, Axios) are served locally from `frontend/vendor/`.
+
+Two URLs serving the same app:
 - `http://172.16.68.111` (nginx :80)
 - `http://172.16.68.111:8080` (nginx :8080)
 
-Both serve `ArmControl/dist/` — a pre-built Vue 2 + Element UI application compiled by `vue-cli`. Source is not in this repo. The SPA connects to:
-- ArmControl API at `http://172.16.68.111:8899` (configured in `dist/config.json`)
-- GrabImage API at `http://172.16.68.111:7777` for stats/history/stream
+Configured via `frontend/config.json`:
+```json
+{"ip": "http://172.16.68.111:8899", "url": "http://172.16.68.111:7777"}
+```
 
-Live MJPEG video stream at `http://172.16.68.111:7777/img` (Flask-rendered Bootstrap page at root `/`).
+Features: live MJPEG stream, statistics (pie + 7-day trend lines), manual arm control, conveyor calibration, history browser with defect images.
+
+Live MJPEG video stream at `http://172.16.68.111:7777/img`. Flask-rendered Bootstrap page at `http://172.16.68.111:7777/`.
 
 ## MVS SDK Python Bindings
 
