@@ -135,6 +135,18 @@ def get_this_month_num():
     return json.dumps([[{row[0]: row[1]} for row in defect_counts]])
 
 
+@bp.route('/get_today_num', methods=['GET'])
+def get_today_num():
+    """按缺陷类型统计当日总数"""
+    defect_counts = database.query(
+        'name, count(1) AS counts', 'defect_list',
+        "where path is not null and path != 'detect.jpg'"
+        " and CreatedTime >= datetime('now', 'start of day')"
+        " group by name"
+    )
+    return json.dumps([[{row[0]: row[1]} for row in defect_counts]])
+
+
 def _day_get(d):
     """生成最近 7 天的日期字符串 (MM-DD), 供统计使用"""
     for i in range(0, 7):

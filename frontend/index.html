@@ -264,7 +264,13 @@ body{width:100%;height:100vh;overflow:hidden}
                 <div class="echarts-item-content" ref="monthlyChart"></div>
               </div>
 
-              <!-- Chart 3: 7-day per-type trend (multi-line) -->
+              <!-- Chart 3: Today's defect distribution (bar) -->
+              <div class="echarts-item">
+                <h6 class="echarts-item-title">当日内缺陷分布统计<span>（个）</span></h6>
+                <div class="echarts-item-content" ref="todayChart"></div>
+              </div>
+
+              <!-- Chart 4: 7-day per-type trend (multi-line) -->
               <div class="echarts-item">
                 <h6 class="echarts-item-title">七日内缺陷类型趋势<span>（个）</span></h6>
                 <div class="echarts-item-content" ref="trendChart"></div>
@@ -319,6 +325,7 @@ function apiGetDetectPic(conf){ return http.get(conf.url+'/get_detect_pic') }
 function apiGetNum(conf){ return http.get(conf.url+'/get_num') }
 function apiGetStatistics(conf){ return http.get(conf.url+'/get_statistics') }
 function apiGetMonthNum(conf){ return http.get(conf.url+'/get_this_month_num') }
+function apiGetTodayNum(conf){ return http.get(conf.url+'/get_today_num') }
 function apiGetSevenDaysByType(conf){ return http.get(conf.url+'/get_seven_days_by_type') }
 function apiCalibration(conf, mode){ return http.post(conf.url+'/calibration', {mode:mode}) }
 function apiCalStatus(conf){ return http.get(conf.url+'/calibration_status') }
@@ -367,7 +374,7 @@ var app = new Vue({
     defectKeys: {},
 
     // ECharts instances
-    charts: { pie: null, monthly: null, trend: null }
+    charts: { pie: null, monthly: null, today: null, trend: null }
   },
 
   mounted: function(){
@@ -389,6 +396,7 @@ var app = new Vue({
         // Init charts
         self.initPieChart();
         self.initMonthlyChart();
+        self.initTodayChart();
         self.initTrendChart();
 
         // Start polling
@@ -550,6 +558,21 @@ var app = new Vue({
         }
       });
     },
+    fetchTodayNum: function(){
+      var self = this;
+      apiGetTodayNum(CONFIG).then(function(r){
+        if (!r || !r.length || !r[0].length) return;
+        var merged = {};
+        DEFECT_ORDER.forEach(function(k){ merged[k]=0 });
+        r[0].forEach(function(d){ Object.assign(merged, d) });
+        var data = DEFECT_ORDER.map(function(k){
+          return {value: merged[k], itemStyle: {color: PIE_COLORS[k]}};
+        });
+        if (self.charts.today) {
+          self.charts.today.setOption({ series: [{ data: data, type:'bar', barWidth:30 }] });
+        }
+      });
+    },
     fetchSevenDaysByType: function(){
       var self = this;
       apiGetSevenDaysByType(CONFIG).then(function(r){
@@ -610,12 +633,17 @@ var app = new Vue({
       this.charts.monthly = echarts.init(this.$refs.monthlyChart);
       this.charts.monthly.setOption(this.baseChartOpt());
     },
+    initTodayChart: function(){
+      if (!this.$refs.todayChart) return;
+      this.charts.today = echarts.init(this.$refs.todayChart);
+      this.charts.today.setOption(this.baseChartOpt());
+    },
     initTrendChart: function(){
       if (!this.$refs.trendChart) return;
       this.charts.trend = echarts.init(this.$refs.trendChart);
       this.charts.trend.setOption({
         textStyle: {color:'#999'},
-        grid: {top:20,left:40,right:10,bottom:30},
+        grid: {top:20,left:40,right:10,bottom:38},
         xAxis: {type:'category',data:[],axisTick:{show:false},axisLine:{show:false}},
         yAxis: {type:'value',axisLine:{show:false},axisTick:{show:false},splitLine:{lineStyle:{color:'#e5e5e5'}}},
         tooltip: {trigger:'axis'},
@@ -633,7 +661,7 @@ var app = new Vue({
     fetchAll: function(){
       this.fetchHistory(); this.fetchOriginalPic(); this.fetchDetectPic();
       this.fetchStatistics(); this.fetchDefectNum(); this.fetchMonthNum();
-      this.fetchSevenDaysByType();
+      this.fetchTodayNum(); this.fetchSevenDaysByType();
     },
     startPolling: function(){
       var self = this;
@@ -643,6 +671,7 @@ var app = new Vue({
       setInterval(function(){ self.fetchStatistics() }, 3000);
       setInterval(function(){ self.fetchDefectNum() }, 60000);
       setInterval(function(){ self.fetchMonthNum() }, 60000);
+      setInterval(function(){ self.fetchTodayNum() }, 60000);
       setInterval(function(){ self.fetchSevenDaysByType() }, 60000);
     }
   },
