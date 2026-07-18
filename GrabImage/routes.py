@@ -39,7 +39,7 @@ def change_conf():
     """修改配置文件并写入磁盘, 同时更新内存缓存"""
     data = json.loads(request.get_data(as_text=True))
 
-    for key in ['time', 'speed', 'grab_position', 'release_position']:
+    for key in ['time', 'speed', 'camera_distance']:
         value = data.get(key, '')
         if len(value) > 0:
             shared.config.set("Configuration", key, value)
@@ -70,7 +70,16 @@ def get_history():
         name_rows = database.query(
             'name', 'defect_list', "where path='{}'".format(image_file)
         )
-        image_files.append({"name": name_rows, "img": _image_to_base64(image_file)})
+        time_rows = database.query(
+            'CreatedTime', 'defect_list',
+            "where path='{}' limit 1".format(image_file)
+        )
+        created_time = time_rows[0][0] if time_rows else ''
+        image_files.append({
+            "name": name_rows,
+            "img": _image_to_base64(image_file),
+            "time": created_time
+        })
     return json.dumps(image_files)
 
 
@@ -174,6 +183,67 @@ def get_statistics():
         "average_prediction_time": avg_time,
         "total_num": total_num,
         "defect_num": defect_num,
+    })
+
+
+@bp.route('/get_seven_days_by_type', methods=['GET'])
+def get_seven_days_by_type():
+    """返回最近 7 天每种类型的每日数量, 用于多线趋势图"""
+    defect_types = ['ca_shang', 'zhen_kong', 'zang_wu', 'zhe_zhou', 'zheng_chang']
+    offsets = ["+0", "-1", "-2", "-3", "-4", "-5", "-6"]
+    week_labels = _get_week_labels()
+
+    result = {}
+    for i, offset in enumerate(offsets):
+        label = week_labels[6 - i]
+        day_data = {}
+        for dtype in defect_types:
+            count = database.query(
+                'count(1)', 'defect_list',
+                "where path is not null and path != 'detect.jpg'"
+                " and name='{}'".format(dtype) +
+                " and CreatedTime >= datetime('now', 'start of day', '{} day')".format(offset) +
+                " and CreatedTime <  datetime('now', 'start of day', '{} day')".format(str(int(offset) + 1))
+            )[0][0]
+            day_data[dtype] = count
+        result[label] = day_data
+
+    return json.dumps(result)
+
+
+# ============================================================
+# 路由 — 标定模式
+# ============================================================
+
+@bp.route('/calibration', methods=['POST'])
+def calibration():
+    """启动/停止传送带速度标定"""
+    data = json.loads(request.get_data(as_text=True))
+    mode = data.get('mode', '')
+    if mode == 'start':
+        shared.calibration_active = True
+        shared.calibration_samples.clear()
+    elif mode == 'stop':
+        shared.calibration_active = False
+    return json.dumps({'mode': mode, 'active': shared.calibration_active})
+
+
+@bp.route('/calibration_status', methods=['GET'])
+def calibration_status():
+    """获取标定状态与结果"""
+    samples = list(shared.calibration_samples)
+    if len(samples) >= 3:
+        median_speed = sorted(samples)[len(samples) // 2]
+        camera_dist = float(shared.config.get("Configuration", "camera_distance"))
+        suggested_delay = round(camera_dist / median_speed, 1) if median_speed > 0 else 0
+    else:
+        median_speed = 0
+        suggested_delay = 0
+    return json.dumps({
+        'active': shared.calibration_active,
+        'sample_count': len(samples),
+        'speed': round(median_speed, 1),
+        'suggested_delay': suggested_delay,
     })
 
 

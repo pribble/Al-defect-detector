@@ -1,1 +1,656 @@
-<!DOCTYPE html><html lang=en><head><meta charset=utf-8><meta http-equiv=X-UA-Compatible content="IE=edge"><meta name=viewport content="width=device-width,initial-scale=1"><link rel=icon href=/favicon.ico><title>铝片检测</title><link href=/css/app.8e85f1c9.css rel=preload as=style><link href=/css/chunk-vendors.5f1cca6b.css rel=preload as=style><link href=/js/app.610c0e96.js rel=preload as=script><link href=/js/chunk-vendors.26b13fbb.js rel=preload as=script><link href=/css/chunk-vendors.5f1cca6b.css rel=stylesheet><link href=/css/app.8e85f1c9.css rel=stylesheet></head><body><noscript><strong>We're sorry but doesn't work properly without JavaScript enabled. Please enable it to continue.</strong></noscript><div id=app></div><script src=/js/chunk-vendors.26b13fbb.js></script><script src=/js/app.610c0e96.js></script></body></html>
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="favicon.ico">
+<title>铝片检测</title>
+<link rel="stylesheet" href="vendor/element-ui@2.15.14.css">
+<style>
+*{padding:0;margin:0;box-sizing:border-box}
+body{width:100%;height:100vh;overflow:hidden}
+#app{width:100%;height:100%;background:#f4f4fc;color:#666}
+
+/* Header */
+.header{height:60px;display:flex;background:#3879fb;color:#fff}
+.header .left,.header .right{width:25%;padding:0 70px;justify-content:flex-end;font-size:15px}
+.header .center,.header .left,.header .right{height:100%;display:flex;align-items:center}
+.header .center{width:50%;justify-content:center;position:relative;font-size:19px;font-weight:500;flex-direction:column}
+.header .center .center-text{font-size:30px}
+.header .center .mt_15{margin-top:5px}
+
+/* VBorder panels */
+.border{background:#fff;border-radius:3px;display:flex;flex-flow:column}
+.border .title{color:#343434;flex:0 0 40px;text-align:left;padding:0 20px;display:flex;align-items:center;font-size:15px}
+.border .title .icon{border-left:3px solid #3879fb;display:inline-block;margin-right:5px;height:15px}
+.border .centent{flex:1;background:#fff;padding:0 15px 15px;overflow:hidden;position:relative}
+
+/* Tips */
+.tip{font-size:14px;margin:0 10px;line-height:30px}
+
+/* Main layout */
+.main{height:calc(100% - 60px);padding:20px;display:flex}
+.detection-result{display:flex;background-color:#0a0a0a;height:100%;justify-content:center;align-items:center}
+.detection-result .image{width:100%}
+.detection-result .detection{max-height:323px}
+.detection-result .text{color:#85a3de;font-size:32px;font-weight:500}
+
+/* Left column */
+.main-left{width:480px;display:flex;flex-flow:column;margin-right:10px}
+.main-left-top{flex:1}
+.main-left-top img{max-width:100%;max-height:100%}
+
+/* Manual arm control */
+.operation-button{display:inline-block;border-radius:3px;height:32px}
+.operation-button span{display:inline-block;width:45px;height:100%;text-align:center;line-height:30px;font-weight:600;color:#666;border:1px solid #e5e5e5;cursor:pointer}
+.operation-button span.active{border:1px solid #409eff;color:#409eff}
+.arm-panel{flex:0 0 auto;margin-top:15px;text-align:center;padding-bottom:15px}
+.operation-slider{display:flex;padding:0 30px;margin:10px 15px 0}
+.operation-slider .btn{display:inline-block;user-select:none;flex:0 0 38px;height:38px;line-height:34px;font-weight:600;text-align:center;font-size:15px;color:#666;border-radius:50%;border:2px solid #e5e5e5;cursor:pointer}
+.operation-slider .slider{flex:1;margin:0 20px;display:flex;justify-content:center;align-items:center}
+.operation-slider .slider .el-slider{width:100%}
+.slider-info{line-height:30px;font-size:14px}
+.slider-info .text-value{color:#409eff}
+
+/* Calibration & delay row */
+.config-row{margin-top:12px;padding:0 20px;display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:6px}
+.config-row .el-checkbox{margin-right:4px}
+.config-row .dist-input{width:90px;margin:0 4px}
+.config-row .delay-input{width:80px;margin:0 4px}
+.config-row .btn-apply{padding:6px 12px;font-size:12px}
+.cal-result{margin-top:8px;padding:0 20px;font-size:13px;color:#409eff;text-align:center;line-height:1.8}
+
+/* Arm buttons */
+.arm-btn-row{margin-top:8px}
+.arm-btn-row .el-button{margin:0 4px}
+
+/* Center column */
+.main-center{flex:1;margin-left:.35rem;display:flex;flex-flow:column}
+.main-center-top{flex:1;display:flex}
+.main-center-top-left{flex:0 0 480px;display:flex;flex-flow:column}
+.main-center-top-left .main-center-item{flex:1}
+.main-center-top-left .main-center-item.active{margin-bottom:15px}
+.main-center-top-left .main-center-item .img-tip{flex:0 0 340px;text-overflow:ellipsis;overflow:hidden;white-space:nowrap;color:#a90000;text-align:right}
+.main-center-top-left .center-bt{flex:0 0 460px}
+
+/* History images */
+.main-center-center{flex:0 0 240px;margin-left:15px}
+.main-center-center .hist-item{display:flex;flex-flow:column;padding:6px 0}
+.main-center-center .hist-item .img-blck{width:100%;height:155px;display:flex;align-items:center;background-color:#0a0a0a}
+.main-center-center .hist-item img{width:100%;cursor:pointer}
+.main-center-center .hist-item .hist-text{width:210px;text-align:center;color:#a90000;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px}
+.main-center-center .hist-item .hist-time{width:210px;text-align:center;color:#999;font-size:11px;margin-top:2px}
+
+/* Right statistics */
+.main-center-top-right{flex:1;margin-left:1rem}
+.echarts-wrap{width:100%;height:100%;display:flex;flex-flow:column}
+.echarts-item{flex:1;display:flex;flex-flow:column}
+.echarts-item-title{font-size:14px;flex:0 0 24px;line-height:24px;padding:0 15px;font-weight:600}
+.echarts-item-content{flex:1;padding:0 10px 10px}
+.echarts-item-content.perf-row{padding:0 30px;display:flex}
+.echarts-item-content.perf-row .perf-half{flex:1;text-align:center}
+.echarts-item-content.perf-row .perf-half .pie-box{width:100%;height:100%}
+.perf-title{font-weight:600}
+.perf-value{font-weight:700;font-size:20px;color:#409eff;line-height:80px}
+.flex-desc{display:flex;flex-flow:column;justify-content:center;align-items:center}
+.flex-desc .mt_20{margin-bottom:20px}
+
+/* Dialog */
+.preview-dialog{display:flex;justify-content:center;align-items:center}
+.preview-dialog .el-dialog{margin:0!important}
+.dialog-img{overflow:hidden;display:flex;justify-content:center;align-items:center}
+.dialog-img img{width:100%}
+</style>
+</head>
+<body>
+<div id="app">
+  <!-- Header -->
+  <div class="header">
+    <div class="left"></div>
+    <div class="center">
+      <span class="center-text">{{ title }}</span>
+      <span class="mt_15">{{ version }}</span>
+    </div>
+    <div class="right"><span>{{ clock }}</span></div>
+  </div>
+
+  <!-- Main body -->
+  <div class="main">
+    <!-- ===== LEFT COLUMN ===== -->
+    <div class="main-left">
+
+      <!-- Detection video stream -->
+      <div class="border main-left-top">
+        <h5 class="title"><span class="icon"></span>检测区域</h5>
+        <div class="centent">
+          <div class="detection-result">
+            <img class="image detection" :src="streamUrl" alt="video stream">
+          </div>
+        </div>
+      </div>
+
+      <!-- Manual arm control -->
+      <div class="border arm-panel">
+        <h5 class="title"><span class="icon"></span>机械臂手动控制</h5>
+        <div class="centent" style="padding-top:8px">
+
+          <!-- Joint selectors -->
+          <div class="operation-button">
+            <span v-for="j in 5" :class="{active:active===String(j)}" @click="btnClick(String(j))">{{ j }}</span>
+          </div>
+
+          <!-- Angle slider -->
+          <div class="operation-slider">
+            <span class="btn" @click="step">{{ active==='1'?'左':'上' }}</span>
+            <div class="slider">
+              <el-slider :max="active==='5'?270:180"
+                v-model="radian" @change="sliderChange"></el-slider>
+            </div>
+            <span class="btn" @click="next">{{ active==='1'?'右':'下' }}</span>
+          </div>
+
+          <div class="slider-info">
+            当前关节：<span class="text-value">{{ active }}</span>
+            &nbsp; 当前角度： <span class="text-value">{{ radian }}</span>
+          </div>
+
+          <!-- Grab / Release buttons -->
+          <div class="arm-btn-row">
+            <el-button size="mini" :type="isGrab?'success':'primary'" @click="sucker('grab')">抓取</el-button>
+            <el-button size="mini" @click="sucker('discharge')">释放</el-button>
+          </div>
+
+          <!-- ===== Calibration & delay section ===== -->
+          <div class="config-row">
+            <el-checkbox v-model="calOn" @change="toggleCalibration">启用标定模式</el-checkbox>
+          </div>
+
+          <div class="config-row" v-show="calOn">
+            <span style="font-size:13px">相机到吸盘距离:</span>
+            <el-input size="mini" class="dist-input" v-model="cameraDist"
+              @change="saveConfig"
+              onkeyup="value=value.replace(/[^\d]/g,'')"></el-input>
+            <span style="font-size:13px">mm</span>
+          </div>
+
+          <div class="cal-result" v-if="calOn && calSampleCount > 0">
+            已测 {{ calSampleCount }} 片 |
+            速度: <b>{{ calSpeed }}</b> mm/s |
+            建议延时: <b>{{ calDelay }}</b> 秒
+          </div>
+
+          <div class="config-row" v-if="calOn && calDelay > 0">
+            <el-button size="mini" type="primary" class="btn-apply" @click="applyCalDelay">应用为抓取延时</el-button>
+          </div>
+
+          <div class="config-row">
+            <span style="font-size:14px;font-weight:600">抓取延时:</span>
+            <el-input size="mini" class="delay-input" v-model="grabTimeout"
+              @change="saveConfig"
+              onkeyup="value=value.replace(/^(0+)|[^\d]+/g,'')"></el-input>
+            <span style="font-size:14px">秒 (备用)</span>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== CENTER COLUMN ===== -->
+    <div class="main-center">
+      <div class="main-center-top">
+
+        <!-- Center-left: original + detect images -->
+        <div class="main-center-top-left">
+          <div class="border main-center-item active">
+            <h5 class="title"><span class="icon"></span>原始图片</h5>
+            <div class="centent">
+              <div class="detection-result">
+                <img class="image" :src="originalImg" v-if="originalImg" alt="original">
+              </div>
+            </div>
+          </div>
+          <div class="border main-center-item center-bt">
+            <h5 class="title">
+              <span class="icon"></span>检测结果
+              <span class="img-tip" v-if="testingText">检测到: {{ testingText }}</span>
+            </h5>
+            <div class="centent">
+              <div class="detection-result">
+                <img class="image" :src="testingImg" v-if="testingImg" alt="detect result">
+                <span class="text" v-else>未检测到缺陷</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Center-center: history images -->
+        <div class="border main-center-center">
+          <h5 class="title"><span class="icon"></span>最近检测结果图</h5>
+          <div class="centent">
+            <div class="hist-item" v-for="(item, idx) in imgHistory" :key="idx">
+              <div class="img-blck">
+                <img :src="item.img" @click="imgDetail(item)" alt="history">
+              </div>
+              <p class="hist-text" :title="item.text">{{ item.text }}</p>
+              <p class="hist-time" v-if="item.time">{{ item.time }}</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Center-right: statistics panel -->
+        <div class="border main-center-top-right">
+          <h5 class="title"><span class="icon"></span>检测统计</h5>
+          <div class="centent">
+            <div class="echarts-wrap">
+
+              <!-- Chart 1: Pie + stats text -->
+              <div class="echarts-item">
+                <div class="echarts-item-content perf-row">
+                  <div class="perf-half">
+                    <div class="pie-box" ref="pieChart"></div>
+                  </div>
+                  <div class="perf-half flex-desc">
+                    <p class="perf-title mt_20">平均延时（ms）: <span>{{ statsInfo.time }}</span></p>
+                    <p class="perf-title">平均准确率（%）: <span>{{ statsInfo.averageScore }}</span></p>
+                    <p class="perf-title">检测总数: <span style="color:#ff9b15;font-size:18px">{{ statsInfo.totalNum }}</span></p>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Chart 2: Monthly defect distribution (bar) -->
+              <div class="echarts-item">
+                <h6 class="echarts-item-title">当月内缺陷分布统计<span>（个）</span></h6>
+                <div class="echarts-item-content" ref="monthlyChart"></div>
+              </div>
+
+              <!-- Chart 3: 7-day per-type trend (multi-line) -->
+              <div class="echarts-item">
+                <h6 class="echarts-item-title">七日内缺陷类型趋势<span>（个）</span></h6>
+                <div class="echarts-item-content" ref="trendChart"></div>
+              </div>
+
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- Image preview dialog -->
+  <el-dialog :visible.sync="dialog.visible" custom-class="preview-dialog" append-to-body>
+    <div class="dialog-img">
+      <img :src="dialog.img" alt="preview">
+    </div>
+  </el-dialog>
+</div>
+
+<!-- Vendors -->
+<script src="vendor/vue@2.7.14.min.js"></script>
+<script src="vendor/element-ui@2.15.14.min.js"></script>
+<script src="vendor/echarts@5.5.0.min.js"></script>
+<script src="vendor/axios@1.7.0.min.js"></script>
+
+<script>
+// ============================================================
+// Config & API layer
+// ============================================================
+var CONFIG = null;
+var http = axios.create();
+http.interceptors.response.use(function(r){ return r.status===200?r.data:r });
+
+function loadConfig(){ return http.get('config.json') }
+
+// Arm control APIs (port 8899, cross-origin)
+function apiGetArm(conf, id){
+  return http.get(conf.ip+'/get_arm', {params:{id:id}})
+}
+function apiUseArm(conf, data){
+  return http.post(conf.ip+'/use_arm', data)
+}
+
+// Detection server APIs (port 7777, same origin if nginx proxies)
+function apiGetConf(conf){ return http.get(conf.url+'/get_conf') }
+function apiChangeConf(conf, data){ return http.post(conf.url+'/change_conf', data) }
+function apiGetHistory(conf){ return http.get(conf.url+'/get_history') }
+function apiGetOriginalPic(conf){ return http.get(conf.url+'/get_original_pic') }
+function apiGetDetectPic(conf){ return http.get(conf.url+'/get_detect_pic') }
+function apiGetNum(conf){ return http.get(conf.url+'/get_num') }
+function apiGetStatistics(conf){ return http.get(conf.url+'/get_statistics') }
+function apiGetMonthNum(conf){ return http.get(conf.url+'/get_this_month_num') }
+function apiGetSevenDaysByType(conf){ return http.get(conf.url+'/get_seven_days_by_type') }
+function apiCalibration(conf, mode){ return http.post(conf.url+'/calibration', {mode:mode}) }
+function apiCalStatus(conf){ return http.get(conf.url+'/calibration_status') }
+
+// ============================================================
+// Vue App
+// ============================================================
+var PIE_COLORS = {
+  zheng_chang: '#1479ff',
+  ca_shang: '#ff9b15',
+  zhen_kong: '#5337fd',
+  zang_wu: '#e63946',
+  zhe_zhou: '#2a9d8f'
+};
+var PIE_LABELS = {
+  zheng_chang: '正常', ca_shang: '划痕',
+  zhen_kong: '针孔', zang_wu: '脏污', zhe_zhou: '褶皱'
+};
+var DEFECT_ORDER = ['zheng_chang','ca_shang','zhen_kong','zang_wu','zhe_zhou'];
+
+var app = new Vue({
+  el: '#app',
+  data: {
+    title: '', version: '', clock: '',
+    config: {},
+    streamUrl: '',
+
+    // Manual arm control
+    active: '1', radian: 0, isGrab: false,
+    grabTimeout: '',
+
+    // Calibration
+    calOn: false, cameraDist: '200',
+    calSpeed: 0, calDelay: 0, calSampleCount: 0,
+    _calTimer: null,
+
+    // Images
+    originalImg: '', testingImg: '', testingText: '',
+    imgHistory: [],
+
+    // Dialog
+    dialog: { visible: false, img: '' },
+
+    // Statistics
+    statsInfo: { time: '', averageScore: '', totalNum: '' },
+    defectKeys: {},
+
+    // ECharts instances
+    charts: { pie: null, monthly: null, trend: null }
+  },
+
+  mounted: function(){
+    var self = this;
+    loadConfig().then(function(cfg){
+      CONFIG = cfg;
+      self.config = cfg;
+      self.title = cfg.title;
+      self.version = cfg.version;
+      self.streamUrl = cfg.url + '/img';
+
+      // Load arm config
+      apiGetConf(cfg).then(function(r){
+        var c = r[0];
+        self.grabTimeout = c.time;
+        self.cameraDist = c.camera_distance || '200';
+        self.defectKeys = c.defect_name;
+
+        // Init charts
+        self.initPieChart();
+        self.initMonthlyChart();
+        self.initTrendChart();
+
+        // Start polling
+        self.fetchAll();
+        self.startPolling();
+      });
+
+      // Fetch initial arm angle
+      apiGetArm(cfg, self.active).then(function(a){ self.radian = Number(a) });
+    });
+
+    // Clock
+    this.clock = new Date().toLocaleString('zh-CN');
+    setInterval(function(){
+      self.clock = new Date().toLocaleString('zh-CN');
+    }, 1000);
+  },
+
+  methods: {
+    // ==================== Arm control ====================
+    btnClick: function(id){
+      this.active = id;
+      var self = this;
+      apiGetArm(CONFIG, id).then(function(a){ self.radian = Number(a) });
+    },
+    sliderChange: function(v){
+      apiUseArm(CONFIG, {id: this.active, angle: String(v), switch: ''});
+    },
+    step: function(){
+      this.radian = Math.max(0, this.radian - 1);
+      apiUseArm(CONFIG, {id: this.active, angle: String(this.radian), switch: ''});
+    },
+    next: function(){
+      var m = this.active==='5'?270:180;
+      this.radian = Math.min(m, this.radian + 1);
+      apiUseArm(CONFIG, {id: this.active, angle: String(this.radian), switch: ''});
+    },
+    sucker: function(action){
+      this.isGrab = (action === 'grab');
+      apiUseArm(CONFIG, {id:'', angle:'', switch: String(this.isGrab)});
+    },
+
+    // ==================== Config ====================
+    saveConfig: function(){
+      apiChangeConf(CONFIG, {
+        time: this.grabTimeout,
+        speed: '1300',
+        camera_distance: this.cameraDist
+      });
+    },
+
+    // ==================== Calibration ====================
+    toggleCalibration: function(v){
+      var self = this;
+      if (v) {
+        apiCalibration(CONFIG, 'start');
+        this._calTimer = setInterval(function(){ self.pollCalStatus() }, 2000);
+      } else {
+        apiCalibration(CONFIG, 'stop');
+        if (this._calTimer) { clearInterval(this._calTimer); this._calTimer = null; }
+      }
+    },
+    pollCalStatus: function(){
+      var self = this;
+      apiCalStatus(CONFIG).then(function(r){
+        self.calSampleCount = r.sample_count;
+        self.calSpeed = r.speed;
+        self.calDelay = r.suggested_delay;
+      });
+    },
+    applyCalDelay: function(){
+      this.grabTimeout = String(this.calDelay);
+      this.saveConfig();
+    },
+
+    // ==================== Image fetching ====================
+    fetchHistory: function(){
+      var self = this;
+      apiGetHistory(CONFIG).then(function(items){
+        if (!items || !items.length) return;
+        self.imgHistory = items.map(function(it){
+          var names = (it.name||[]).map(function(n){
+            return self.defectKeys[n[0]] || n[0];
+          });
+          return { img: it.img, text: names.join('，') || '正常', time: it.time || '' };
+        });
+      });
+    },
+    fetchOriginalPic: function(){
+      var self = this;
+      apiGetOriginalPic(CONFIG).then(function(r){
+        if (r && r.length) self.originalImg = r[0];
+      });
+    },
+    fetchDetectPic: function(){
+      var self = this;
+      apiGetDetectPic(CONFIG).then(function(r){
+        if (r && r.length) {
+          self.testingImg = r[0].img;
+          var names = (r[0].name||[]).map(function(n){
+            return self.defectKeys[n[0]] || n[0];
+          });
+          self.testingText = names.join('，');
+        } else {
+          self.testingImg = '';
+          self.testingText = '';
+        }
+      });
+    },
+    imgDetail: function(item){
+      this.dialog.visible = true;
+      this.dialog.img = item.img;
+    },
+
+    // ==================== Statistics ====================
+    fetchStatistics: function(){
+      var self = this;
+      apiGetStatistics(CONFIG).then(function(r){
+        self.statsInfo.time = Number(r.average_prediction_time||0).toFixed(2);
+        self.statsInfo.averageScore = Number(r.average_score||0).toFixed(2);
+        self.statsInfo.totalNum = r.total_num || 0;
+        // Pie chart driven by get_num (5 types), not statistics
+      });
+    },
+    fetchDefectNum: function(){
+      var self = this;
+      apiGetNum(CONFIG).then(function(r){
+        if (!r || !r.length || !r[0].length) return;
+        var pieData = [];
+        var total = 0;
+        DEFECT_ORDER.forEach(function(key){
+          var found = null;
+          r[0].forEach(function(d){ if (d[key] !== undefined) found = d[key]; });
+          var val = found || 0;
+          total += val;
+          pieData.push({ value: val, name: PIE_LABELS[key] || key, itemStyle: {color: PIE_COLORS[key]} });
+        });
+        if (self.charts.pie) {
+          self.charts.pie.setOption({
+            title: { subtext: String(total) },
+            series: [{ data: pieData }]
+          });
+        }
+        self.statsInfo.totalNum = total;
+      });
+    },
+    fetchMonthNum: function(){
+      var self = this;
+      apiGetMonthNum(CONFIG).then(function(r){
+        if (!r || !r.length || !r[0].length) return;
+        var merged = {};
+        DEFECT_ORDER.forEach(function(k){ merged[k]=0 });
+        r[0].forEach(function(d){ Object.assign(merged, d) });
+        var data = DEFECT_ORDER.map(function(k){
+          return {value: merged[k], itemStyle: {color: PIE_COLORS[k]}};
+        });
+        if (self.charts.monthly) {
+          self.charts.monthly.setOption({ series: [{ data: data, type:'bar', barWidth:35 }] });
+        }
+      });
+    },
+    fetchSevenDaysByType: function(){
+      var self = this;
+      apiGetSevenDaysByType(CONFIG).then(function(r){
+        if (!r) return;
+        var labels = Object.keys(r).sort();
+        var series = DEFECT_ORDER.map(function(key){
+          return {
+            name: PIE_LABELS[key] || key,
+            type: 'line',
+            smooth: true,
+            data: labels.map(function(d){ return (r[d]&&r[d][key])||0 }),
+            itemStyle: {color: PIE_COLORS[key]},
+            lineStyle: {color: PIE_COLORS[key]}
+          };
+        });
+        if (self.charts.trend) {
+          self.charts.trend.setOption({
+            xAxis: { data: labels },
+            series: series
+          });
+        }
+      });
+    },
+
+    // ==================== Charts init ====================
+    baseChartOpt: function(){
+      return {
+        textStyle: {color:'#999'},
+        grid: {top:10,left:40,right:10,bottom:20},
+        xAxis: {type:'category',show:true,data:Object.values(this.defectKeys),axisTick:{show:false},axisLine:{show:false}},
+        yAxis: {type:'value',axisLine:{show:false},axisTick:{show:false},splitLine:{lineStyle:{color:'#e5e5e5'}}},
+        tooltip: {trigger:'item'}
+      };
+    },
+    initPieChart: function(){
+      if (!this.$refs.pieChart) return;
+      this.charts.pie = echarts.init(this.$refs.pieChart);
+      this.charts.pie.setOption({
+        color: Object.values(PIE_COLORS),
+        tooltip: {trigger:'item'},
+        legend: {orient:'vertical',left:'left',top:'middle'},
+        title: {
+          text:'检测总数', subtext:'0', textAlign:'center',
+          left:'55%', top:'38%',
+          textStyle: {fontSize:14,fontWeight:'bold'},
+          subtextStyle: {color:'#ff9b15',fontWeight:'bold',fontSize:16}
+        },
+        series: [{
+          type:'pie', radius:['45%','70%'], center:['75%','50%'],
+          avoidLabelOverlap:false,
+          label: {show:false}, labelLine:{show:false},
+          data: [{value:0,name:'暂无数据'}]
+        }]
+      });
+    },
+    initMonthlyChart: function(){
+      if (!this.$refs.monthlyChart) return;
+      this.charts.monthly = echarts.init(this.$refs.monthlyChart);
+      this.charts.monthly.setOption(this.baseChartOpt());
+    },
+    initTrendChart: function(){
+      if (!this.$refs.trendChart) return;
+      this.charts.trend = echarts.init(this.$refs.trendChart);
+      this.charts.trend.setOption({
+        textStyle: {color:'#999'},
+        grid: {top:20,left:40,right:10,bottom:30},
+        xAxis: {type:'category',data:[],axisTick:{show:false},axisLine:{show:false}},
+        yAxis: {type:'value',axisLine:{show:false},axisTick:{show:false},splitLine:{lineStyle:{color:'#e5e5e5'}}},
+        tooltip: {trigger:'axis'},
+        legend: {bottom:0,data:Object.values(PIE_LABELS),textStyle:{fontSize:10}},
+        series: DEFECT_ORDER.map(function(k){
+          return {
+            name: PIE_LABELS[k], type:'line', smooth:true, data:[],
+            itemStyle: {color:PIE_COLORS[k]}, lineStyle: {color:PIE_COLORS[k]}
+          };
+        })
+      });
+    },
+
+    // ==================== Polling ====================
+    fetchAll: function(){
+      this.fetchHistory(); this.fetchOriginalPic(); this.fetchDetectPic();
+      this.fetchStatistics(); this.fetchDefectNum(); this.fetchMonthNum();
+      this.fetchSevenDaysByType();
+    },
+    startPolling: function(){
+      var self = this;
+      setInterval(function(){ self.fetchHistory() }, 3000);
+      setInterval(function(){ self.fetchOriginalPic() }, 3000);
+      setInterval(function(){ self.fetchDetectPic() }, 3000);
+      setInterval(function(){ self.fetchStatistics() }, 3000);
+      setInterval(function(){ self.fetchDefectNum() }, 60000);
+      setInterval(function(){ self.fetchMonthNum() }, 60000);
+      setInterval(function(){ self.fetchSevenDaysByType() }, 60000);
+    }
+  },
+
+  beforeDestroy: function(){
+    if (this._calTimer) clearInterval(this._calTimer);
+  }
+});
+</script>
+</body>
+</html>

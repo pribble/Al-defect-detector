@@ -175,6 +175,10 @@ class Consumer(threading.Thread):
         self._diff_1ago = 0
         self._ssim_history = [0] * SSIM_HISTORY_SIZE
         self._recent_frames = [0, 0]
+        # 标定模式: 追踪 white_ratio 变化以计算传送带速度
+        self._cal_last_ratio = 0.0
+        self._cal_entry_time = None
+        self._cal_peak_ratio = 0.0
 
     def run(self):
         database.create_database()
@@ -212,6 +216,29 @@ class Consumer(threading.Thread):
 
         white_ratio = np.count_nonzero(img_binary_2) / img_binary_2.size
         current_ssim = compare_image(black_image)
+
+        # --- 标定模式: 追踪 white_ratio 变化以测量传送带速度 ---
+        if shared.calibration_active:
+            now = time.time()
+            if white_ratio > 0.02:
+                # 铝片开始进入: 记录进入时间和峰值
+                if self._cal_last_ratio < 0.02:
+                    self._cal_entry_time = now
+                    self._cal_peak_ratio = white_ratio
+                if white_ratio > self._cal_peak_ratio:
+                    self._cal_peak_ratio = white_ratio
+                # 铝片开始退出 (ratio 从峰值下降 > 10%)
+                if (self._cal_entry_time is not None and
+                        white_ratio < self._cal_peak_ratio * 0.85):
+                    duration = now - self._cal_entry_time
+                    if 0.1 < duration < 30:  # 合理性检查: 0.1s ~ 30s
+                        speed = 100.0 / duration  # 100mm 直径 / 进入时间 = mm/s
+                        shared.calibration_samples.append(speed)
+                        logger.info('标定: 测得速度 {:.1f} mm/s (耗时 {:.2f}s)'.format(speed, duration))
+                    self._cal_entry_time = None
+            else:
+                self._cal_entry_time = None
+            self._cal_last_ratio = white_ratio
 
         self._ssim_history[:-1] = self._ssim_history[1:]
         self._ssim_history[-1] = current_ssim

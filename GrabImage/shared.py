@@ -4,6 +4,7 @@
 避免因 __main__ vs import api 导致的两份独立模块副本问题.
 """
 
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from queue import Queue
 
@@ -22,6 +23,10 @@ detect_image_path = None
 # 机械臂控制参数缓存 (路由 /change_conf 可更新)
 GRAB_SPEED = None
 GRAB_DELAY = None
+
+# 标定模式状态 (路由 /calibration 控制, Consumer 读写)
+calibration_active = False
+calibration_samples = deque(maxlen=30)
 
 # 全局运行时状态
 capture_started = []
