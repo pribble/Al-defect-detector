@@ -109,6 +109,10 @@ BINARY_THRESHOLD_1 = 100              # 初始二值化阈值
 BINARY_THRESHOLD_2 = 0.3              # 第二次二值化阈值
 DILATE_ITERATIONS = 4                 # 膨胀迭代次数
 
+# --- 机械臂控制参数 (来自配置文件, 运行时可能通过 /change_conf 更新) ---
+GRAB_SPEED = config.get("Configuration", "speed")
+GRAB_DELAY = config.get("Configuration", "time")
+
 # ============================================================
 # 全局状态
 # ============================================================
@@ -125,18 +129,6 @@ CORS(app, supports_credentials=True)
 
 
 # ============================================================
-# CORS
-# ============================================================
-
-@app.after_request
-def _cors_headers(response):
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,POST')
-    return response
-
-
-# ============================================================
 # 报警
 # ============================================================
 
@@ -148,116 +140,79 @@ def trigger_alarm():
     try:
         alarm_serial.write(ALARM_CMD)
     except Exception as e:
-        logger.error('bao jing error：{}'.format(str(e)))
-        alarm_serial = serial.Serial(ALARM_PORT, ALARM_BAUD, ALARM_DATA_BITS, stopbits=ALARM_STOP_BITS)
-        time.sleep(0.1)
-        alarm_serial.write(ALARM_CMD)
-        logger.info("reboot init alarm serial")
+        logger.error('alarm error：{}'.format(str(e)))
+        alarm_serial = None
 
 
 # ============================================================
 # 相机初始化
 # ============================================================
 
+def _mv_ok(step_name: str, ret: int) -> bool:
+    """检查 MVS SDK 返回值, 失败时 log + sleep 10 s, 返回 False 表示继续."""
+    if ret == 0:
+        return True
+    logger.error("%s fail! ret[0x%x], 10秒后重试...", step_name, ret)
+    time.sleep(10)
+    return False
+
+
+def _log_device_info(deviceList):
+    """打印所有枚举到的相机设备信息"""
+    for i in range(0, deviceList.nDeviceNum):
+        dev = cast(deviceList.pDeviceInfo[i], POINTER(MV_CC_DEVICE_INFO)).contents
+        if dev.nTLayerType == MV_GIGE_DEVICE:
+            model = "".join(chr(p) for p in dev.SpecialInfo.stGigEInfo.chModelName)
+            ip = ".".join(str((dev.SpecialInfo.stGigEInfo.nCurrentIp >> shift) & 0xff)
+                          for shift in [24, 16, 8, 0])
+            logger.info("gige device [%d]: %s @ %s", i, model, ip)
+        elif dev.nTLayerType == MV_USB_DEVICE:
+            model = "".join(chr(p) for p in dev.SpecialInfo.stUsb3VInfo.chModelName if p != 0)
+            serial = "".join(chr(p) for p in dev.SpecialInfo.stUsb3VInfo.chSerialNumber if p != 0)
+            logger.info("u3v device [%d]: %s (sn: %s)", i, model, serial)
+
+
 def initMvCamera():
     """
     枚举并初始化 Hikvision 工业相机.
 
     Returns: (cam, data_buf, nPayloadSize, stFrameInfo)
-    失败时循环重试 (间隔 10 秒).
+    失败时循环重试 (从枚举开始重新执行).
     """
     while True:
-        SDKVersion = MvCamera.MV_CC_GetSDKVersion()
-        logger.info("SDKVersion[0x%x]" % SDKVersion)
+        logger.info("SDKVersion[0x%x]", MvCamera.MV_CC_GetSDKVersion())
 
+        # --- 枚举设备 ---
         deviceList = MV_CC_DEVICE_INFO_LIST()
-        tlayerType = MV_GIGE_DEVICE | MV_USB_DEVICE
-
-        ret = MvCamera.MV_CC_EnumDevices(tlayerType, deviceList)
-        if ret != 0:
-            logger.error("enum devices fail! ret[0x%x], 10秒后重试..." % ret)
+        ret = MvCamera.MV_CC_EnumDevices(MV_GIGE_DEVICE | MV_USB_DEVICE, deviceList)
+        if ret != 0 or deviceList.nDeviceNum == 0:
+            logger.error("find no device! sleep 10 s...")
             time.sleep(10)
             continue
 
-        if deviceList.nDeviceNum == 0:
-            logger.error("find no device! 10秒后重试...")
-            time.sleep(10)
-            continue
+        logger.info("Find %d devices!", deviceList.nDeviceNum)
+        _log_device_info(deviceList)
 
-        logger.info("Find %d devices!" % deviceList.nDeviceNum)
-
-        for i in range(0, deviceList.nDeviceNum):
-            mvcc_dev_info = cast(deviceList.pDeviceInfo[i], POINTER(MV_CC_DEVICE_INFO)).contents
-            if mvcc_dev_info.nTLayerType == MV_GIGE_DEVICE:
-                logger.info("\ngige device: [%d]" % i)
-                strModeName = ""
-                for per in mvcc_dev_info.SpecialInfo.stGigEInfo.chModelName:
-                    strModeName = strModeName + chr(per)
-                logger.info("device model name: %s" % strModeName)
-
-                nip1 = ((mvcc_dev_info.SpecialInfo.stGigEInfo.nCurrentIp & 0xff000000) >> 24)
-                nip2 = ((mvcc_dev_info.SpecialInfo.stGigEInfo.nCurrentIp & 0x00ff0000) >> 16)
-                nip3 = ((mvcc_dev_info.SpecialInfo.stGigEInfo.nCurrentIp & 0x0000ff00) >> 8)
-                nip4 = (mvcc_dev_info.SpecialInfo.stGigEInfo.nCurrentIp & 0x000000ff)
-                logger.info("current ip: %d.%d.%d.%d\n" % (nip1, nip2, nip3, nip4))
-            elif mvcc_dev_info.nTLayerType == MV_USB_DEVICE:
-                logger.info("\nu3v device: [%d]" % i)
-                strModeName = ""
-                for per in mvcc_dev_info.SpecialInfo.stUsb3VInfo.chModelName:
-                    if per == 0:
-                        break
-                    strModeName = strModeName + chr(per)
-                logger.info("device model name: %s" % strModeName)
-
-                strSerialNumber = ""
-                for per in mvcc_dev_info.SpecialInfo.stUsb3VInfo.chSerialNumber:
-                    if per == 0:
-                        break
-                    strSerialNumber = strSerialNumber + chr(per)
-                logger.info("user serial number: %s" % strSerialNumber)
-
-        nConnectionNum = 0
-
-        if int(nConnectionNum) >= deviceList.nDeviceNum:
-            logger.error("intput error! 10秒后重试...")
-            time.sleep(10)
-            continue
-
+        # --- 选第一个设备, 创建句柄 + 打开 ---
         cam = MvCamera()
-        stDeviceList = cast(deviceList.pDeviceInfo[int(nConnectionNum)], POINTER(MV_CC_DEVICE_INFO)).contents
+        stDeviceList = cast(deviceList.pDeviceInfo[0], POINTER(MV_CC_DEVICE_INFO)).contents
 
-        ret = cam.MV_CC_CreateHandle(stDeviceList)
-        if ret != 0:
-            logger.error("create handle fail! ret[0x%x], 10秒后重试..." % ret)
-            time.sleep(10)
+        if not _mv_ok("create handle", cam.MV_CC_CreateHandle(stDeviceList)):
+            continue
+        if not _mv_ok("open device", cam.MV_CC_OpenDevice(MV_ACCESS_Exclusive, 0)):
+            continue
+        if not _mv_ok("set trigger mode", cam.MV_CC_SetEnumValue("TriggerMode", MV_TRIGGER_MODE_OFF)):
             continue
 
-        ret = cam.MV_CC_OpenDevice(MV_ACCESS_Exclusive, 0)
-        if ret != 0:
-            logger.error("open device fail! ret[0x%x], 10秒后重试..." % ret)
-            time.sleep(10)
-            continue
-
-        ret = cam.MV_CC_SetEnumValue("TriggerMode", MV_TRIGGER_MODE_OFF)
-        if ret != 0:
-            logger.error("set trigger mode fail! ret[0x%x], 10秒后重试..." % ret)
-            time.sleep(10)
-            continue
-
+        # --- 获取 payload, 准备取流 ---
         stParam = MVCC_INTVALUE()
         memset(byref(stParam), 0, sizeof(MVCC_INTVALUE))
 
-        ret = cam.MV_CC_GetIntValue("PayloadSize", stParam)
-        if ret != 0:
-            logger.error("get payload size fail! ret[0x%x], 10秒后重试..." % ret)
-            time.sleep(10)
+        if not _mv_ok("get payload size", cam.MV_CC_GetIntValue("PayloadSize", stParam)):
             continue
         nPayloadSize = stParam.nCurValue
 
-        ret = cam.MV_CC_StartGrabbing()
-        if ret != 0:
-            logger.error("start grabbing fail! ret[0x%x], 10秒后重试..." % ret)
-            time.sleep(10)
+        if not _mv_ok("start grabbing", cam.MV_CC_StartGrabbing()):
             continue
 
         data_buf = (c_ubyte * nPayloadSize)()
@@ -271,9 +226,7 @@ def initMvCamera():
 
 def trigger_grab(flags: str):
     """发送 HTTP 请求至 ArmControl 服务, 触发机械臂分拣"""
-    speed = config.get("Configuration", "speed")
-    delay = config.get("Configuration", "time")
-    data = {"flags": flags, "speed": speed, "time": delay}
+    data = {"flags": flags, "speed": GRAB_SPEED, "time": GRAB_DELAY}
     requests.post(ARM_URL, json=data, timeout=INFERENCE_TIMEOUT)
 
 
@@ -316,22 +269,58 @@ def _get_week_labels() -> list:
 
 
 # ============================================================
+# 图片 / 视频流辅助函数
+# ============================================================
+
+def _read_image_base64(path: str) -> str:
+    """读取图片文件并编码为 data:image/jpg;base64, ..."""
+    with open(path, 'rb') as f:
+        return "data:image/jpg;base64," + str(base64.b64encode(f.read()), encoding='utf-8')
+
+
+def _draw_fps_label(image, fps: float):
+    """在图片左上角绘制帧率标注"""
+    label = "(Capture) {:.1f} FPS".format(fps)
+    cv2.putText(image, label, (180, 30), cv2.FONT_HERSHEY_COMPLEX, 0.3, (38, 0, 255), 1)
+    return image
+
+
+def _encode_frame():
+    """将当前 stream_image 编码为 JPEG 字节"""
+    frame = None
+    try:
+        _ret, jpeg = cv2.imencode('.jpg', stream_image)
+        frame = jpeg.tobytes()
+    except Exception as e:
+        logger.error('get frame error：%s', e, exc_info=True)
+    return frame
+
+
+def _generate_frames():
+    """视频流生成器: MJPEG multipart 响应"""
+    while True:
+        time.sleep(0.1)
+        frame = _encode_frame()
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n\r\n')
+
+
+# ============================================================
 # Flask 路由 — 配置
 # ============================================================
 
 @app.route('/get_conf', methods=['GET'])
 def get_conf():
     """读取当前配置文件 (Configuration + defect_name)"""
-    config_list = []
     config_item = dict(config.items('Configuration'))
     config_item['defect_name'] = defect_name
-    config_list.append(config_item)
-    return json.dumps(config_list)
+    return json.dumps([config_item])
 
 
 @app.route('/change_conf', methods=['POST'])
 def change_conf():
-    """修改配置文件并写入磁盘"""
+    """修改配置文件并写入磁盘, 同时更新内存缓存"""
+    global GRAB_SPEED, GRAB_DELAY
     data = json.loads(request.get_data(as_text=True))
 
     for key in ['time', 'speed', 'grab_position', 'release_position']:
@@ -341,6 +330,10 @@ def change_conf():
 
     with open("config.ini", 'w', encoding='utf-8') as f:
         config.write(f)
+
+    # 同步更新内存缓存
+    GRAB_SPEED = config.get("Configuration", "speed")
+    GRAB_DELAY = config.get("Configuration", "time")
     return data
 
 
@@ -351,61 +344,45 @@ def change_conf():
 @app.route('/get_history', methods=['GET'])
 def get_history():
     """获取最新 4 张历史检测图片 (base64)"""
-    sql_non_null = database.select_instructions('*', 'defect_list', 'where path is not null')
-    sql_no_detect = database.select_instructions(
-        '*', '(' + sql_non_null + ')', "where path is not 'detect.jpg' order by id DESC"
+    recent_paths = database.query(
+        'distinct path', 'defect_list',
+        "where path is not null and path != 'detect.jpg' order by id DESC limit 4"
     )
-    sql_recent = database.select_instructions('distinct path', '(' + sql_no_detect + ')', 'limit 4')
-    recent_paths = database.select_data(sql_recent)
 
     image_files = []
     for row in recent_paths:
         image_file = row[0]
-        with open(image_file, 'rb') as f:
-            image = f.read()
-            image_base64 = "data:image/jpg;base64," + str(base64.b64encode(image), encoding='utf-8')
-            sql_name = database.select_instructions(
-                'name', 'defect_list', "where path='{}'".format(image_file)
-            )
-            name_rows = database.select_data(sql_name)
-            result_item = {"name": name_rows, "img": image_base64}
-            image_files.append(result_item)
+        name_rows = database.query(
+            'name', 'defect_list', "where path='{}'".format(image_file)
+        )
+        image_files.append({"name": name_rows, "img": _read_image_base64(image_file)})
     return json.dumps(image_files)
 
 
 @app.route('/get_original_pic', methods=['GET'])
 def get_original_pic():
     """获取最近一次检测的原始图片 (base64)"""
-    image_files = []
     if os.path.exists(original_image_path):
-        with open(original_image_path, 'rb') as f:
-            image = f.read()
-            image_base64 = "data:image/jpg;base64," + str(base64.b64encode(image), encoding='utf-8')
-            image_files.append(image_base64)
-    return json.dumps(image_files)
+        return json.dumps([_read_image_base64(original_image_path)])
+    return json.dumps([])
 
 
 @app.route('/get_detect_pic', methods=['GET'])
 def get_detect_pic():
     """获取最新一次检测的缺陷标注图片 (base64)"""
-    image_files = []
-    if os.path.exists(detect_image_path):
-        sql_by_path = database.select_instructions(
-            '*', 'defect_list', "where path='detect.jpg' order by id DESC"
-        )
-        sql_latest_uuid = database.select_instructions('distinct uuid', '(' + sql_by_path + ')', 'limit 1')
-        uuid_rows = database.select_data(sql_latest_uuid)
-        latest_uuid = uuid_rows[0][0]
-        sql_names = database.select_instructions(
-            'name', 'defect_list', "where uuid='{}' and path='detect.jpg'".format(latest_uuid)
-        )
-        name_rows = database.select_data(sql_names)
-        with open(detect_image_path, 'rb') as f:
-            image = f.read()
-            image_base64 = "data:image/jpg;base64," + str(base64.b64encode(image), encoding='utf-8')
-            result_item = {"name": name_rows, "img": image_base64}
-            image_files.append(result_item)
-    return json.dumps(image_files)
+    if not os.path.exists(detect_image_path):
+        return json.dumps([])
+
+    uuid_rows = database.query(
+        'distinct uuid', 'defect_list',
+        "where path='detect.jpg' order by id DESC limit 1"
+    )
+    latest_uuid = uuid_rows[0][0]
+    name_rows = database.query(
+        'name', 'defect_list',
+        "where uuid='{}' and path='detect.jpg'".format(latest_uuid)
+    )
+    return json.dumps([{"name": name_rows, "img": _read_image_base64(detect_image_path)}])
 
 
 # ============================================================
@@ -415,14 +392,10 @@ def get_detect_pic():
 @app.route('/get_num', methods=['GET'])
 def get_num():
     """按缺陷类型统计总数"""
-    sql_non_null = database.select_instructions('*', 'defect_list', 'where path is not null')
-    sql_no_detect = database.select_instructions(
-        '*', '(' + sql_non_null + ')', "where path is not 'detect.jpg'"
+    defect_counts = database.query(
+        'name, count(1) AS counts', 'defect_list',
+        "where path is not null and path != 'detect.jpg' group by name"
     )
-    sql_counts = database.select_instructions(
-        'name, count(1) AS counts', '(' + sql_no_detect + ')', 'group by name'
-    )
-    defect_counts = database.select_data(sql_counts)
     count_items = [{row[0]: row[1]} for row in defect_counts]
     return json.dumps([count_items])
 
@@ -430,18 +403,12 @@ def get_num():
 @app.route('/get_this_month_num', methods=['GET'])
 def get_this_month_num():
     """按缺陷类型统计当月总数"""
-    sql_non_null = database.select_instructions('*', 'defect_list', 'where path is not null')
-    sql_no_detect = database.select_instructions(
-        '*', '(' + sql_non_null + ')', "where path is not 'detect.jpg'"
+    defect_counts = database.query(
+        'name, count(1) AS counts', 'defect_list',
+        "where path is not null and path != 'detect.jpg'"
+        " and DATE(CreatedTime) >= DATE('now', 'start of month', '+1 seconds')"
+        " group by name"
     )
-    sql_this_month = database.select_instructions(
-        '*', '(' + sql_no_detect + ')',
-        "WHERE DATE(CreatedTime) >= DATE('now', 'start of month', '+1 seconds')"
-    )
-    sql_counts = database.select_instructions(
-        'name, count(1) AS counts', '(' + sql_this_month + ')', 'group by name'
-    )
-    defect_counts = database.select_data(sql_counts)
     count_items = [{row[0]: row[1]} for row in defect_counts]
     return json.dumps([count_items])
 
@@ -472,26 +439,17 @@ def get_seven_days_num():
 @app.route('/get_statistics', methods=['GET'])
 def get_statistics():
     """返回总体统计: 平均推理时间 / 平均得分 / 总数 / 缺陷数"""
-    sql_with_time = database.select_instructions(
-        '*', 'defect_list', 'where prediction_time is not null'
+    sum_time_rows = database.query(
+        'sum(prediction_time)', 'defect_list', 'where prediction_time is not null'
     )
-    sql_sum_time = database.select_instructions(
-        'sum(prediction_time)', '(' + sql_with_time + ')', ''
-    )
-    sum_time_rows = database.select_data(sql_sum_time)
     total_prediction_time = sum_time_rows[0][0]
 
-    sql_with_score = database.select_instructions(
-        '*', 'defect_list', 'where score is not null'
+    sum_score_rows = database.query(
+        'sum(score)', 'defect_list', 'where score is not null'
     )
-    sql_sum_score = database.select_instructions(
-        'sum(score)', '(' + sql_with_score + ')', ''
-    )
-    sum_score_rows = database.select_data(sql_sum_score)
     total_score = sum_score_rows[0][0]
 
-    sql_count = database.select_instructions('count()', '(' + sql_with_time + ')', '')
-    count_rows = database.select_data(sql_count)
+    count_rows = database.query('count()', 'defect_list', 'where prediction_time is not null')
     num = count_rows[0][0]
 
     average_prediction_time = 0
@@ -500,15 +458,13 @@ def get_statistics():
         average_prediction_time = total_prediction_time / num
         average_score = (total_score / num) * 100
 
-    sql_total = database.select_instructions('count(distinct uuid)', 'defect_list', '')
-    total_rows = database.select_data(sql_total)
+    total_rows = database.query('count(distinct uuid)', 'defect_list', '')
     total_num = total_rows[0][0]
 
-    sql_defects = database.select_instructions(
+    defect_rows = database.query(
         'count(distinct uuid)', 'defect_list',
         "where name='ca_shang' or name='zang_wu' or name='zhe_zhou' or name='zhen_kong'"
     )
-    defect_rows = database.select_data(sql_defects)
     defect_num = defect_rows[0][0]
 
     result = {
@@ -521,28 +477,8 @@ def get_statistics():
 
 
 # ============================================================
-# 视频流
+# Flask 路由 — 视频流 & 主页
 # ============================================================
-
-def _encode_frame():
-    """将当前 stream_image 编码为 JPEG 字节"""
-    frame = None
-    try:
-        _ret, jpeg = cv2.imencode('.jpg', stream_image)
-        frame = jpeg.tobytes()
-    except Exception as e:
-        logger.error('get frame error：%s', e, exc_info=True)
-    return frame
-
-
-def _generate_frames():
-    """视频流生成器: MJPEG multipart 响应"""
-    while True:
-        time.sleep(0.1)
-        frame = _encode_frame()
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n\r\n')
-
 
 @app.route('/img')
 def video_feed():
@@ -690,7 +626,7 @@ class Consumer(threading.Thread):
             )
 
             # 触发条件: 当前帧差异上升 + 前两帧差异下降 + 白色像素足够
-            if diff_curr > 0 and diff_prev < 0 and diff_prev2 < 0 and white_ratio > WHITE_RATIO_THRESHOLD:
+            if diff_curr > 0 > diff_prev2 and diff_prev < 0 and white_ratio > WHITE_RATIO_THRESHOLD:
                 self._run_inference_pipeline(image, frame_start_time)
 
         self._diff_3ago = self._diff_2ago
@@ -731,7 +667,9 @@ class Consumer(threading.Thread):
             _thread_pool.submit(trigger_grab, "OK")
             self._save_normal_result(uid, file_name, annotated_image, original_image, processing_rate)
 
-    def _handle_inference_result(self, inference_result, uid, file_name, annotated_image, original_image, processing_rate):
+    def _handle_inference_result(
+            self, inference_result, uid, file_name, annotated_image, original_image, processing_rate
+    ):
         """处理 FPGA 返回的推理结果"""
         all_normal = all(
             detection['class_name'] == LABEL_NORMAL
@@ -750,9 +688,7 @@ class Consumer(threading.Thread):
             annotated_image = cv2.cvtColor(annotated_image, cv2.COLOR_GRAY2RGB)
         except Exception:
             pass
-        processing_rate_label = "(Capture) {:.1f} FPS".format(processing_rate)
-        cv2.putText(annotated_image, processing_rate_label, (180, 30),
-                    cv2.FONT_HERSHEY_COMPLEX, 0.3, (38, 0, 255), 1)
+        _draw_fps_label(annotated_image, processing_rate)
         cv2.imwrite(file_name, annotated_image)
         database.insert_data(uid, file_name, 'zheng_chang', None, None)
         cv2.imwrite(original_image_path, original_image)
@@ -768,8 +704,6 @@ class Consumer(threading.Thread):
         _thread_pool.submit(trigger_grab, "NG")
         logger.info("检测到缺陷，触发报警和抓取动作")
 
-        processing_rate_label = "(Capture) {:.1f} FPS".format(processing_rate)
-
         for detection in inference_result['result']:
             class_name = detection['class_name']
             if class_name == LABEL_NORMAL:
@@ -781,7 +715,7 @@ class Consumer(threading.Thread):
             inference_time = detection['prediction_time']
 
             annotated_image = self._draw_defect_box(
-                annotated_image, loc, class_name_cn, score, processing_rate_label
+                annotated_image, loc, class_name_cn, score, processing_rate
             )
             cv2.imwrite(file_name, annotated_image)
             database.insert_data(uid, file_name, class_name, inference_time, score)
@@ -791,7 +725,7 @@ class Consumer(threading.Thread):
         cv2.imwrite(original_image_path, original_image)
         cv2.imwrite(detect_image_path, annotated_image)
 
-    def _draw_defect_box(self, image, loc, class_name_cn: str, score: float, fps_label: str):
+    def _draw_defect_box(self, image, loc, class_name_cn: str, score: float, fps: float):
         """在图片上绘制缺陷边框和标签"""
         x1, y1, x2, y2 = [int(v) for v in loc]
         cv2.rectangle(image, (x1, y1), (x2, y2), (255, 0, 0), 1)
@@ -812,8 +746,7 @@ class Consumer(threading.Thread):
         )
         image = np.array(pil_image)
 
-        cv2.putText(image, fps_label, (180, 30),
-                    cv2.FONT_HERSHEY_COMPLEX, 0.3, (38, 0, 255), 1)
+        _draw_fps_label(image, fps)
         return image
 
 
@@ -821,25 +754,18 @@ class Consumer(threading.Thread):
 # 图片保留清理
 # ============================================================
 
-class ImageRetentionCleanup:
-    """保留最新 SAVE_IMAGE_NUM 张缺陷图片, 删除其余"""
+# 保留最新 SAVE_IMAGE_NUM 张缺陷图片, 删除其余
+def cleanup():
+    recent_rows = database.query(
+        'distinct path', 'defect_list',
+        "where path is not null and path != 'detect.jpg' order by id DESC limit {}".format(SAVE_IMAGE_NUM)
+    )
+    keep_files = [row[0] for row in recent_rows]
 
-    def __init__(self):
-        self._thread = threading.Thread(target=self._cleanup)
-        self._thread.start()
-
-    def _cleanup(self):
-        sql_recent = database.select_instructions(
-            'distinct path', 'defect_list',
-            "where path is not null and path != 'detect.jpg' order by id DESC limit {}".format(SAVE_IMAGE_NUM)
-        )
-        recent_rows = database.select_data(sql_recent)
-        keep_files = [row[0] for row in recent_rows]
-
-        for f in os.listdir(FILES_DIR):
-            full_path = os.path.join(FILES_DIR, f)
-            if full_path not in keep_files:
-                os.remove(full_path)
+    for f in os.listdir(FILES_DIR):
+        full_path = os.path.join(FILES_DIR, f)
+        if full_path not in keep_files:
+            os.remove(full_path)
 
 
 # ============================================================
@@ -847,5 +773,5 @@ class ImageRetentionCleanup:
 # ============================================================
 
 if __name__ == "__main__":
-    ImageRetentionCleanup()
+    threading.Thread(target=cleanup).start()
     app.run(host='0.0.0.0', debug=False, use_reloader=False, port=7777)

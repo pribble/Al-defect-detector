@@ -16,5 +16,8 @@ GrabImage/files/
 GrabImage/detect_files/
 GrabImage/original_files/
 
+# IDE
+.idea/
+
 # Build
 build/

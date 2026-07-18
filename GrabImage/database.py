@@ -56,14 +56,11 @@ def select_day_data(offset_start: str, offset_end: str) -> int:
     _acquire_lock()
     try:
         cursor.execute(
-            "select count() from ("
-            "  select * from ("
-            "    select * from ("
-            "      select * from defect_list where path is not null"
-            "    ) where path is not 'detect.jpg'"
-            "  ) where CreatedTime >= datetime('now', 'start of day', ? || ' day')"
-            "    and CreatedTime <  datetime('now', 'start of day', ? || ' day')"
-            ")",
+            "select count() from defect_list"
+            " where path is not null"
+            "   and path != 'detect.jpg'"
+            "   and CreatedTime >= datetime('now', 'start of day', ? || ' day')"
+            "   and CreatedTime <  datetime('now', 'start of day', ? || ' day')",
             (offset_start, offset_end),
         )
         values = cursor.fetchall()
@@ -82,6 +79,26 @@ def insert_data(uid: str, file_name: str, class_name: str, prediction_time, scor
             (uid, file_name, class_name, prediction_time, score),
         )
         conn.commit()
+    finally:
+        _release_lock()
+
+
+def query(columns: str, source: str, condition: str):
+    """
+    构建并执行 SELECT, 返回所有结果行.
+
+    Args:
+        columns:   选择的字段, 如 `'*'`, `'distinct path'`, `'name, count(1)'`
+        source:    数据源, 表名或子查询 `'(subquery)'`
+        condition: WHERE / GROUP BY / ORDER BY / LIMIT 子句
+
+    Returns: 行列表, 每行为一个 tuple
+    """
+    sql = "select {} from {} {}".format(columns, source, condition)
+    _acquire_lock()
+    try:
+        cursor.execute(sql)
+        return cursor.fetchall()
     finally:
         _release_lock()
 
