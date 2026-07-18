@@ -1,0 +1,225 @@
+"""
+Flask 路由模块 — GrabImage 检测服务的 HTTP API.
+
+所有路由通过 Blueprint 注册, 由 api.py 挂载到 Flask app.
+共享运行时状态通过 shared.py 访问.
+"""
+
+import base64
+import datetime
+import json
+import os
+import time
+
+import cv2
+import numpy as np
+from flask import Blueprint, Response, render_template, request
+
+import database
+from camera import Producer
+import shared
+
+bp = Blueprint('main', __name__)
+
+
+# ============================================================
+# 路由 — 配置
+# ============================================================
+
+@bp.route('/get_conf', methods=['GET'])
+def get_conf():
+    """读取当前配置文件 (Configuration + defect_name)"""
+    config_item = dict(shared.config.items('Configuration'))
+    config_item['defect_name'] = shared.defect_name
+    return json.dumps([config_item])
+
+
+@bp.route('/change_conf', methods=['POST'])
+def change_conf():
+    """修改配置文件并写入磁盘, 同时更新内存缓存"""
+    data = json.loads(request.get_data(as_text=True))
+
+    for key in ['time', 'speed', 'grab_position', 'release_position']:
+        value = data.get(key, '')
+        if len(value) > 0:
+            shared.config.set("Configuration", key, value)
+
+    with open("config.ini", 'w', encoding='utf-8') as f:
+        shared.config.write(f)
+
+    # 同步内存缓存 (routes 和 api 共享同一份 shared 模块)
+    shared.GRAB_SPEED = shared.config.get("Configuration", "speed")
+    shared.GRAB_DELAY = shared.config.get("Configuration", "time")
+    return data
+
+
+# ============================================================
+# 路由 — 历史 / 图片
+# ============================================================
+
+@bp.route('/get_history', methods=['GET'])
+def get_history():
+    """获取最新 4 张历史检测图片 (base64)"""
+    recent_paths = database.query(
+        'distinct path', 'defect_list',
+        "where path is not null and path != 'detect.jpg' order by id DESC limit 4"
+    )
+    image_files = []
+    for row in recent_paths:
+        image_file = row[0]
+        name_rows = database.query(
+            'name', 'defect_list', "where path='{}'".format(image_file)
+        )
+        image_files.append({"name": name_rows, "img": _image_to_base64(image_file)})
+    return json.dumps(image_files)
+
+
+@bp.route('/get_original_pic', methods=['GET'])
+def get_original_pic():
+    """获取最近一次检测的原始图片 (base64)"""
+    if os.path.exists(shared.original_image_path):
+        return json.dumps([_image_to_base64(shared.original_image_path)])
+    return json.dumps([])
+
+
+@bp.route('/get_detect_pic', methods=['GET'])
+def get_detect_pic():
+    """获取最新一次检测的缺陷标注图片 (base64)"""
+    if not os.path.exists(shared.detect_image_path):
+        return json.dumps([])
+
+    uuid_rows = database.query(
+        'distinct uuid', 'defect_list',
+        "where path='detect.jpg' order by id DESC limit 1"
+    )
+    latest_uuid = uuid_rows[0][0]
+    name_rows = database.query(
+        'name', 'defect_list',
+        "where uuid='{}' and path='detect.jpg'".format(latest_uuid)
+    )
+    return json.dumps([{"name": name_rows, "img": _image_to_base64(shared.detect_image_path)}])
+
+
+# ============================================================
+# 路由 — 统计
+# ============================================================
+
+@bp.route('/get_num', methods=['GET'])
+def get_num():
+    """按缺陷类型统计总数"""
+    defect_counts = database.query(
+        'name, count(1) AS counts', 'defect_list',
+        "where path is not null and path != 'detect.jpg' group by name"
+    )
+    return json.dumps([[{row[0]: row[1]} for row in defect_counts]])
+
+
+@bp.route('/get_this_month_num', methods=['GET'])
+def get_this_month_num():
+    """按缺陷类型统计当月总数"""
+    defect_counts = database.query(
+        'name, count(1) AS counts', 'defect_list',
+        "where path is not null and path != 'detect.jpg'"
+        " and DATE(CreatedTime) >= DATE('now', 'start of month', '+1 seconds')"
+        " group by name"
+    )
+    return json.dumps([[{row[0]: row[1]} for row in defect_counts]])
+
+
+def _day_get(d):
+    """生成最近 7 天的日期字符串 (MM-DD), 供统计使用"""
+    for i in range(0, 7):
+        day = d - datetime.timedelta(days=i)
+        date_to = datetime.datetime(day.year, day.month, day.day)
+        yield str(date_to)[5:10]
+
+
+def _get_week_labels() -> list:
+    """返回最近 7 天的标签列表 (今日 → 6 天前)"""
+    d = datetime.datetime.now()
+    return [obj for obj in _day_get(d)][::-1]
+
+
+@bp.route('/get_seven_days_num', methods=['GET'])
+def get_seven_days_num():
+    """返回最近 7 天每日检测量"""
+    offsets = ["+0", "-1", "-2", "-3", "-4", "-5", "-6"]
+    counts = [database.select_day_data(o, str(int(o) + 1)) for o in offsets]
+    week_labels = _get_week_labels()
+    result = {week_labels[i]: counts[6 - i] for i in range(7)}
+    return json.dumps(result)
+
+
+@bp.route('/get_statistics', methods=['GET'])
+def get_statistics():
+    """返回总体统计: 平均推理时间 / 平均得分 / 总数 / 缺陷数"""
+    sum_time = database.query('sum(prediction_time)', 'defect_list', 'where prediction_time is not null')[0][0]
+    sum_score = database.query('sum(score)', 'defect_list', 'where score is not null')[0][0]
+    num = database.query('count()', 'defect_list', 'where prediction_time is not null')[0][0]
+
+    avg_time = 0
+    avg_score = 0
+    if num:
+        avg_time = sum_time / num
+        avg_score = (sum_score / num) * 100
+
+    total_num = database.query('count(distinct uuid)', 'defect_list', '')[0][0]
+    defect_num = database.query(
+        'count(distinct uuid)', 'defect_list',
+        "where name='ca_shang' or name='zang_wu' or name='zhe_zhou' or name='zhen_kong'"
+    )[0][0]
+
+    return json.dumps({
+        "average_score": avg_score,
+        "average_prediction_time": avg_time,
+        "total_num": total_num,
+        "defect_num": defect_num,
+    })
+
+
+# ============================================================
+# 路由 — 视频流 & 主页
+# ============================================================
+
+def _image_to_base64(path: str) -> str:
+    """读取图片文件并编码为 data:image/jpg;base64, ..."""
+    with open(path, 'rb') as f:
+        return "data:image/jpg;base64," + str(base64.b64encode(f.read()), encoding='utf-8')
+
+
+def _encode_frame() -> bytes:
+    """将当前视频帧编码为 JPEG 字节"""
+    try:
+        _ret, jpeg = cv2.imencode('.jpg', shared.stream_image_ref[0])
+        return jpeg.tobytes()
+    except Exception as e:
+        shared.logger.error('get frame error：%s', e, exc_info=True)
+        return None
+
+
+def _generate_frames():
+    """视频流生成器: MJPEG multipart 响应"""
+    while True:
+        time.sleep(0.1)
+        frame = _encode_frame()
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n\r\n')
+
+
+@bp.route('/img')
+def video_feed():
+    """实时视频流 (MJPEG)"""
+    if not shared.capture_started:
+        from api import Consumer  # 延迟导入避免循环
+        p = Producer(shared.frame_queue, shared.stream_image_ref)
+        shared.capture_started.append(p)
+        p.start()
+        c = Consumer()
+        c.start()
+    return Response(_generate_frames(), mimetype='multipart/x-mixed-replace;boundary=frame')
+
+
+@bp.route('/')
+def index():
+    """主页面 (Bootstrap 模板)"""
+    return render_template('index.html')
