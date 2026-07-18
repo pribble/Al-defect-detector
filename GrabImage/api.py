@@ -16,7 +16,6 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from ctypes import *
 from queue import Queue
 
 import cv2
@@ -30,11 +29,10 @@ from PIL import Image, ImageFont, ImageDraw
 from skimage.metrics import structural_similarity as compare_ssim
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '../tools'))
-sys.path.append("../MvImport")
 from logger import setup_log
-from MvCameraControl_class import *
 
 import database
+from camera import init_camera, Producer, CAMERA_NEED_RESTART
 
 # ============================================================
 # 路径常量
@@ -101,8 +99,6 @@ LABEL_NORMAL = 'zheng_chang'          # FPGA 返回的 "正常" 标签
 DEFECT_LABELS = ['ca_shang', 'zang_wu', 'zhe_zhou', 'zhen_kong']
 
 # --- 相机错误码 (MVS SDK) ---
-CAMERA_NEED_RESTART = 2147483655
-
 # 图像预处理参数
 GAUSSIAN_KERNEL = 21                  # 高斯滤波核
 BINARY_THRESHOLD_1 = 100              # 初始二值化阈值
@@ -119,7 +115,7 @@ GRAB_DELAY = config.get("Configuration", "time")
 
 alarm_serial = None
 frame_queue: Queue = Queue(maxsize=0)
-stream_image = np.zeros((512, 512, 3), dtype=np.uint8)
+stream_image_ref = [np.zeros((512, 512, 3), dtype=np.uint8)]
 
 capture_started = []                  # 哨兵, 标记 /img 是否已启动采集
 _thread_pool = ThreadPoolExecutor()
@@ -142,82 +138,6 @@ def trigger_alarm():
     except Exception as e:
         logger.error('alarm error：{}'.format(str(e)))
         alarm_serial = None
-
-
-# ============================================================
-# 相机初始化
-# ============================================================
-
-def _mv_ok(step_name: str, ret: int) -> bool:
-    """检查 MVS SDK 返回值, 失败时 log + sleep 10 s, 返回 False 表示继续."""
-    if ret == 0:
-        return True
-    logger.error("%s fail! ret[0x%x], 10秒后重试...", step_name, ret)
-    time.sleep(10)
-    return False
-
-
-def _log_device_info(deviceList):
-    """打印所有枚举到的相机设备信息"""
-    for i in range(0, deviceList.nDeviceNum):
-        dev = cast(deviceList.pDeviceInfo[i], POINTER(MV_CC_DEVICE_INFO)).contents
-        if dev.nTLayerType == MV_GIGE_DEVICE:
-            model = "".join(chr(p) for p in dev.SpecialInfo.stGigEInfo.chModelName)
-            ip = ".".join(str((dev.SpecialInfo.stGigEInfo.nCurrentIp >> shift) & 0xff)
-                          for shift in [24, 16, 8, 0])
-            logger.info("gige device [%d]: %s @ %s", i, model, ip)
-        elif dev.nTLayerType == MV_USB_DEVICE:
-            model = "".join(chr(p) for p in dev.SpecialInfo.stUsb3VInfo.chModelName if p != 0)
-            serial = "".join(chr(p) for p in dev.SpecialInfo.stUsb3VInfo.chSerialNumber if p != 0)
-            logger.info("u3v device [%d]: %s (sn: %s)", i, model, serial)
-
-
-def initMvCamera():
-    """
-    枚举并初始化 Hikvision 工业相机.
-
-    Returns: (cam, data_buf, nPayloadSize, stFrameInfo)
-    失败时循环重试 (从枚举开始重新执行).
-    """
-    while True:
-        logger.info("SDKVersion[0x%x]", MvCamera.MV_CC_GetSDKVersion())
-
-        # --- 枚举设备 ---
-        deviceList = MV_CC_DEVICE_INFO_LIST()
-        ret = MvCamera.MV_CC_EnumDevices(MV_GIGE_DEVICE | MV_USB_DEVICE, deviceList)
-        if ret != 0 or deviceList.nDeviceNum == 0:
-            logger.error("find no device! sleep 10 s...")
-            time.sleep(10)
-            continue
-
-        logger.info("Find %d devices!", deviceList.nDeviceNum)
-        _log_device_info(deviceList)
-
-        # --- 选第一个设备, 创建句柄 + 打开 ---
-        cam = MvCamera()
-        stDeviceList = cast(deviceList.pDeviceInfo[0], POINTER(MV_CC_DEVICE_INFO)).contents
-
-        if not _mv_ok("create handle", cam.MV_CC_CreateHandle(stDeviceList)):
-            continue
-        if not _mv_ok("open device", cam.MV_CC_OpenDevice(MV_ACCESS_Exclusive, 0)):
-            continue
-        if not _mv_ok("set trigger mode", cam.MV_CC_SetEnumValue("TriggerMode", MV_TRIGGER_MODE_OFF)):
-            continue
-
-        # --- 获取 payload, 准备取流 ---
-        stParam = MVCC_INTVALUE()
-        memset(byref(stParam), 0, sizeof(MVCC_INTVALUE))
-
-        if not _mv_ok("get payload size", cam.MV_CC_GetIntValue("PayloadSize", stParam)):
-            continue
-        nPayloadSize = stParam.nCurValue
-
-        if not _mv_ok("start grabbing", cam.MV_CC_StartGrabbing()):
-            continue
-
-        data_buf = (c_ubyte * nPayloadSize)()
-        stFrameInfo = MV_FRAME_OUT_INFO_EX()
-        return cam, data_buf, nPayloadSize, stFrameInfo
 
 
 # ============================================================
@@ -289,7 +209,7 @@ def _encode_frame():
     """将当前 stream_image 编码为 JPEG 字节"""
     frame = None
     try:
-        _ret, jpeg = cv2.imencode('.jpg', stream_image)
+        _ret, jpeg = cv2.imencode('.jpg', stream_image_ref[0])
         frame = jpeg.tobytes()
     except Exception as e:
         logger.error('get frame error：%s', e, exc_info=True)
@@ -484,7 +404,7 @@ def get_statistics():
 def video_feed():
     """实时视频流 (MJPEG)"""
     if not capture_started:
-        p = Producer()
+        p = Producer(frame_queue, stream_image_ref)
         capture_started.append(p)
         p.start()
         c = Consumer()
@@ -496,44 +416,6 @@ def video_feed():
 def index():
     """主页面 (Bootstrap 模板)"""
     return render_template('index.html')
-
-
-# ============================================================
-# 图片生产者 (相机读取)
-# ============================================================
-
-class Producer(threading.Thread):
-    """从 Hikvision 相机持续读取帧, 放入 frame_queue"""
-
-    def run(self):
-        cam, data_buf, nPayloadSize, stFrameInfo = initMvCamera()
-        while True:
-            ret = cam.MV_CC_GetOneFrameTimeout(data_buf, nPayloadSize, stFrameInfo, 10000)
-            if ret != 0:
-                logger.info('海康相机状态：{}'.format(ret))
-
-            if ret == CAMERA_NEED_RESTART:
-                logger.info("相机重启")
-                cam.MV_CC_StopGrabbing()
-                cam.MV_CC_CloseDevice()
-                cam.MV_CC_DestroyHandle()
-                cam, data_buf, nPayloadSize, stFrameInfo = initMvCamera()
-                continue
-
-            time.sleep(0.01)
-
-            if ret == 0:
-                image = np.asarray(data_buf).reshape((stFrameInfo.nHeight, stFrameInfo.nWidth))
-                # 下采样: 3072×2048 → 768×512
-                image = cv2.resize(
-                    image,
-                    (int(stFrameInfo.nWidth / 4), int(stFrameInfo.nHeight / 4)),
-                    interpolation=cv2.INTER_AREA,
-                )
-                frame_queue.put(image)
-
-                global stream_image
-                stream_image = image
 
 
 # ============================================================
