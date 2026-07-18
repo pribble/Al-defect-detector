@@ -45,25 +45,25 @@ body{width:100%;height:100vh;overflow:hidden}
 .operation-button{display:inline-block;border-radius:3px;height:32px}
 .operation-button span{display:inline-block;width:45px;height:100%;text-align:center;line-height:30px;font-weight:600;color:#666;border:1px solid #e5e5e5;cursor:pointer}
 .operation-button span.active{border:1px solid #409eff;color:#409eff}
-.arm-panel{flex:0 0 auto;margin-top:15px;text-align:center;padding-bottom:15px}
-.operation-slider{display:flex;padding:0 30px;margin:10px 15px 0}
-.operation-slider .btn{display:inline-block;user-select:none;flex:0 0 38px;height:38px;line-height:34px;font-weight:600;text-align:center;font-size:15px;color:#666;border-radius:50%;border:2px solid #e5e5e5;cursor:pointer}
-.operation-slider .slider{flex:1;margin:0 20px;display:flex;justify-content:center;align-items:center}
+.arm-panel{flex:0 0 auto;margin-top:10px;text-align:center;padding-bottom:8px}
+.operation-slider{display:flex;padding:0 20px;margin:6px 10px 0}
+.operation-slider .btn{display:inline-block;user-select:none;flex:0 0 32px;height:32px;line-height:28px;font-weight:600;text-align:center;font-size:14px;color:#666;border-radius:50%;border:2px solid #e5e5e5;cursor:pointer}
+.operation-slider .slider{flex:1;margin:0 12px;display:flex;justify-content:center;align-items:center}
 .operation-slider .slider .el-slider{width:100%}
-.slider-info{line-height:30px;font-size:14px}
+.slider-info{line-height:24px;font-size:13px}
 .slider-info .text-value{color:#409eff}
 
 /* Calibration & delay row */
-.config-row{margin-top:12px;padding:0 20px;display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:6px}
-.config-row .el-checkbox{margin-right:4px}
-.config-row .dist-input{width:90px;margin:0 4px}
-.config-row .delay-input{width:80px;margin:0 4px}
-.config-row .btn-apply{padding:6px 12px;font-size:12px}
-.cal-result{margin-top:8px;padding:0 20px;font-size:13px;color:#409eff;text-align:center;line-height:1.8}
+.config-row{margin-top:6px;padding:0 16px;display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:4px}
+.config-row .el-checkbox{margin-right:2px}
+.config-row .dist-input{width:80px;margin:0 2px}
+.config-row .delay-input{width:70px;margin:0 2px}
+.config-row .btn-apply{padding:5px 10px;font-size:11px}
+.cal-result{margin-top:4px;padding:0 16px;font-size:12px;color:#409eff;text-align:center;line-height:1.6}
 
 /* Arm buttons */
-.arm-btn-row{margin-top:8px}
-.arm-btn-row .el-button{margin:0 4px}
+.arm-btn-row{margin-top:4px}
+.arm-btn-row .el-button{margin:0 3px}
 
 /* Center column */
 .main-center{flex:1;margin-left:.35rem;display:flex;flex-flow:column}
@@ -133,7 +133,7 @@ body{width:100%;height:100vh;overflow:hidden}
       <!-- Manual arm control -->
       <div class="border arm-panel">
         <h5 class="title"><span class="icon"></span>机械臂手动控制</h5>
-        <div class="centent" style="padding-top:8px">
+        <div class="centent" style="padding-top:2px;padding-bottom:0">
 
           <!-- Joint selectors -->
           <div class="operation-button">
@@ -590,15 +590,15 @@ var app = new Vue({
       this.charts.pie.setOption({
         color: Object.values(PIE_COLORS),
         tooltip: {trigger:'item'},
-        legend: {orient:'vertical',left:'left',top:'middle'},
+        legend: {orient:'vertical',left:'left',top:'middle',textStyle:{fontSize:10}},
         title: {
           text:'检测总数', subtext:'0', textAlign:'center',
-          left:'55%', top:'38%',
-          textStyle: {fontSize:14,fontWeight:'bold'},
-          subtextStyle: {color:'#ff9b15',fontWeight:'bold',fontSize:16}
+          left:'58%', top:'40%',
+          textStyle: {fontSize:13,fontWeight:'bold'},
+          subtextStyle: {color:'#ff9b15',fontWeight:'bold',fontSize:15}
         },
         series: [{
-          type:'pie', radius:['45%','70%'], center:['75%','50%'],
+          type:'pie', radius:['40%','68%'], center:['65%','52%'],
           avoidLabelOverlap:false,
           label: {show:false}, labelLine:{show:false},
           data: [{value:0,name:'暂无数据'}]
