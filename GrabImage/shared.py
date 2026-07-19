@@ -28,6 +28,5 @@ calibration_active = False
 calibration_samples = deque(maxlen=30)
 
 # 全局运行时状态
-capture_started = []
 stream_image_ref = [np.zeros((512, 512, 3), dtype=np.uint8)]
 thread_pool = ThreadPoolExecutor()

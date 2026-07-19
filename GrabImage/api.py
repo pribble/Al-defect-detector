@@ -26,7 +26,7 @@ from skimage.metrics import structural_similarity as compare_ssim
 sys.path.append(os.path.join(os.path.dirname(__file__), '../tools'))
 from logger import setup_log
 
-from camera import frame_queue
+from camera import frame_queue, Producer
 import database
 import shared
 
@@ -203,6 +203,8 @@ class Consumer(threading.Thread):
     def _process_sampling_frame(self, frame_start_time: float):
         global _cached_ref_gray
         image = frame_queue.get()
+        if image is None:
+            return
         self._recent_frames[0] = self._recent_frames[1]
         self._recent_frames[1] = image
 
@@ -407,5 +409,8 @@ app.register_blueprint(bp)
 
 if __name__ == "__main__":
     database.create_database()  # 确保表已存在, 防 cleanup 竞态
+    # 提前启动相机采集和检测线程 (避免 routes.py 因 import Consumer 形成循环)
+    Producer(shared.stream_image_ref).start()
+    Consumer().start()
     threading.Thread(target=cleanup).start()
     app.run(host='0.0.0.0', debug=False, use_reloader=False, port=7777)

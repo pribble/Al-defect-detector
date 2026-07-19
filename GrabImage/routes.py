@@ -287,13 +287,6 @@ def _generate_frames():
 @bp.route('/img')
 def video_feed():
     """实时视频流 (MJPEG)"""
-    if not shared.capture_started:
-        from api import Consumer  # 延迟导入避免循环
-        p = Producer(shared.stream_image_ref)
-        shared.capture_started.append(p)
-        p.start()
-        c = Consumer()
-        c.start()
     return Response(_generate_frames(), mimetype='multipart/x-mixed-replace;boundary=frame')
 
 
