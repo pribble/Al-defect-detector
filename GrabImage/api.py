@@ -82,13 +82,13 @@ STABILITY_STD_THRESHOLD = 0.01
 STABILITY_MEAN_THRESHOLD = 0.8
 SSIM_HISTORY_SIZE = 9
 FRAME_SKIP_COUNT = 10
+TRIGGER_COOLDOWN = 5  # 触发后冷却帧数, 防同一铝片重复触
 
 LABEL_NORMAL = 'zheng_chang'
 DEFECT_LABELS = ['ca_shang', 'zang_wu', 'zhe_zhou', 'zhen_kong']
 
-GAUSSIAN_KERNEL = 21
+GAUSSIAN_KERNEL = int(shared.config.get("Configuration", "gaussian_kernel", fallback="21"))
 BINARY_THRESHOLD_1 = 100
-BINARY_THRESHOLD_2 = 0.3
 DILATE_ITERATIONS = 4
 
 # 机械臂控制参数缓存 (路由 /change_conf 同步更新)
@@ -148,8 +148,8 @@ def compare_image(image_gray) -> float:
         ref = cv2.imread(REFERENCE_IMAGE)
         ref = cv2.resize(ref, (SSIM_WIDTH, SSIM_HEIGHT), interpolation=cv2.INTER_AREA)
         _cached_ref_gray = cv2.cvtColor(ref, cv2.COLOR_BGR2GRAY)
-    score, _diff = compare_ssim(_cached_ref_gray, image_gray, full=True)
-    logger.info("SSIM: {}".format(score))
+    score = compare_ssim(_cached_ref_gray, image_gray)
+    logger.debug("SSIM: {}".format(score))
     return score
 
 
@@ -182,6 +182,7 @@ class Consumer(threading.Thread):
         self._ssim_history = [0] * SSIM_HISTORY_SIZE
         self._recent_frames = [None, None]
         # 标定模式: 追踪 white_ratio 变化以计算传送带速度
+        self._trigger_cooldown = 0
         self._cal_last_ratio = 0.0
         self._cal_entry_time = None
         self._cal_peak_ratio = 0.0
@@ -210,11 +211,10 @@ class Consumer(threading.Thread):
 
         black_image = cv2.resize(image, (SSIM_WIDTH, SSIM_HEIGHT), interpolation=cv2.INTER_AREA)
         blurred = cv2.GaussianBlur(black_image, (GAUSSIAN_KERNEL, GAUSSIAN_KERNEL), 0)
-        _, img_binary_1 = cv2.threshold(blurred, BINARY_THRESHOLD_1, 255, cv2.THRESH_BINARY)
-        thresh = cv2.dilate(img_binary_1, None, iterations=DILATE_ITERATIONS)
-        _, img_binary_2 = cv2.threshold(thresh, BINARY_THRESHOLD_2, 255, cv2.THRESH_BINARY)
+        _, img_binary = cv2.threshold(blurred, BINARY_THRESHOLD_1, 255, cv2.THRESH_BINARY)
+        thresh = cv2.dilate(img_binary, None, iterations=DILATE_ITERATIONS)
 
-        white_ratio = np.count_nonzero(img_binary_2) / img_binary_2.size
+        white_ratio = np.count_nonzero(thresh) / thresh.size
         current_ssim = compare_image(black_image)
 
         # --- 标定模式: 追踪 white_ratio 变化以测量传送带速度 ---
@@ -253,7 +253,9 @@ class Consumer(threading.Thread):
         diff_prev = self._diff_1ago - self._diff_2ago
         diff_prev2 = self._diff_2ago - self._diff_3ago
 
-        if current_ssim < SSIM_TRIGGER_THRESHOLD:
+        if self._trigger_cooldown > 0:
+            self._trigger_cooldown -= 1
+        elif current_ssim < SSIM_TRIGGER_THRESHOLD:
             logger.info(
                 'current_ssim:{},diff_1ago:{},diff_2ago:{},diff_3ago:{},white_ratio:{}'.format(
                     current_ssim, self._diff_1ago, self._diff_2ago, self._diff_3ago, white_ratio
@@ -261,6 +263,7 @@ class Consumer(threading.Thread):
             )
 
             if diff_curr > 0 > diff_prev2 and diff_prev < 0 and white_ratio > WHITE_RATIO_THRESHOLD:
+                self._trigger_cooldown = TRIGGER_COOLDOWN
                 self._run_inference_pipeline(frame_start_time)
 
         self._diff_3ago = self._diff_2ago
