@@ -174,9 +174,9 @@ def get_seven_days_num():
 @bp.route('/get_statistics', methods=['GET'])
 def get_statistics():
     """返回总体统计: 平均推理时间 / 平均得分 / 总数 / 缺陷数"""
-    sum_time = database.query('sum(prediction_time)', 'defect_list', 'where prediction_time is not null')[0][0]
-    sum_score = database.query('sum(score)', 'defect_list', 'where score is not null')[0][0]
-    num = database.query('count()', 'defect_list', 'where prediction_time is not null')[0][0]
+    sum_time = database.query_value('sum(prediction_time)', 'defect_list', 'where prediction_time is not null') or 0
+    sum_score = database.query_value('sum(score)', 'defect_list', 'where score is not null') or 0
+    num = database.query_value('count()', 'defect_list', 'where prediction_time is not null') or 0
 
     avg_time = 0
     avg_score = 0
@@ -184,11 +184,11 @@ def get_statistics():
         avg_time = sum_time / num
         avg_score = (sum_score / num) * 100
 
-    total_num = database.query('count(distinct uuid)', 'defect_list', '')[0][0]
-    defect_num = database.query(
+    total_num = database.query_value('count(distinct uuid)', 'defect_list', '') or 0
+    defect_num = database.query_value(
         'count(distinct uuid)', 'defect_list',
         "where name='ca_shang' or name='zang_wu' or name='zhe_zhou' or name='zhen_kong'"
-    )[0][0]
+    ) or 0
 
     return json.dumps({
         "average_score": avg_score,
