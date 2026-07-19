@@ -103,6 +103,17 @@ public:
     std::string label_path = config_.at("label_path");
     class_names_ = ReadLine(label_path);
 
+    // label_list 每行格式: <class_name> [threshold]
+    // 第二列缺失时默认 0.45 (向后兼容)
+    class_thresholds_.resize(class_names_.size(), 0.45f);
+    for (size_t i = 0; i < class_names_.size(); i++) {
+      auto parts = split(class_names_[i], ' ');
+      if (parts.size() >= 2) {
+        class_names_[i] = parts[0];
+        class_thresholds_[i] = std::stof(parts[1]);
+      }
+    }
+
     loadModel();
 
     init_ImageData();
@@ -166,18 +177,20 @@ public:
     int64_t count = 1;
     for (auto& dim : shape) count *= dim;
     int num_detections = static_cast<int>(count / 6);
-    float confidence_threshold = 0.45f;
 
     std::vector<Object> objects;
     for (int iw = 0; iw < num_detections; iw++) {
-      if (confidence_threshold < outdata[1] && outdata[1] <= 1 && outdata[2] < outdata[4] && outdata[3] < outdata[5]) {
+      int class_id = static_cast<int>(outdata[0]);
+      float threshold = (class_id >= 0 && class_id < (int)class_thresholds_.size())
+                          ? class_thresholds_[class_id] : 0.45f;
+      if (threshold < outdata[1] && outdata[1] <= 1 && outdata[2] < outdata[4] && outdata[3] < outdata[5]) {
         Object obj;
         int x = static_cast<int>(outdata[2]);
         int y = static_cast<int>(outdata[3]);
         int w = static_cast<int>(outdata[4] - outdata[2]);
         int h = static_cast<int>(outdata[5] - outdata[3]);
         cv::Rect rec_clip = cv::Rect(x, y, w, h) & cv::Rect(0, 0, frame.cols, frame.rows);
-        obj.class_id = static_cast<int>(outdata[0]);
+        obj.class_id = class_id;
         obj.prob = outdata[1];
         obj.rec = rec_clip;
         objects.push_back(obj);
@@ -223,6 +236,7 @@ private:
   std::map<std::string, std::string> config_;
   std::shared_ptr<PaddlePredictor> predictor_;
   std::vector<std::string> class_names_;
+  std::vector<float> class_thresholds_;
   ImageBlob img_data;
   cv::Mat rgb_img;   // 复用缓冲区
   cv::Mat img_float;
