@@ -10,8 +10,6 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import configparser
 
-from database import FrameBuffer
-
 # 配置 (由 api.py 在启动时初始化)
 config = configparser.ConfigParser()
 defect_name = {}
@@ -31,6 +29,5 @@ calibration_samples = deque(maxlen=30)
 
 # 全局运行时状态
 capture_started = []
-frame_queue = FrameBuffer()
 stream_image_ref = [np.zeros((512, 512, 3), dtype=np.uint8)]
 thread_pool = ThreadPoolExecutor()

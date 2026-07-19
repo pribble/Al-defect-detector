@@ -26,6 +26,7 @@ from skimage.metrics import structural_similarity as compare_ssim
 sys.path.append(os.path.join(os.path.dirname(__file__), '../tools'))
 from logger import setup_log
 
+from camera import frame_queue
 import database
 import shared
 
@@ -201,7 +202,7 @@ class Consumer(threading.Thread):
 
     def _process_sampling_frame(self, frame_start_time: float):
         global _cached_ref_gray
-        image = shared.frame_queue.get()
+        image = frame_queue.get()
         self._recent_frames[0] = self._recent_frames[1]
         self._recent_frames[1] = image
 

@@ -24,6 +24,31 @@ logger = setup_log('detect', 'detect_server.log')
 CAMERA_NEED_RESTART = 2147483655
 
 
+class FrameBuffer:
+    """单槽帧缓冲, 线程安全, 丢弃旧帧不阻塞。
+
+    Producer (相机线程) 写, Consumer (检测线程) 读。
+    """
+
+    __slots__ = ('_frame', '_lock')
+
+    def __init__(self):
+        self._frame = None
+        self._lock = threading.Lock()
+
+    def put(self, item):
+        with self._lock:
+            self._frame = item
+
+    def get(self):
+        with self._lock:
+            return self._frame
+
+
+# 模块级单例: Producer 写入, Consumer 读取
+frame_queue = FrameBuffer()
+
+
 # ============================================================
 # 初始化辅助
 # ============================================================
@@ -118,14 +143,12 @@ def init_camera():
 class Producer(threading.Thread):
     """从 Hikvision 相机持续读取帧, 放入 frame_queue"""
 
-    def __init__(self, frame_queue, stream_image_container):
+    def __init__(self, stream_image_container):
         """
         Args:
-            frame_queue: Queue, 原始帧放入此队列供 Consumer 消费
             stream_image_container: list of [np.ndarray], 用于更新视频流 (传引用绕开 global)
         """
         super().__init__()
-        self._frame_queue = frame_queue
         self._stream_image = stream_image_container
 
     def run(self):
@@ -156,5 +179,5 @@ class Producer(threading.Thread):
                     (int(stFrameInfo.nWidth / 4), int(stFrameInfo.nHeight / 4)),
                     interpolation=cv2.INTER_AREA,
                 )
-                self._frame_queue.put(image)
+                frame_queue.put(image)
                 self._stream_image[0] = image
