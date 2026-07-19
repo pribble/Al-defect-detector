@@ -215,6 +215,8 @@ class Consumer(threading.Thread):
         thresh = cv2.dilate(img_binary, None, iterations=DILATE_ITERATIONS)
 
         shared.debug_mask = thresh  # 供 /debug_mask 路由可视化
+        shared.last_ssim = current_ssim
+        shared.last_white_ratio = white_ratio
         white_ratio = np.count_nonzero(thresh) / thresh.size
         current_ssim = compare_image(black_image)
 

@@ -285,12 +285,18 @@ def _generate_frames():
 
 @bp.route('/debug_mask')
 def debug_mask():
-    """当前 SSIM 预处理后的二值掩码图 (白=系统认为有物体的区域)"""
+    """SSIM 调试页: 预处理二值掩码 + 实时 SSIM/white_ratio"""
     mask = getattr(shared, 'debug_mask', None)
     if mask is None:
         return '', 204
-    _, jpeg = cv2.imencode('.jpg', mask)
-    return Response(jpeg.tobytes(), mimetype='image/jpeg')
+    # 放大掩码到可读尺寸, 叠加 SSIM 信息
+    display = cv2.resize(mask, (640, 480), interpolation=cv2.INTER_NEAREST)
+    ssim = getattr(shared, 'last_ssim', -1)
+    wr = getattr(shared, 'last_white_ratio', -1)
+    cv2.putText(display, 'SSIM={:.3f}  white_ratio={:.2f}'.format(ssim, wr),
+                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, 128, 1)
+    _, buf = cv2.imencode('.png', display)
+    return Response(buf.tobytes(), mimetype='image/png')
 
 
 @bp.route('/img')
