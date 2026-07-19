@@ -10,7 +10,6 @@ import threading
 
 __all__ = [
     'create_database', 'insert_data', 'query', 'query_value', 'select_day_data',
-    'FrameBuffer',
 ]
 
 _DB_FILE = 'defect.db'
@@ -81,40 +80,6 @@ def query_value(columns: str, source: str, condition: str, params=()):
     """
     rows = query(columns, source, condition, params)
     return rows[0][0] if rows else None
-
-
-class FrameBuffer:
-    """固定 2 槽环形帧缓冲, 替代 ``Queue(maxsize=2)``。
-
-    - 预分配 ``[None, None]`` 作为 [oldest, newest]，无运行时分配
-    - 线程安全，put 溢出时丢弃最旧帧而非阻塞
-    - get 返回 **oldest**, 空时返回 **None** (调用方配合 empty() 使用)
-    """
-
-    __slots__ = ('_buf', '_lock')
-
-    def __init__(self):
-        self._buf = [None, None]  # [oldest, newest]
-        self._lock = threading.Lock()
-
-    def put(self, item):
-        with self._lock:
-            if self._buf[1] is not None:
-                # 双槽已满 → 顶掉 oldest, 原有的 newest 变为 oldest
-                self._buf[0] = self._buf[1]
-                self._buf[1] = item
-            elif self._buf[0] is None:
-                self._buf[0] = item
-            else:
-                self._buf[1] = item
-
-    def get(self):
-        with self._lock:
-            item = self._buf[0]
-            if item is not None and self._buf[1] is not None:
-                self._buf[0] = self._buf[1]
-                self._buf[1] = None
-        return item
 
 
 def select_day_data(offset_start: str, offset_end: str) -> int:
