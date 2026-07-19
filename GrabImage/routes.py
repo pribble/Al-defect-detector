@@ -283,20 +283,26 @@ def _generate_frames():
                b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n\r\n')
 
 
+def _generate_debug_frames():
+    """SSIM 调试帧生成器: 二值掩码 + SSIM/white_ratio 叠加"""
+    while True:
+        time.sleep(0.1)
+        mask = getattr(shared, 'debug_mask', None)
+        if mask is None:
+            continue
+        display = cv2.resize(mask, (640, 480), interpolation=cv2.INTER_NEAREST)
+        ssim = getattr(shared, 'last_ssim', -1)
+        wr = getattr(shared, 'last_white_ratio', -1)
+        cv2.putText(display, 'SSIM={:.3f}  white_ratio={:.2f}'.format(ssim, wr),
+                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, 128, 1)
+        _ret, jpeg = cv2.imencode('.jpg', display)
+        yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n\r\n')
+
+
 @bp.route('/debug_mask')
 def debug_mask():
-    """SSIM 调试页: 预处理二值掩码 + 实时 SSIM/white_ratio"""
-    mask = getattr(shared, 'debug_mask', None)
-    if mask is None:
-        return '', 204
-    # 放大掩码到可读尺寸, 叠加 SSIM 信息
-    display = cv2.resize(mask, (640, 480), interpolation=cv2.INTER_NEAREST)
-    ssim = getattr(shared, 'last_ssim', -1)
-    wr = getattr(shared, 'last_white_ratio', -1)
-    cv2.putText(display, 'SSIM={:.3f}  white_ratio={:.2f}'.format(ssim, wr),
-                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, 128, 1)
-    _, buf = cv2.imencode('.png', display)
-    return Response(buf.tobytes(), mimetype='image/png')
+    """SSIM 调试流: 实时二值掩码 + SSIM/white_ratio"""
+    return Response(_generate_debug_frames(), mimetype='multipart/x-mixed-replace;boundary=frame')
 
 
 @bp.route('/img')
