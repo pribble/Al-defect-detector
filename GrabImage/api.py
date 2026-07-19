@@ -118,7 +118,7 @@ def trigger_alarm():
     try:
         alarm_serial.write(ALARM_CMD)
     except Exception as e:
-        logger.error('alarm error：{}'.format(str(e)))
+        logger.error('alarm error：%s', e)
         alarm_serial = None
 
 

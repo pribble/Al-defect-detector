@@ -67,18 +67,14 @@ def get_history():
     image_files = []
     for row in recent_paths:
         image_file = row[0]
-        name_rows = database.query(
-            'name', 'defect_list', "where path='{}'".format(image_file)
+        detail_rows = database.query(
+            'name, CreatedTime', 'defect_list',
+            "where path=? order by id", params=(image_file,)
         )
-        time_rows = database.query(
-            'CreatedTime', 'defect_list',
-            "where path='{}' limit 1".format(image_file)
-        )
-        created_time = time_rows[0][0] if time_rows else ''
         image_files.append({
-            "name": name_rows,
+            "name": [[r[0]] for r in detail_rows],
             "img": _image_to_base64(image_file),
-            "time": created_time
+            "time": detail_rows[0][1] if detail_rows else ''
         })
     return json.dumps(image_files)
 
@@ -99,12 +95,14 @@ def get_detect_pic():
 
     uuid_rows = database.query(
         'distinct uuid', 'defect_list',
-        "where path='detect.jpg' order by id DESC limit 1"
+        "where path=? order by id DESC limit 1",
+        params=('detect.jpg',)
     )
     latest_uuid = uuid_rows[0][0]
     name_rows = database.query(
         'name', 'defect_list',
-        "where uuid='{}' and path='detect.jpg'".format(latest_uuid)
+        "where uuid=? and path=?",
+        params=(latest_uuid, 'detect.jpg')
     )
     return json.dumps([{"name": name_rows, "img": _image_to_base64(shared.detect_image_path)}])
 
@@ -147,18 +145,10 @@ def get_today_num():
     return json.dumps([[{row[0]: row[1]} for row in defect_counts]])
 
 
-def _day_get(d):
-    """生成最近 7 天的日期字符串 (MM-DD), 供统计使用"""
-    for i in range(0, 7):
-        day = d - datetime.timedelta(days=i)
-        date_to = datetime.datetime(day.year, day.month, day.day)
-        yield str(date_to)[5:10]
-
-
 def _get_week_labels() -> list:
     """返回最近 7 天的标签列表 (今日 → 6 天前)"""
     d = datetime.datetime.now()
-    return [obj for obj in _day_get(d)][::-1]
+    return [(d - datetime.timedelta(days=i)).strftime('%m-%d') for i in range(6, -1, -1)]
 
 
 @bp.route('/get_seven_days_num', methods=['GET'])
@@ -210,13 +200,14 @@ def get_seven_days_by_type():
         label = week_labels[6 - i]
         day_data = {}
         for dtype in defect_types:
-            count = database.query(
+            count = database.query_value(
                 'count(1)', 'defect_list',
                 "where path is not null and path != 'detect.jpg'"
-                " and name='{}'".format(dtype) +
-                " and CreatedTime >= datetime('now', 'start of day', '{} day')".format(offset) +
-                " and CreatedTime <  datetime('now', 'start of day', '{} day')".format(str(int(offset) + 1))
-            )[0][0]
+                " and name=?"
+                " and CreatedTime >= datetime('now', 'start of day', ? || ' day')"
+                " and CreatedTime <  datetime('now', 'start of day', ? || ' day')",
+                params=(dtype, offset, str(int(offset) + 1))
+            ) or 0
             day_data[dtype] = count
         result[label] = day_data
 

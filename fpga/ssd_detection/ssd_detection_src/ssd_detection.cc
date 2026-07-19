@@ -62,22 +62,13 @@ std::vector<std::string> ReadLine(const std::string &path) {
   return line_vec;
 }
 
-std::vector<std::string> split(const std::string &str,
-                               const std::string &delim) {
+std::vector<std::string> split(const std::string &str, char delim) {
   std::vector<std::string> res;
-  if (str.empty()) return res;
-  char *strs = new char[str.length() + 1];
-  std::strcpy(strs, str.c_str());
-
-  const char *d = delim.c_str();
-
-  char *p = std::strtok(strs, d);
-  while (p) {
-    std::string s = p;
-    res.push_back(s);
-    p = std::strtok(NULL, d);
+  std::stringstream ss(str);
+  std::string item;
+  while (std::getline(ss, item, delim)) {
+    if (!item.empty()) res.push_back(item);
   }
-  delete[] strs;
   return res;
 }
 
@@ -86,7 +77,7 @@ std::map<std::string, std::string> LoadConfigTxt(std::string config_path) {
 
   std::map<std::string, std::string> dict;
   for (int i = 0; i < config.size(); i++) {
-    std::vector<std::string> res = split(config[i], " ");
+    std::vector<std::string> res = split(config[i], ' ');
     if (res.size() >= 2) dict[res[0]] = res[1];
   }
   return dict;
@@ -254,8 +245,8 @@ private:
 
   void init_ImageData() {
     std::vector<float> mean_vals, scale_vals;
-    std::vector<std::string> mean_str = split(config_.at("mean"), ",");
-    std::vector<std::string> std_str = split(config_.at("std"), ",");
+    std::vector<std::string> mean_str = split(config_.at("mean"), ',');
+    std::vector<std::string> std_str = split(config_.at("std"), ',');
     std::transform(mean_str.begin(), mean_str.end(), back_inserter(mean_vals),
                     [](const std::string& s) { return std::stof(s); });
     std::transform(std_str.begin(), std_str.end(), back_inserter(scale_vals),
