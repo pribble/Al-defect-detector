@@ -258,6 +258,7 @@ def get_arm():
 @app.route('/grab', methods=['POST'])
 def grab():
     """接收抓取请求, 覆写缓存 (最多缓存1个), 异步串行执行"""
+    global _grab_pending
     data = request.get_data(as_text=True)
     with _grab_lock:
         _grab_pending = data
@@ -273,6 +274,7 @@ class GrabTaskConsumer(threading.Thread):
     """串行执行: 最多缓存1个待执行任务, 新任务覆写旧缓存"""
 
     def run(self):
+        global _grab_pending
         while True:
             _grab_ready.wait()
             with _grab_lock:
