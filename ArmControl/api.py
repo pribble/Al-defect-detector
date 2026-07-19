@@ -12,7 +12,6 @@ import os
 import sys
 import threading
 import time
-from queue import Queue
 
 from Arm_Lib import Arm_Device
 from flask import Flask, request
@@ -80,7 +79,11 @@ arm_device = Arm_Device()
 time.sleep(0.1)
 
 app = Flask(__name__)
-task_queue: Queue = Queue(maxsize=0)
+
+# 单槽任务缓存: 最多缓存1个待执行任务, 新任务覆写旧缓存
+_grab_pending = None
+_grab_lock = threading.Lock()
+_grab_ready = threading.Event()
 
 
 # ============================================================
@@ -254,27 +257,38 @@ def get_arm():
 
 @app.route('/grab', methods=['POST'])
 def grab():
-    """接收抓取请求, 入队后异步串行执行"""
+    """接收抓取请求, 覆写缓存 (最多缓存1个), 异步串行执行"""
     data = request.get_data(as_text=True)
-    task_queue.put(data)
+    with _grab_lock:
+        _grab_pending = data
+    _grab_ready.set()
     return data
 
 
 # ============================================================
-# 抓取任务消费者 (串行队列, 防并发冲突)
+# 抓取任务消费者 (单槽缓存, 防并发冲突)
 # ============================================================
 
 class GrabTaskConsumer(threading.Thread):
-    """队列消费者: 串行执行抓取任务, 防止并发冲突"""
+    """串行执行: 最多缓存1个待执行任务, 新任务覆写旧缓存"""
 
     def run(self):
         while True:
-            try:
-                raw_data = task_queue.get()
-                logger.info("收到抓取请求: %s", raw_data)
-                grab_task(json.loads(raw_data))
-            except Exception as e:
-                logger.error("抓取任务异常: %s", str(e))
+            _grab_ready.wait()
+            with _grab_lock:
+                raw_data = _grab_pending
+                _grab_pending = None
+            # 竞态恢复: 若 clear() 前 producer 又写了缓存, 重设信号
+            _grab_ready.clear()
+            with _grab_lock:
+                if _grab_pending is not None:
+                    _grab_ready.set()
+            if raw_data:
+                try:
+                    logger.info("收到抓取请求: %s", raw_data)
+                    grab_task(json.loads(raw_data))
+                except Exception as e:
+                    logger.error("抓取任务异常: %s", e)
 
 
 _consumer = GrabTaskConsumer()
