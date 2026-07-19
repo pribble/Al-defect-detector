@@ -214,6 +214,7 @@ class Consumer(threading.Thread):
         _, img_binary = cv2.threshold(blurred, BINARY_THRESHOLD_1, 255, cv2.THRESH_BINARY)
         thresh = cv2.dilate(img_binary, None, iterations=DILATE_ITERATIONS)
 
+        shared.debug_mask = thresh  # 供 /debug_mask 路由可视化
         white_ratio = np.count_nonzero(thresh) / thresh.size
         current_ssim = compare_image(black_image)
 

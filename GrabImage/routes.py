@@ -16,7 +16,6 @@ import numpy as np
 from flask import Blueprint, Response, render_template, request
 
 import database
-from camera import Producer
 import shared
 
 bp = Blueprint('main', __name__)
@@ -282,6 +281,16 @@ def _generate_frames():
             continue
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n\r\n')
+
+
+@bp.route('/debug_mask')
+def debug_mask():
+    """当前 SSIM 预处理后的二值掩码图 (白=系统认为有物体的区域)"""
+    mask = getattr(shared, 'debug_mask', None)
+    if mask is None:
+        return '', 204
+    _, jpeg = cv2.imencode('.jpg', mask)
+    return Response(jpeg.tobytes(), mimetype='image/jpeg')
 
 
 @bp.route('/img')
