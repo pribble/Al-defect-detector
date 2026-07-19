@@ -264,9 +264,12 @@ def calibration_status():
 # ============================================================
 
 def _image_to_base64(path: str) -> str:
-    """读取图片文件并编码为 data:image/jpg;base64, ..."""
-    with open(path, 'rb') as f:
-        return "data:image/jpg;base64," + str(base64.b64encode(f.read()), encoding='utf-8')
+    """读取图片文件并编码为 data:image/jpg;base64, ... (文件已删时返回空串)"""
+    try:
+        with open(path, 'rb') as f:
+            return "data:image/jpg;base64," + str(base64.b64encode(f.read()), encoding='utf-8')
+    except (FileNotFoundError, IOError):
+        return ""
 
 
 def _encode_frame() -> bytes:
@@ -284,6 +287,8 @@ def _generate_frames():
     while True:
         time.sleep(0.1)
         frame = _encode_frame()
+        if frame is None:
+            continue
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n\r\n')
 

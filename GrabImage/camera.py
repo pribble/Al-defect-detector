@@ -88,6 +88,13 @@ def init_camera():
         if not _mv_ok("set trigger mode", cam.MV_CC_SetEnumValue("TriggerMode", MV_TRIGGER_MODE_OFF)):
             continue
 
+        # --- 手动固定曝光 (避免自动曝光导致 SSIM 误触) ---
+        cam.MV_CC_SetEnumValue("ExposureAuto", 0)       # 0=Off
+        cam.MV_CC_SetEnumValue("GainAuto", 0)           # 0=Off
+        cam.MV_CC_SetFloatValue("ExposureTime", 5000.0) # 5000 µs = 5 ms
+        cam.MV_CC_SetFloatValue("Gain", 0.0)            # 0 dB
+        logger.info("set manual exposure: ExposureTime=5000us Gain=0dB")
+
         # --- 获取 payload, 准备取流 ---
         stParam = MVCC_INTVALUE()
         memset(byref(stParam), 0, sizeof(MVCC_INTVALUE))
@@ -139,6 +146,9 @@ class Producer(threading.Thread):
             time.sleep(0.01)
 
             if ret == 0:
+                if stFrameInfo.nWidth == 0 or stFrameInfo.nHeight == 0:
+                    logger.error("frame with zero dimension! w=%d h=%d", stFrameInfo.nWidth, stFrameInfo.nHeight)
+                    continue
                 image = np.asarray(data_buf).reshape((stFrameInfo.nHeight, stFrameInfo.nWidth))
                 # 下采样: 3072×2048 → 768×512
                 image = cv2.resize(

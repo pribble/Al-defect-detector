@@ -136,12 +136,18 @@ def trigger_grab(flags: str):
 # SSIM 图像比较
 # ============================================================
 
+# 参考图内存缓存 (避免每帧读磁盘)
+_cached_ref_gray = None
+
+
 def compare_image(image_gray) -> float:
     """将当前帧与参考图 (yuanshi.jpg) 做 SSIM 比较, 返回相似度 (1=相同)."""
-    ref = cv2.imread(REFERENCE_IMAGE)
-    ref = cv2.resize(ref, (SSIM_WIDTH, SSIM_HEIGHT), interpolation=cv2.INTER_AREA)
-    ref_gray = cv2.cvtColor(ref, cv2.COLOR_BGR2GRAY)
-    score, _diff = compare_ssim(ref_gray, image_gray, full=True)
+    global _cached_ref_gray
+    if _cached_ref_gray is None:
+        ref = cv2.imread(REFERENCE_IMAGE)
+        ref = cv2.resize(ref, (SSIM_WIDTH, SSIM_HEIGHT), interpolation=cv2.INTER_AREA)
+        _cached_ref_gray = cv2.cvtColor(ref, cv2.COLOR_BGR2GRAY)
+    score, _diff = compare_ssim(_cached_ref_gray, image_gray, full=True)
     logger.info("SSIM: {}".format(score))
     return score
 
@@ -169,12 +175,11 @@ class Consumer(threading.Thread):
 
     def __init__(self):
         super().__init__()
-        self._frame_counter = 0
         self._diff_3ago = 0
         self._diff_2ago = 0
         self._diff_1ago = 0
         self._ssim_history = [0] * SSIM_HISTORY_SIZE
-        self._recent_frames = [0, 0]
+        self._recent_frames = [None, None]
         # 标定模式: 追踪 white_ratio 变化以计算传送带速度
         self._cal_last_ratio = 0.0
         self._cal_entry_time = None
@@ -185,18 +190,9 @@ class Consumer(threading.Thread):
 
         while True:
             time.sleep(0.01)
-            if shared.frame_queue.empty():
-                continue
-
             try:
                 frame_start_time = time.time()
-
-                if self._frame_counter == 0:
-                    self._process_sampling_frame(frame_start_time)
-                else:
-                    shared.frame_queue.get()
-
-                self._frame_counter = (self._frame_counter + 1) % FRAME_SKIP_COUNT
+                self._process_sampling_frame(frame_start_time)
 
             except Exception as e:
                 logger.error('consumer thread error：{}'.format(str(e)))
@@ -204,6 +200,7 @@ class Consumer(threading.Thread):
     # ---- 单帧处理 ----
 
     def _process_sampling_frame(self, frame_start_time: float):
+        global _cached_ref_gray
         image = shared.frame_queue.get()
         self._recent_frames[0] = self._recent_frames[1]
         self._recent_frames[1] = image
@@ -247,6 +244,7 @@ class Consumer(threading.Thread):
 
         if ssim_std < STABILITY_STD_THRESHOLD and ssim_mean < STABILITY_MEAN_THRESHOLD and all(self._ssim_history):
             cv2.imwrite(REFERENCE_IMAGE, image)
+            _cached_ref_gray = None  # 缓存失效, 下次重载
 
         diff_curr = current_ssim - self._diff_1ago
         diff_prev = self._diff_1ago - self._diff_2ago
@@ -270,6 +268,8 @@ class Consumer(threading.Thread):
 
     def _run_inference_pipeline(self, frame_start_time: float):
         annotated_image = self._recent_frames[0]
+        if annotated_image is None:
+            annotated_image = self._recent_frames[1]
         original_image = annotated_image.copy()
 
         uid = str(uuid.uuid1())
@@ -405,5 +405,6 @@ app.register_blueprint(bp)
 # ============================================================
 
 if __name__ == "__main__":
+    database.create_database()  # 确保表已存在, 防 cleanup 竞态
     threading.Thread(target=cleanup).start()
     app.run(host='0.0.0.0', debug=False, use_reloader=False, port=7777)
