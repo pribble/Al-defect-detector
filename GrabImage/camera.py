@@ -23,6 +23,28 @@ logger = setup_log('detect', 'detect_server.log')
 # 相机错误码 (MVS SDK)
 CAMERA_NEED_RESTART = 2147483655
 
+# 宽高比上限 4:3 (640:480)
+_MAX_ASPECT_RATIO = 4.0 / 3.0
+
+
+def _crop_to_max_aspect(image: np.ndarray) -> np.ndarray:
+    """宽高比超过 4:3 时, 裁长边使其压缩到 4:3; 未超过则不变."""
+    h, w = image.shape[:2]
+    ratio = w / h
+    if ratio > _MAX_ASPECT_RATIO:
+        # 太宽 → 裁左右
+        new_w = int(h * _MAX_ASPECT_RATIO)
+        offset = (w - new_w) // 2
+        logger.info("crop width: %dx%d -> %dx%d", w, h, new_w, h)
+        return image[:, offset:offset + new_w]
+    elif ratio < 1.0 / _MAX_ASPECT_RATIO:
+        # 太高 → 裁上下
+        new_h = int(w * _MAX_ASPECT_RATIO)
+        offset = (h - new_h) // 2
+        logger.info("crop height: %dx%d -> %dx%d", w, h, w, new_h)
+        return image[offset:offset + new_h, :]
+    return image
+
 
 class FrameBuffer:
     """单槽帧缓冲, 线程安全, 丢弃旧帧不阻塞。
@@ -173,10 +195,12 @@ class Producer(threading.Thread):
                     logger.error("frame with zero dimension! w=%d h=%d", stFrameInfo.nWidth, stFrameInfo.nHeight)
                     continue
                 image = np.asarray(data_buf).reshape((stFrameInfo.nHeight, stFrameInfo.nWidth))
-                # 下采样: 3072×2048 → 768×512
+                # 先裁宽高比到 4:3 以内, 再下采样 (减少 resize 处理的像素)
+                image = _crop_to_max_aspect(image)
+                h, w = image.shape[:2]
                 image = cv2.resize(
                     image,
-                    (int(stFrameInfo.nWidth / 4), int(stFrameInfo.nHeight / 4)),
+                    (int(w / 4), int(h / 4)),
                     interpolation=cv2.INTER_AREA,
                 )
                 frame_queue.put(image)
