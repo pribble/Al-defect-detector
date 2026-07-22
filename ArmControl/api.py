@@ -36,22 +36,22 @@ POST_RELEASE = 0.3  # 释放后等待吸盘完全脱离
 # 格式: [ID1_基座, ID2_肩, ID3_肘, ID4_腕, ID5_末端]
 
 # 初始位: 竖直收起, 不遮挡相机视野, 不干涉传送带
-HOME = [90, 90, 90, 0, 90]
+HOME = [90, 50, 40, 0, 90]
 
 # 吸取位: 基座居中, 末端到达正前方 200mm 传送带面
 PICKUP = [90, 30, 62, 0, 90]  # ← 需标定
 
 # 吸取后抬高: 从吸取点垂直抬起, 基座保持居中, 留出旋转空间
-PICKUP_LIFT = [90, 90, 40, 90, 90]
+PICKUP_LIFT = [90, 50, 40, 0, 90]
 
 # OK 放置位上方: 基座右转, 末端在 OK 区正上方 (安全高度)
-OK_ABOVE = [0, 90, 40, 90, 90]  # ← 需标定
+OK_ABOVE = [0, 50, 40, 0, 90]  # ← 需标定
 
 # OK 放置位: 基座右转, 末端到达右侧区域中心 (+60, 0) 传送带面
 OK_PLACE = [0, 40, 55, 0, 90]  # ← 需标定
 
 # NG 放置位上方: 基座左转, 末端在 NG 区正上方 (安全高度)
-NG_ABOVE = [180, 90, 40, 90, 90]  # ← 需标定
+NG_ABOVE = [180, 50, 40, 0, 90]  # ← 需标定
 
 # NG 放置位: 基座左转, 末端到达左侧区域中心 (-60, 0) 传送带面
 NG_PLACE = [180, 40, 55, 0, 90]  # ← 需标定
@@ -170,7 +170,6 @@ def grab_task(data: dict):
     """
     logger.info("分拣开始, flags=%s", data.get('flags'))
 
-    speed = int(data['speed'])  # 舵机运动速度 (ms)
     delay = float(data.get('time', 0))  # 传送带延迟 (秒)
     flags = data['flags']  # "OK" 或 "NG"
 
@@ -181,8 +180,8 @@ def grab_task(data: dict):
 
     # --- 步骤1: HOME → 吸取点 ---
     logger.info("→ 移动到吸取点")
-    arm_move(HOME, speed)
-    arm_move(PICKUP, speed)
+    arm_move(HOME, 250)
+    arm_move(PICKUP, 250)
 
     # --- 步骤2: 吸取铝片 ---
     logger.info("→ 吸盘吸取")
@@ -191,17 +190,17 @@ def grab_task(data: dict):
 
     # --- 步骤3: 抬起至安全高度 ---
     logger.info("→ 抬起至运输高度")
-    arm_move(PICKUP_LIFT, speed)
+    arm_move(PICKUP_LIFT, 250)
 
     # --- 步骤4: 平移 → 放置 ---
     if flags == "OK":
         logger.info("→ 移至 OK 区")
-        arm_move(OK_ABOVE, speed)
-        arm_move(OK_PLACE, speed)
+        arm_move(OK_ABOVE, 500)
+        arm_move(OK_PLACE, 250)
     else:
         logger.info("→ 移至 NG 区")
-        arm_move(NG_ABOVE, speed)
-        arm_move(NG_PLACE, speed)
+        arm_move(NG_ABOVE, 500)
+        arm_move(NG_PLACE, 250)
 
     # --- 步骤5: 释放吸盘 ---
     logger.info("→ 吸盘释放")
@@ -211,14 +210,14 @@ def grab_task(data: dict):
     # --- 步骤6: 抬起离开放置区, 避免复位时碰撞工件 ---
     logger.info("→ 抬起离开放置区")
     if flags == "OK":
-        arm_move(OK_ABOVE, speed)
+        arm_move(OK_ABOVE, 250)
     else:
-        arm_move(NG_ABOVE, speed)
+        arm_move(NG_ABOVE, 250)
     time.sleep(LIFT_PAUSE)
 
     # --- 步骤7: 复位 ---
     logger.info("→ 复位 HOME")
-    arm_move(HOME, 1000)
+    arm_move(HOME, 500)
     time.sleep(0.3)
     logger.info("分拣完成")
 

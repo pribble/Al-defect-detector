@@ -76,7 +76,7 @@ SSIM_WIDTH = 64
 SSIM_HEIGHT = 48
 REFERENCE_IMAGE = 'yuanshi.jpg'
 
-SSIM_TRIGGER_THRESHOLD = 0.9
+SSIM_TRIGGER_THRESHOLD = 0.8
 WHITE_RATIO_THRESHOLD = 0.1
 STABILITY_STD_THRESHOLD = 0.01
 STABILITY_MEAN_THRESHOLD = 0.8
@@ -129,7 +129,7 @@ def trigger_alarm():
 
 def trigger_grab(flags: str):
     """发送 HTTP 请求至 ArmControl 服务, 触发机械臂分拣"""
-    data = {"flags": flags, "speed": shared.GRAB_SPEED, "time": shared.GRAB_DELAY}
+    data = {"flags": flags, "time": shared.GRAB_DELAY}
     requests.post(ARM_URL, json=data, timeout=INFERENCE_TIMEOUT)
 
 
@@ -177,11 +177,12 @@ class Consumer(threading.Thread):
     def __init__(self):
         super().__init__()
         self._ssim_history = [0] * SSIM_HISTORY_SIZE
-        self._state = 0                # 0=IDLE, 1=TRACKING, 2=COOLDOWN
-        self._cooldown = 0             # 冷却倒计帧数
-        self._tracking_count = 0       # 跟踪周期帧总数
-        self._tracking_frames = []     # 跟踪帧队列，头部始终是中间帧
-        self._selected_frame = None    # 跟踪结束后选中的中间帧
+        self._state = 0  # 0=IDLE, 1=TRACKING, 2=COOLDOWN
+        self._cooldown = 0  # 冷却倒计帧数
+        self._tracking_count = 0  # 跟踪周期帧总数
+        self._tracking_frames = []  # 跟踪帧队列，头部始终是中间帧
+        self._selected_frame = None  # 跟踪结束后选中的中间帧
+        self._buf = 0  # 状态切换缓冲计数（入口/出口共用）
         # 标定模式: 追踪 white_ratio 变化以计算传送带速度
         self._cal_last_ratio = 0.0
         self._cal_entry_time = None
@@ -193,15 +194,14 @@ class Consumer(threading.Thread):
         while True:
             time.sleep(0.01)
             try:
-                frame_start_time = time.time()
-                self._process_sampling_frame(frame_start_time)
+                self._process_sampling_frame()
 
             except Exception as e:
                 logger.error('consumer thread error：{}'.format(str(e)))
 
     # ---- 单帧处理 ----
 
-    def _process_sampling_frame(self, frame_start_time: float):
+    def _process_sampling_frame(self):
         global _cached_ref_gray
         image = frame_queue.get()
         if image is None:
@@ -253,24 +253,33 @@ class Consumer(threading.Thread):
 
         if self._state == 0:  # IDLE — 等待铝片进入
             if current_ssim < SSIM_TRIGGER_THRESHOLD and white_ratio > WHITE_RATIO_THRESHOLD:
-                self._state = 1
-                self._tracking_count = 1
-                self._tracking_frames = [image.copy()]
+                self._buf += 1
+                if self._buf >= 3:
+                    self._state = 1
+                    self._tracking_count = 1
+                    self._tracking_frames = [image.copy()]
+                    self._buf = 0
+            else:
+                self._buf = 0
 
         elif self._state == 1:  # TRACKING — 收集跟踪帧，取中间帧
             if current_ssim > SSIM_TRIGGER_THRESHOLD and white_ratio < WHITE_RATIO_THRESHOLD:  # SSIM 回升 ≥ 0.9 → 触发
-                self._selected_frame = self._tracking_frames[0]
-                logger.info(
-                    'SSIM回升 current_ssim:{:.3f}, white_ratio:{:.3f}, '
-                    'total_frames:{}'.format(
-                        current_ssim, white_ratio,
-                        self._tracking_count,
+                self._buf += 1
+                if self._buf >= 3:
+                    self._selected_frame = self._tracking_frames[0]
+                    self._buf = 0
+                    logger.info(
+                        'SSIM回升 current_ssim:{:.3f}, white_ratio:{:.3f}, '
+                        'total_frames:{}'.format(
+                            current_ssim, white_ratio,
+                            self._tracking_count,
+                        )
                     )
-                )
-                self._run_inference_pipeline(frame_start_time)
-                self._state = 2
-                self._cooldown = TRIGGER_COOLDOWN
+                    self._run_inference_pipeline()
+                    self._state = 2
+                    self._cooldown = TRIGGER_COOLDOWN
             else:
+                self._buf = 0
                 self._tracking_count += 1
                 # 单数帧 append，双数帧 pop 头部再 append
                 if self._tracking_count % 2 == 0:
@@ -284,7 +293,7 @@ class Consumer(threading.Thread):
 
     # ---- 推理管线 ----
 
-    def _run_inference_pipeline(self, frame_start_time: float):
+    def _run_inference_pipeline(self):
         annotated_image = self._selected_frame.copy()
         original_image = annotated_image.copy()
 
@@ -301,44 +310,37 @@ class Consumer(threading.Thread):
         response = requests.post(FPGA_URL, files={'image_file': image_bytes}, timeout=INFERENCE_TIMEOUT)
         logger.info('推理服务耗费：{}'.format(time.time() - inference_start_time))
 
-        processing_rate = FRAME_SKIP_COUNT / (time.time() - frame_start_time)
         inference_result = json.loads(response.text)
         logger.info(inference_result)
 
         if inference_result['len'] > 0:
-            self._handle_inference_result(
-                inference_result, uid, file_name, annotated_image, original_image,
-                processing_rate,
-            )
+            self._handle_inference_result(inference_result, uid, file_name, annotated_image, original_image)
         else:
             shared.thread_pool.submit(trigger_grab, "OK")
-            self._save_normal_result(uid, file_name, annotated_image, original_image, processing_rate)
+            self._save_normal_result(uid, file_name, annotated_image, original_image)
 
-    def _handle_inference_result(
-            self, inference_result, uid, file_name, annotated_image, original_image, processing_rate
-    ):
+    def _handle_inference_result(self, inference_result, uid, file_name, annotated_image, original_image):
         action = inference_result.get('action', 'OK')
 
         if action == "NG":
-            self._handle_defect(inference_result, uid, file_name, annotated_image, original_image, processing_rate)
+            self._handle_defect(inference_result, uid, file_name, annotated_image, original_image)
         else:
             shared.thread_pool.submit(trigger_grab, "OK")
-            self._save_normal_result(uid, file_name, annotated_image, original_image, processing_rate)
+            self._save_normal_result(uid, file_name, annotated_image, original_image)
 
     @staticmethod
-    def _save_normal_result(uid, file_name, annotated_image, original_image, processing_rate):
+    def _save_normal_result(uid, file_name, annotated_image, original_image):
         try:
             annotated_image = cv2.cvtColor(annotated_image, cv2.COLOR_GRAY2RGB)
         except Exception:
             pass
-        _draw_fps_label(annotated_image, processing_rate)
         cv2.imwrite(file_name, annotated_image)
         database.insert_data(uid, file_name, 'zheng_chang', None, None)
         cv2.imwrite(original_image_path, original_image)
         if os.path.exists(detect_image_path):
             os.remove(detect_image_path)
 
-    def _handle_defect(self, inference_result, uid, file_name, annotated_image, original_image, processing_rate):
+    def _handle_defect(self, inference_result, uid, file_name, annotated_image, original_image):
         logger.info("准备报警")
         shared.thread_pool.submit(trigger_alarm)
         logger.info("报警完成")
@@ -352,8 +354,7 @@ class Consumer(threading.Thread):
                 continue
 
             annotated_image = self._draw_defect_box(
-                annotated_image, detection['loc'], shared.defect_name[class_name],
-                detection['score'], processing_rate
+                annotated_image, detection['loc'], shared.defect_name[class_name], detection['score']
             )
             cv2.imwrite(file_name, annotated_image)
             database.insert_data(uid, file_name, class_name, detection['prediction_time'], detection['score'])
@@ -364,7 +365,7 @@ class Consumer(threading.Thread):
         cv2.imwrite(detect_image_path, annotated_image)
 
     @staticmethod
-    def _draw_defect_box(image, loc, class_name_cn: str, score: float, fps: float):
+    def _draw_defect_box(image, loc, class_name_cn: str, score: float):
         # Scale coordinates from 300×300 inference space to actual image size
         h, w = image.shape[:2]
         scale_x = w / 300.0
@@ -387,7 +388,6 @@ class Consumer(threading.Thread):
             font=font, fill="green",
         )
         image = np.array(pil_image)
-        _draw_fps_label(image, fps)
         return image
 
 
