@@ -7,11 +7,14 @@ Captures images via Hikvision industrial camera (MVS SDK), detects defects via F
 ## Architecture
 
 ```
-Hikvision Camera ──frame_queue──> GrabImage (:7777) ──POST /predict──> FPGA Board (172.16.68.110:8080)
-                                       │                                    └── SSD MobileNet V1
-                                       ├── SQLite (defect.db)                    + Paddle Lite + FPGA
-                                       ├── POST /grab ──> ArmControl (:8899) ──> /dev/XIPAN (5-DOF arm)
-                                       └── MJPEG stream ──> nginx (:80/8080) ──> Browser (Vue.js SPA)
+Hikvision Camera ──frame_queue──> GrabImage (:7777)
+                                       │
+                                       ├── POST /predict ──> FPGA Board (172.16.68.110:8080)
+                                       │                         └── SSD MobileNet V1
+                                       │                             + Paddle Lite + FPGA
+                                       ├── POST /grab ──> ArmControl (:8899) ──> /dev/XIPAN
+                                       ├── SQLite (defect.db)
+                                       └── GET /img (MJPEG) <── Browser (Vue.js SPA) <── nginx (:8080) <── frontend/
 ```
 
 ### Inference Pipeline
@@ -57,11 +60,11 @@ journalctl -u detect-api.service -n 50 --no-pager
 ## Deploy
 
 ```bash
-# Push code to Pi (dry-run first, then confirms)
+# 在 x86_64 主机上：推送代码到树莓派
 bash deploy.sh [user@pi-ip] [/opt/HaoYao]
 
-# Restart services on Pi
-bash restart.sh
+# 在树莓派上：重启服务使新代码生效
+bash /opt/HaoYao/restart.sh
 ```
 
 ## FPGA Inference Server
@@ -81,7 +84,7 @@ cd fpga && bash upload.sh
 Self-contained single-page application (Vue 2 + Element UI + ECharts) at `frontend/index.html`. No build step needed — libraries are served locally from `frontend/vendor/`. Configured in `config.json`:
 
 ```json
-{"ip": "http://172.16.68.111:8899", "url": "http://172.16.68.111:7777", "title": "工业缺陷检测管理平台", "version": "v3.0"}
+{"ip": "http://172.16.68.111:8899", "url": "http://172.16.68.111:7777", "title": "工业缺陷检测管理平台", "version": "v4.0"}
 ```
 
 Served by nginx on ports 80 and 8080. Features:

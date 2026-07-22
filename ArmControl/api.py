@@ -171,7 +171,7 @@ def grab_task(data: dict):
     logger.info("分拣开始, flags=%s", data.get('flags'))
 
     speed = int(data['speed'])  # 舵机运动速度 (ms)
-    delay = int(data.get('time', 0))  # 传送带延迟 (秒)
+    delay = float(data.get('time', 0))  # 传送带延迟 (秒)
     flags = data['flags']  # "OK" 或 "NG"
 
     # --- 步骤0: 等待铝片从相机位置行进到吸取点 ---

@@ -35,13 +35,11 @@ def _crop_to_max_aspect(image: np.ndarray) -> np.ndarray:
         # 太宽 → 裁左右
         new_w = int(h * _MAX_ASPECT_RATIO)
         offset = (w - new_w) // 2
-        logger.info("crop width: %dx%d -> %dx%d", w, h, new_w, h)
         return image[:, offset:offset + new_w]
     elif ratio < 1.0 / _MAX_ASPECT_RATIO:
         # 太高 → 裁上下
         new_h = int(w * _MAX_ASPECT_RATIO)
         offset = (h - new_h) // 2
-        logger.info("crop height: %dx%d -> %dx%d", w, h, w, new_h)
         return image[offset:offset + new_h, :]
     return image
 
@@ -138,7 +136,7 @@ def init_camera():
         # --- 手动固定曝光 (避免自动曝光导致 SSIM 误触) ---
         cam.MV_CC_SetEnumValue("ExposureAuto", 0)       # 0=Off
         cam.MV_CC_SetEnumValue("GainAuto", 0)           # 0=Off
-        cam.MV_CC_SetFloatValue("ExposureTime", 5000.0) # 5000 µs = 5 ms
+        cam.MV_CC_SetFloatValue("ExposureTime", 7000.0)
         cam.MV_CC_SetFloatValue("Gain", 0.0)            # 0 dB
         logger.info("set manual exposure: ExposureTime=5000us Gain=0dB")
 

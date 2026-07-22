@@ -176,13 +176,13 @@ class Consumer(threading.Thread):
 
     def __init__(self):
         super().__init__()
-        self._diff_3ago = 0
-        self._diff_2ago = 0
-        self._diff_1ago = 0
         self._ssim_history = [0] * SSIM_HISTORY_SIZE
-        self._recent_frames = [None, None]
+        self._state = 0                # 0=IDLE, 1=TRACKING, 2=COOLDOWN
+        self._cooldown = 0             # 冷却倒计帧数
+        self._tracking_count = 0       # 跟踪周期帧总数
+        self._tracking_frames = []     # 跟踪帧队列，头部始终是中间帧
+        self._selected_frame = None    # 跟踪结束后选中的中间帧
         # 标定模式: 追踪 white_ratio 变化以计算传送带速度
-        self._trigger_cooldown = 0
         self._cal_last_ratio = 0.0
         self._cal_entry_time = None
         self._cal_peak_ratio = 0.0
@@ -206,8 +206,6 @@ class Consumer(threading.Thread):
         image = frame_queue.get()
         if image is None:
             return
-        self._recent_frames[0] = self._recent_frames[1]
-        self._recent_frames[1] = image
 
         black_image = cv2.resize(image, (SSIM_WIDTH, SSIM_HEIGHT), interpolation=cv2.INTER_AREA)
         blurred = cv2.GaussianBlur(black_image, (GAUSSIAN_KERNEL, GAUSSIAN_KERNEL), 0)
@@ -253,33 +251,41 @@ class Consumer(threading.Thread):
             cv2.imwrite(REFERENCE_IMAGE, image)
             _cached_ref_gray = None  # 缓存失效, 下次重载
 
-        diff_curr = current_ssim - self._diff_1ago
-        diff_prev = self._diff_1ago - self._diff_2ago
-        diff_prev2 = self._diff_2ago - self._diff_3ago
+        if self._state == 0:  # IDLE — 等待铝片进入
+            if current_ssim < SSIM_TRIGGER_THRESHOLD and white_ratio > WHITE_RATIO_THRESHOLD:
+                self._state = 1
+                self._tracking_count = 1
+                self._tracking_frames = [image.copy()]
 
-        if self._trigger_cooldown > 0:
-            self._trigger_cooldown -= 1
-        elif current_ssim < SSIM_TRIGGER_THRESHOLD:
-            logger.info(
-                'current_ssim:{},diff_1ago:{},diff_2ago:{},diff_3ago:{},white_ratio:{}'.format(
-                    current_ssim, self._diff_1ago, self._diff_2ago, self._diff_3ago, white_ratio
+        elif self._state == 1:  # TRACKING — 收集跟踪帧，取中间帧
+            if current_ssim > SSIM_TRIGGER_THRESHOLD and white_ratio < WHITE_RATIO_THRESHOLD:  # SSIM 回升 ≥ 0.9 → 触发
+                self._selected_frame = self._tracking_frames[0]
+                logger.info(
+                    'SSIM回升 current_ssim:{:.3f}, white_ratio:{:.3f}, '
+                    'total_frames:{}'.format(
+                        current_ssim, white_ratio,
+                        self._tracking_count,
+                    )
                 )
-            )
-
-            if diff_curr > 0 > diff_prev2 and diff_prev < 0 and white_ratio > WHITE_RATIO_THRESHOLD:
-                self._trigger_cooldown = TRIGGER_COOLDOWN
                 self._run_inference_pipeline(frame_start_time)
+                self._state = 2
+                self._cooldown = TRIGGER_COOLDOWN
+            else:
+                self._tracking_count += 1
+                # 单数帧 append，双数帧 pop 头部再 append
+                if self._tracking_count % 2 == 0:
+                    self._tracking_frames.pop(0)
+                self._tracking_frames.append(image.copy())
 
-        self._diff_3ago = self._diff_2ago
-        self._diff_2ago = self._diff_1ago
-        self._diff_1ago = current_ssim
+        elif self._state == 2:  # COOLDOWN — 冷却
+            self._cooldown -= 1
+            if self._cooldown <= 0:
+                self._state = 0
 
     # ---- 推理管线 ----
 
     def _run_inference_pipeline(self, frame_start_time: float):
-        annotated_image = self._recent_frames[0]
-        if annotated_image is None:
-            annotated_image = self._recent_frames[1]
+        annotated_image = self._selected_frame.copy()
         original_image = annotated_image.copy()
 
         uid = str(uuid.uuid1())
