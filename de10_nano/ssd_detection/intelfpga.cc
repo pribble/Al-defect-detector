@@ -1,0 +1,677 @@
+/* Copyright (c) 2020 AWCloud. All Rights Reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License. */
+
+#include "intelfpga.h"
+
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <sys/types.h>
+#include <time.h>
+#include <unistd.h>
+
+#include <fstream>
+#include <iostream>
+#include <set>
+#include <sstream>
+#include <string>
+#include <vector>
+#include <chrono>
+
+#include "common.h"
+#include "arm_neon.h"
+
+using namespace std;
+
+#define SDK_EMULATE 0
+
+static int fpga_fd = -1;
+static bool fpga_init_status = false;
+static int weight_offset = 0;
+static int output_offset = 0;
+
+struct mem_cfg {
+  int8_t *src;
+  int8_t *dst;
+  int size;
+  bool valid;
+};
+static struct mem_cfg global_mem_cfg;
+
+char const *op_type[] = {
+    "",
+    "INTELFPGA_Conv2D",
+    "",
+    "INTELFPGA_CALIB",
+    "INTELFPGA_DW_Conv2D",
+    "INTELFPGA_Pool2D_MAX",
+    "INTELFPGA_Pool2D_AVG",
+    "INTELFPGA_ELE_ADD",
+};
+
+int cma_alloc(int fd, struct cma_blk_s *pcb) {
+  pcb->size = ROUND_UP(pcb->size, sysconf(_SC_PAGE_SIZE));
+  if (ioctl(fd, CMA_IOCTL_MAKE(CMA_CMD_ALLOC), pcb)) {
+    printf("CMA_CMD_ALLOC failed\n");
+    return -1;
+  }
+  pcb->addr = mmap(0, pcb->size,
+                   PROT_READ | PROT_WRITE | PROT_EXEC, MAP_SHARED,
+                   fd, pcb->phys);
+  if (pcb->addr == MAP_FAILED) {
+    ioctl(fd, CMA_IOCTL_MAKE(CMA_CMD_FREE), pcb);
+    return -1;
+  }
+  return 0;
+}
+
+int cma_free(int fd, struct cma_blk_s *pcb) {
+  if (munmap(pcb->addr, pcb->size) == -1)
+    return -1;
+  if (ioctl(fd, CMA_IOCTL_MAKE(CMA_CMD_FREE), pcb)) {
+    printf("CMEM_CMD_FREE failed\n");
+    return -1;
+  }
+  return 0;
+}
+
+int up_round(int a, int b) {
+  return (a - 1) / b + 1;
+}
+
+void intelfpga_free(void *ptr) {
+  free(ptr);
+}
+
+void *intelfpga_malloc(size_t size) {
+  return malloc(size);
+}
+
+void memorymap(int fd, uint32_t **addr, size_t length, off_t offset) {
+  *addr = (uint32_t *)mmap(0, length, PROT_READ | PROT_WRITE,
+                           MAP_SHARED, fd, offset);
+  if (*addr == (void *)-1) {
+    printf("Can't map the memory:%lX to user space.\n", offset);
+    fpga_release();
+    exit(-1);
+  }
+}
+
+void memoryunmap(void *addr, size_t len) {
+  if (munmap(addr, len) == -1) {
+    printf("memmory unmap failed\n");
+  }
+}
+
+void foo_set(uint32_t *addr, int offset, uint32_t value) {
+  addr[offset >> 2] = value;
+}
+
+uint32_t foo_get(uint32_t *addr, int offset) {
+  return addr[offset >> 2];
+}
+
+int min(int a, int b) {
+  return a > b ? b : a;
+}
+
+void fpga_data_address_cmamap(int fd, struct cma_blk_s *cb, uint32_t **data_addr) {
+  if (cma_alloc(fd, cb)) {
+    close(fd);
+    printf("cma_alloc fail!\n");
+    exit(-1);
+  }
+  *data_addr = (uint32_t *)cb->addr;
+}
+
+void fpga_reg_address_map(int fd) {
+  memorymap(fd, &foo, FPGAREG_MAP_SIZE, FPGAREG_CNN_BASE_ADDR);
+}
+
+int devmem_fd = 0;
+#ifdef ARCH_ABI_ARM32
+int devcma_fd = 0;
+cma_blk_s cb_data, cb_weight, cb_scale, cb_param, cb_org;
+#endif
+
+void fpga_release(void) {
+  if (fpga_init_status) {
+    fpga_init_status = false;
+    printf("fpga release\n");
+    cma_free(devcma_fd, &cb_data);
+    cma_free(devcma_fd, &cb_weight);
+    cma_free(devcma_fd, &cb_scale);
+    cma_free(devcma_fd, &cb_param);
+    cma_free(devcma_fd, &cb_org);
+    close(devcma_fd);
+    memoryunmap((uint32_t *)foo, FPGAREG_MAP_SIZE);
+    close(devmem_fd);
+  }
+  output_offset = 0;
+  weight_offset = 0;
+}
+
+int fpga_init() {
+  if (fpga_init_status)
+    return 0;
+
+  devmem_fd = open("/dev/mem", O_RDWR | O_SYNC);
+  fpga_reg_address_map(devmem_fd);
+
+  devcma_fd = open("/dev/cmadrv0", O_RDWR);
+  if (devcma_fd < 0) {
+    printf("open drvier failed\n");
+    fpga_release();
+    exit(-1);
+  }
+
+  cb_data.size = FPGADATA_CNN_DATA_SIZE;
+  cb_weight.size = FPGADATA_CNN_WEIGHT_SIZE;
+  cb_param.size = FPGADATA_CNN_PARAM_SIZE;
+  cb_scale.size = FPGADATA_CNN_SCALE_SIZE;
+  cb_org.size = FPGADATA_ORGANIZE_DATA_SIZE;
+
+  fpga_data_address_cmamap(devcma_fd, &cb_data, &udata);
+  fpga_data_address_cmamap(devcma_fd, &cb_weight, &uweight);
+  fpga_data_address_cmamap(devcma_fd, &cb_param, &uparam);
+  fpga_data_address_cmamap(devcma_fd, &cb_scale, &uscale);
+  fpga_data_address_cmamap(devcma_fd, &cb_org, &uorganize);
+
+  printf("cb_data.phy:%x\r\n", cb_data.phys);
+  printf("cb_weight.phy:%x\r\n", cb_weight.phys);
+  printf("cb_param.phy:%x\r\n", cb_param.phys);
+  printf("cb_scale.phy:%x\r\n", cb_scale.phys);
+  printf("cb_org.phy:%x\r\n", cb_org.phys);
+
+  foo_set(foo, FPGAREG_CNN_DDROUT, cb_data.phys);
+  foo_set(foo, FPGAREG_CNN_DDRIN, cb_data.phys);
+  foo_set(foo, FPGAREG_CNN_DDRW, cb_weight.phys);
+  foo_set(foo, FPGAREG_CNN_PARAM, cb_param.phys);
+  foo_set(foo, FPGAREG_CNN_SCALE, cb_scale.phys);
+
+  fpga_init_status = true;
+  return 0;
+}
+
+int start_fpga(uint32_t *ip, uint32_t start_reg_addr) {
+  uint32_t status;
+  status = foo_get(ip, start_reg_addr);
+  status |= 0x1;
+  foo_set(ip, start_reg_addr, status);
+  status = foo_get(ip, start_reg_addr);
+  auto waitip_start = std::chrono::steady_clock::now();
+
+  while (status & 1) {
+    status = foo_get(ip, start_reg_addr);
+    std::chrono::duration<float> wait_ip_time =
+        std::chrono::steady_clock::now() - waitip_start;
+    if (wait_ip_time.count() >= 5) {
+      printf("wait ip fail.\n");
+      fpga_release();
+      exit(-1);
+    }
+  }
+}
+
+#if (REOGANIZE_TYPE == REOGANIZE_FPGA)
+void data_reorganize(int mode, int in_c, int feature_map,
+                     int input_offset, int output_offset) {
+  foo_set(data_reorganize_ip, FPGAREG_REORG_MODE, mode);
+  foo_set(data_reorganize_ip, FPGAREG_REORG_IN_C, in_c);
+  foo_set(data_reorganize_ip, FPGAREG_REORG_FEATURE_MAP_SIZE, feature_map);
+  foo_set(data_reorganize_ip, FPGAREG_REORG_DDR_INPUT_OFFSET, input_offset);
+  foo_set(data_reorganize_ip, FPGAREG_REORG_DDR_OUTPUT_OFFSET, output_offset);
+  int32_t status;
+  status = foo_get(data_reorganize_ip, FPGAREG_REORG_START);
+  status |= 0x1;
+  foo_set(data_reorganize_ip, FPGAREG_REORG_START, status);
+  status = foo_get(data_reorganize_ip, FPGAREG_REORG_START);
+  while (status & 1)
+    status = foo_get(data_reorganize_ip, FPGAREG_REORG_START);
+}
+
+#elif (REOGANIZE_TYPE == REOGANIZE_ARM)
+#if (ARMREOG_TYPE == ARMREOG_NEON)
+void tran_8(uint8_t *gbild_, uint8_t *gbild_t_, size_t gx, size_t gy) {
+  uint8_t **gbild = (uint8_t **)malloc(sizeof(char *) * gy);
+  uint8_t **gbild_t = (uint8_t **)malloc(sizeof(char *) * gx);
+
+  for (int i = 0; i < gy; i++)
+    gbild[i] = gbild_ + i * gx;
+  for (int i = 0; i < gx; i++)
+    gbild_t[i] = gbild_t_ + i * gy;
+
+  uint8x8x2_t reg882_0, reg882_1, reg882_2, reg882_3;
+  uint16x4x2_t reg1642_0, reg1642_1, reg1642_2, reg1642_3;
+  uint32x2x2_t reg3222_0, reg3222_1, reg3222_2, reg3222_3;
+  int gx_r = gx % 8;
+  int gy_r = gy % 8;
+  int gx_l = gx - 7;
+  int gy_l = gy - 7;
+  int gx_k = gx - gx_r;
+  int gy_k = gy - gy_r;
+  int x, y;
+
+  for (y = 0; y < gy_l; y += 8) {
+    for (x = 0; x < gx_l; x += 8) {
+      reg882_0.val[0] = vld1_u8(&gbild[y][x]);
+      reg882_0.val[1] = vld1_u8(&gbild[y + 1][x]);
+      reg882_1.val[0] = vld1_u8(&gbild[y + 2][x]);
+      reg882_1.val[1] = vld1_u8(&gbild[y + 3][x]);
+      reg882_2.val[0] = vld1_u8(&gbild[y + 4][x]);
+      reg882_2.val[1] = vld1_u8(&gbild[y + 5][x]);
+      reg882_3.val[0] = vld1_u8(&gbild[y + 6][x]);
+      reg882_3.val[1] = vld1_u8(&gbild[y + 7][x]);
+
+      reg882_0 = vtrn_u8(reg882_0.val[0], reg882_0.val[1]);
+      reg882_1 = vtrn_u8(reg882_1.val[0], reg882_1.val[1]);
+      reg882_2 = vtrn_u8(reg882_2.val[0], reg882_2.val[1]);
+      reg882_3 = vtrn_u8(reg882_3.val[0], reg882_3.val[1]);
+
+      reg1642_0 = vtrn_u16(vreinterpret_u16_u8(reg882_0.val[0]),
+                           vreinterpret_u16_u8(reg882_1.val[0]));
+      reg1642_1 = vtrn_u16(vreinterpret_u16_u8(reg882_0.val[1]),
+                           vreinterpret_u16_u8(reg882_1.val[1]));
+      reg1642_2 = vtrn_u16(vreinterpret_u16_u8(reg882_2.val[0]),
+                           vreinterpret_u16_u8(reg882_3.val[0]));
+      reg1642_3 = vtrn_u16(vreinterpret_u16_u8(reg882_2.val[1]),
+                           vreinterpret_u16_u8(reg882_3.val[1]));
+
+      reg3222_0 = vtrn_u32(vreinterpret_u32_u16(reg1642_0.val[0]),
+                           vreinterpret_u32_u16(reg1642_2.val[0]));
+      reg3222_1 = vtrn_u32(vreinterpret_u32_u16(reg1642_0.val[1]),
+                           vreinterpret_u32_u16(reg1642_2.val[1]));
+      reg3222_2 = vtrn_u32(vreinterpret_u32_u16(reg1642_1.val[0]),
+                           vreinterpret_u32_u16(reg1642_3.val[0]));
+      reg3222_3 = vtrn_u32(vreinterpret_u32_u16(reg1642_1.val[1]),
+                           vreinterpret_u32_u16(reg1642_3.val[1]));
+
+      reg882_0.val[0] = vreinterpret_u8_u32(reg3222_0.val[0]);
+      reg882_0.val[1] = vreinterpret_u8_u32(reg3222_0.val[1]);
+      reg882_1.val[0] = vreinterpret_u8_u32(reg3222_1.val[0]);
+      reg882_1.val[1] = vreinterpret_u8_u32(reg3222_1.val[1]);
+      reg882_2.val[0] = vreinterpret_u8_u32(reg3222_2.val[0]);
+      reg882_2.val[1] = vreinterpret_u8_u32(reg3222_2.val[1]);
+      reg882_3.val[0] = vreinterpret_u8_u32(reg3222_3.val[0]);
+      reg882_3.val[1] = vreinterpret_u8_u32(reg3222_3.val[1]);
+
+      vst1_u8(&gbild_t[x][y], reg882_0.val[0]);
+      vst1_u8(&gbild_t[x + 1][y], reg882_2.val[0]);
+      vst1_u8(&gbild_t[x + 2][y], reg882_1.val[0]);
+      vst1_u8(&gbild_t[x + 3][y], reg882_3.val[0]);
+      vst1_u8(&gbild_t[x + 4][y], reg882_0.val[1]);
+      vst1_u8(&gbild_t[x + 5][y], reg882_2.val[1]);
+      vst1_u8(&gbild_t[x + 6][y], reg882_1.val[1]);
+      vst1_u8(&gbild_t[x + 7][y], reg882_3.val[1]);
+    }
+  }
+
+  for (y = gy_k; y < gy; y++)
+    for (x = 0; x < gx; x++)
+      gbild_t[x][y] = gbild[y][x];
+  for (x = gx_k; x < gx; x++)
+    for (y = 0; y < gy_k; y++)
+      gbild_t[x][y] = gbild[y][x];
+
+  free(gbild);
+  free(gbild_t);
+}
+#endif
+
+void InputRearrange(int8_t *din, int8_t *dout,
+                    const int c, const int h, const int w, const int pad) {
+#if (ARMREOG_TYPE == ARMREOG_POLL)
+  int8_t *dout_array[INPUT_EXTEND_SCALE];
+  int idx_fpga_idata = 0;
+  for (int i = 0; i < up_round(c, INPUT_EXTEND_SCALE); i++) {
+    dout_array[0] = din + i * ((h + 2 * pad) * (w + 2 * pad) * INPUT_EXTEND_SCALE);
+    for (int n = 1; n < INPUT_EXTEND_SCALE; n++)
+      dout_array[n] = dout_array[n - 1] + (h + 2 * pad) * (w + 2 * pad);
+    for (int r = 0; r < (h + 2 * pad); r++)
+      for (int cc = 0; cc < (w + 2 * pad); cc++)
+        for (int k = 0; k < INPUT_EXTEND_SCALE; k++) {
+          if (k < c)
+            dout[idx_fpga_idata++] = *(dout_array[k]++);
+          else
+            dout[idx_fpga_idata++] = 0;
+        }
+  }
+#elif (ARMREOG_TYPE == ARMREOG_NEON)
+  int high = h + 2 * pad;
+  int width = w + 2 * pad;
+  int area = high * width;
+  tran_8((uint8_t *)din, (uint8_t *)dout, area,
+         up_round(c, INPUT_EXTEND_SCALE) * INPUT_EXTEND_SCALE);
+  for (int cc = 0; cc < area; cc++)
+    memset(dout + cc * INPUT_EXTEND_SCALE + c, 0, INPUT_EXTEND_SCALE - c);
+#endif
+}
+
+void OutputRearrange(int8_t *din, int8_t *dout,
+                     const int c, const int h, const int w) {
+#if (ARMREOG_TYPE == ARMREOG_POLL)
+  int8_t *dout_array[INPUT_EXTEND_SCALE];
+  int idx_fpga_idata = 0;
+  for (int i = 0; i < up_round(c, INPUT_EXTEND_SCALE); i++) {
+    dout_array[0] = dout + i * h * w * INPUT_EXTEND_SCALE;
+    for (int n = 1; n < INPUT_EXTEND_SCALE; n++)
+      dout_array[n] = dout_array[n - 1] + h * w;
+    for (int r = 0; r < h; r++)
+      for (int cc = 0; cc < w; cc++)
+        for (int k = 0; k < INPUT_EXTEND_SCALE; k++)
+          *(dout_array[k]++) = din[idx_fpga_idata++];
+  }
+#elif (ARMREOG_TYPE == ARMREOG_NEON)
+  int area = h * w;
+  for (int i = 0; i < up_round(c, INPUT_EXTEND_SCALE); i++)
+    tran_8((uint8_t *)din + i * area * INPUT_EXTEND_SCALE,
+           (uint8_t *)dout + i * area * INPUT_EXTEND_SCALE,
+           INPUT_EXTEND_SCALE, area);
+#endif
+}
+#endif
+
+struct device_output_config intelfpga_output_malloc(int8_t **dst,
+                                                    int out_c,
+                                                    int out_h,
+                                                    int out_w) {
+  fpga_init();
+  int output_channel_block = (out_c - 1) / INPUT_EXTEND_SCALE + 1;
+  int output_size = output_channel_block * INPUT_CHANNEL_TILE * out_h * out_w;
+  if (*dst == nullptr)
+    *dst = (int8_t *)udata + output_offset;
+  struct device_output_config config;
+  config.output_size = output_size;
+  config.output_offset = output_offset / INPUT_CHANNEL_TILE;
+  output_offset += output_size;
+  return config;
+}
+
+int FpgaByte2WordOffset(int op_type, int byte_offset) {
+  int offset;
+  switch (op_type) {
+  case INTELFPGA_Conv2D:
+  case INTELFPGA_DW_Conv2D:
+    offset = byte_offset / INPUT_CHANNEL_TILE;
+    break;
+  default:
+    std::cout << "[ByteOffset2WordOffset] Unsupported op: " << op_type << "\n";
+    fpga_release();
+    exit(-1);
+  }
+  return offset;
+}
+
+int FpgaWord2ByteOffset(int op_type, int word_offset) {
+  int offset;
+  switch (op_type) {
+  case INTELFPGA_Conv2D:
+  case INTELFPGA_DW_Conv2D:
+    offset = word_offset * INPUT_CHANNEL_TILE;
+    break;
+  default:
+    std::cout << "[WordOffset2ByteOffset] Unsupported op: " << op_type << "\n";
+    fpga_release();
+    exit(-1);
+  }
+  return offset;
+}
+
+int FpgaGetOutputOffset(DeviceGraphNode *node) {
+  int offset;
+  if (node->op_type_ == INTELFPGA_Conv2D ||
+      node->op_type_ == INTELFPGA_DW_Conv2D) {
+    auto param = dynamic_cast<FpgaConvParam *>(node->node_param_);
+    offset = param->param.output_offset;
+  } else {
+    std::cout << "[FpgaGetOutputOffset] Unsupported op: "
+              << node->op_type_ << "\n";
+    fpga_release();
+    exit(-1);
+  }
+  return offset;
+}
+
+void FpgaReorganizeInput(DeviceGraphNode *node, int input_id, int layer) {
+  if (node->op_type_ == INTELFPGA_Conv2D ||
+      node->op_type_ == INTELFPGA_DW_Conv2D) {
+    auto argp = dynamic_cast<FpgaConvParam *>(node->node_param_);
+#if (REOGANIZE_TYPE == REOGANIZE_FPGA)
+    memcpy((int8_t *)uorganize, (int8_t *)argp->ia,
+           argp->param.in_c * argp->param.in_h * argp->param.in_w);
+    data_reorganize(2, argp->param.in_c,
+                    argp->param.in_h * argp->param.in_w,
+                    cb_org.phys,
+                    cb_data.phys + FpgaWord2ByteOffset(
+                        node->op_type_, argp->param.input_offset));
+#elif (REOGANIZE_TYPE == REOGANIZE_ARM)
+    InputRearrange((int8_t *)argp->ia,
+        (int8_t *)((int8_t *)udata + FpgaWord2ByteOffset(
+            node->op_type_, argp->param.input_offset)),
+        argp->param.in_c, argp->param.in_h, argp->param.in_w, 0);
+#endif
+  } else {
+    std::cout << "[FpgaReorganizeInput] Unsupported op: "
+              << node->op_type_ << "\n";
+    fpga_release();
+    exit(-1);
+  }
+}
+
+void FpgaOutputReorganize(DeviceGraphNode *node, int layer) {
+  if (node->op_type_ == INTELFPGA_Conv2D ||
+      node->op_type_ == INTELFPGA_DW_Conv2D) {
+    auto argp = dynamic_cast<FpgaConvParam *>(node->node_param_);
+#if (REOGANIZE_TYPE == REOGANIZE_FPGA)
+    data_reorganize(3, argp->param.output_c,
+                    argp->param.output_h * argp->param.output_w,
+                    cb_data.phys + FpgaWord2ByteOffset(
+                        node->op_type_, argp->param.output_offset),
+                    cb_org.phys);
+#elif (REOGANIZE_TYPE == REOGANIZE_ARM)
+    OutputRearrange(
+        (int8_t *)((int8_t *)udata + FpgaWord2ByteOffset(
+            node->op_type_, argp->param.output_offset)),
+        (int8_t *)uorganize,
+        argp->param.output_c,
+        argp->param.output_h,
+        argp->param.output_w);
+#endif
+    global_mem_cfg.src = (int8_t *)uorganize;
+    global_mem_cfg.dst = (int8_t *)argp->oa;
+    global_mem_cfg.size =
+        argp->param.output_c * argp->param.output_h * argp->param.output_w;
+    global_mem_cfg.valid = true;
+  } else {
+    std::cout << "[FpgaOutputReorganize] Unsupported op: "
+              << node->op_type_ << "\n";
+    fpga_release();
+    exit(-1);
+  }
+}
+
+struct device_output_config FpgaMemMalloc(
+    int op_type, int8_t *dst, int c, int h, int w) {
+  auto config = device_output_config();
+  switch (op_type) {
+  case INTELFPGA_Conv2D:
+  case INTELFPGA_DW_Conv2D:
+    config = intelfpga_output_malloc(&dst, c, h, w);
+    break;
+  default:
+    std::cout << "[DeviceMalloc] Unsupported op: " << op_type << "\n";
+    fpga_release();
+    exit(-1);
+  }
+  return config;
+}
+
+struct device_weight_config conv2d_weight_reorganize(int8_t *src,
+                                                     int8_t **dst,
+                                                     int out_c,
+                                                     int in_c,
+                                                     int kh,
+                                                     int kw,
+                                                     const char *filter_name) {
+  fpga_init();
+  int output_channel, input_channel;
+  int block_of_input_channel = (in_c - 1) / INPUT_CHANNEL_TILE + 1;
+  int block_of_output_channel = (out_c - 1) / OUTPUT_CHANNEL_TILE + 1;
+  int kernel_size = kh * kw;
+  int block_size = INPUT_CHANNEL_TILE * kernel_size * WEIGHT_EXTEND_SCALE;
+  int8_t temp;
+  int weight_size = block_of_output_channel * block_of_input_channel *
+                    INPUT_CHANNEL_TILE * kernel_size * WEIGHT_EXTEND_SCALE;
+  if (*dst == nullptr)
+    *dst = (int8_t *)uweight + weight_offset;
+  struct device_weight_config config;
+  config.weight_size = weight_size;
+  config.weight_offset = weight_offset / INPUT_CHANNEL_TILE;
+  weight_offset += weight_size;
+  for (int i = 0; i < block_of_output_channel; i++) {
+    for (int j = 0; j < block_of_input_channel; j++) {
+      for (int ti = 0; ti < INPUT_CHANNEL_TILE; ti++) {
+        for (int k = 0; k < kernel_size; k++) {
+          for (int m = 0; m < WEIGHT_EXTEND_SCALE; m++) {
+            input_channel = j * INPUT_CHANNEL_TILE + ti;
+            output_channel = i * OUTPUT_CHANNEL_TILE + m;
+            if (output_channel >= out_c || input_channel >= in_c)
+              temp = 0;
+            else
+              temp = src[(output_channel * in_c + input_channel) * kernel_size + k];
+            (*dst)[(i * block_of_input_channel + j) * block_size +
+                   (k + ti * kernel_size) * WEIGHT_EXTEND_SCALE + m] = temp;
+          }
+        }
+      }
+    }
+  }
+  return config;
+}
+
+struct device_weight_config dw_conv2d_weight_reorganize(
+    int8_t *src, int8_t **dst, int out_c, int kh, int kw) {
+  fpga_init();
+  int block_of_output_channel = (out_c - 1) / OUTPUT_CHANNEL_TILE + 1;
+  int kernel_size = kh * kw;
+  int block_size = OUTPUT_CHANNEL_TILE * INPUT_CHANNEL_TILE * kernel_size;
+  int weight_size = block_of_output_channel * INPUT_CHANNEL_TILE * kernel_size *
+                    WEIGHT_EXTEND_SCALE;
+  int8_t temp;
+  if (*dst == nullptr)
+    *dst = (int8_t *)uweight + weight_offset;
+
+  struct device_weight_config config;
+  config.weight_size = weight_size;
+  config.weight_offset = weight_offset / INPUT_CHANNEL_TILE;
+  weight_offset += weight_size;
+
+  for (int i = 0; i < block_of_output_channel; i++) {
+    for (int ti = 0; ti < INPUT_CHANNEL_TILE; ti++) {
+      for (int k = 0; k < kernel_size; k++) {
+        for (int m = 0; m < WEIGHT_EXTEND_SCALE; m++) {
+          if (ti == m)
+            temp = src[i * OUTPUT_CHANNEL_TILE * kernel_size + m * kernel_size + k];
+          else
+            temp = 0;
+          (*dst)[i * block_size + (ti * kernel_size + k) * WEIGHT_EXTEND_SCALE + m] = temp;
+        }
+      }
+    }
+  }
+  return config;
+}
+
+int intelfpga_subgraph(struct DeviceGraphNode *node) {
+  fpga_init();
+  struct timespec hw_start, hw_end;
+  long long input_organize_time = 0, output_organize_time = 0;
+  long long fpga_time = 0;
+
+  static int num_node = 0;
+  while (node != nullptr) {
+    if (node->is_input) {
+      clock_gettime(CLOCK_MONOTONIC, &hw_start);
+      for (int i = 0; i < node->parent_vec_.size(); i++) {
+        if (node->parent_vec_[i] == nullptr)
+          FpgaReorganizeInput(node, i, num_node);
+      }
+      clock_gettime(CLOCK_MONOTONIC, &hw_end);
+      input_organize_time +=
+          (long long)(hw_end.tv_sec - hw_start.tv_sec) * 1000000000 +
+          hw_end.tv_nsec - hw_start.tv_nsec;
+    }
+    if (node->op_type_ == INTELFPGA_Conv2D ||
+        node->op_type_ == INTELFPGA_DW_Conv2D) {
+      auto argp = dynamic_cast<FpgaConvParam *>(node->node_param_);
+
+      clock_gettime(CLOCK_MONOTONIC, &hw_start);
+      argp->param.output_row_tile = std::min(
+          OUTPUT_BUFF_SIZE / argp->param.output_w, argp->param.output_h);
+      argp->param.input_row_tile =
+          (argp->param.output_row_tile - 1) * argp->param.stride +
+          argp->param.dilation * (argp->param.kernel - 1) + 1;
+      argp->param.output_channel_block_num =
+          up_round(argp->param.output_c, OUTPUT_CHANNEL_TILE);
+      argp->param.output_row_block_num =
+          up_round(argp->param.output_h, argp->param.output_row_tile);
+
+      memset(uparam, 0, sizeof(parameter));
+      memcpy(uparam, (int *)(&(argp->param)), sizeof(struct parameter));
+      memcpy((float *)uscale, argp->scale,
+             sizeof(float) * (2 * argp->param.output_c));
+
+      if (global_mem_cfg.valid) {
+        memcpy(global_mem_cfg.dst, global_mem_cfg.src, global_mem_cfg.size);
+        global_mem_cfg.valid = false;
+      }
+      start_fpga(foo, FPGAREG_CNN_START);
+
+      clock_gettime(CLOCK_MONOTONIC, &hw_end);
+      fpga_time +=
+          (long long)(hw_end.tv_sec - hw_start.tv_sec) * 1000000000 +
+          hw_end.tv_nsec - hw_start.tv_nsec;
+    } else {
+      std::cout << "Error: operator " << node->name_
+                << " not supported in FPGA, exiting.\n";
+      fpga_release();
+      exit(-1);
+    }
+    if (node->is_output && !SDK_EMULATE) {
+      clock_gettime(CLOCK_MONOTONIC, &hw_start);
+      FpgaOutputReorganize(node, num_node);
+      clock_gettime(CLOCK_MONOTONIC, &hw_end);
+      output_organize_time +=
+          (long long)(hw_end.tv_sec - hw_start.tv_sec) * 1000000000 +
+          hw_end.tv_nsec - hw_start.tv_nsec;
+    }
+    node = node->next_;
+    num_node++;
+  }
+  if (global_mem_cfg.valid) {
+    memcpy(global_mem_cfg.dst, global_mem_cfg.src, global_mem_cfg.size);
+    global_mem_cfg.valid = false;
+  }
+  printf("input_organize_time:%fms\n",
+         (float)(input_organize_time / 1000000.0f));
+  printf("fpga_time:%fms\n", (float)(fpga_time / 1000000.0f));
+  printf("output_organize_time:%fms\n",
+         (float)(output_organize_time / 1000000.0f));
+  return 0;
+}

@@ -3,26 +3,3 @@ __pycache__/
 .ipynb_checkpoints/
 *.pyc
 *.pyo
-
-
-# IDE
-.idea/
-
-# Build
-build/
-
-# lib
-fpga/ssd_detection/Paddlelite/
-fpga/ssd_detection/lib/
-fpga/ssd_detection/ocv3.1.0/
-fpga/paddle_frame/paddlelite_lib/
-fpga/paddle_frame/cmadrv.ko
-
-# FPGA build outputs
-fpga/ssd_detection/ssd_detection_src/build/
-
-# FPGA deployment images (large)
-fpga/paddle_frame/images/
-fpga/paddle_frame/data/
-
-fpga/paddle_frame/.last_time

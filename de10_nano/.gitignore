@@ -1,0 +1,33 @@
+# Build artifacts
+build/
+*.o
+
+# Prebuilt libraries (committed intentionally, but don't rebuild them accidentally)
+lib/*.so
+
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+log/
+
+# Deployment timestamp
+ssd_detection/deploy/.last_time
+
+# Quartus build outputs (regenerated on every compile)
+C5TB/db/
+C5TB/incremental_db/
+C5TB/output_files/
+C5TB/hps_isw_handoff/
+C5TB/.qsys_edit/
+C5TB/soc_system/
+C5TB/*.qws
+C5TB/c5_pin_model_dump.txt
+C5TB/hps_sdram_p0_summary.csv
+
+# Deployment test images (not source)
+ssd_detection/deploy/images/
+ssd_detection/deploy/data/
