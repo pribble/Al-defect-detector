@@ -150,7 +150,6 @@ module cnn_core_v2 #(
     reg [63:0]          lb_q;
     reg signed [255:0]  acc_q;
     reg signed [255:0]  acc_local;   // 窗口内累加（首 tap 用 acc_q 初始化）
-    reg signed [255:0]  acc_delta;   // 本 tap 8 lane 部分和（打包 256-bit）
 
     //-----------------------------------------------------------------------
     // 状态机
@@ -294,16 +293,19 @@ module cnn_core_v2 #(
                                 wbuf[lane*72 + mac_t*8 + m];
                         end
                     end
-                    // 8 lane 部分和打包成 256-bit（阻塞赋值，本拍内可见）
-                    for (lane = 0; lane < 8; lane = lane + 1)
-                        acc_delta[32*lane +: 32] = v_sum[lane];
-                    if (mac_t == 0)
-                        acc_local <= acc_q + acc_delta;
-                    else
-                        acc_local <= acc_local + acc_delta;
+                    // 8 lane 独立 32-bit 累加（acc_local 打包为 256-bit，但每个 lane
+                    // 是独立 int32，无跨 lane 进位；整体 256-bit 加法器进位链过长，
+                    // 拆成 lane 级加法消除，语义不变）
+                    for (lane = 0; lane < 8; lane = lane + 1) begin
+                        if (mac_t == 0)
+                            acc_local[32*lane +: 32] <= acc_q[32*lane +: 32] + v_sum[lane];
+                        else
+                            acc_local[32*lane +: 32] <= acc_local[32*lane +: 32] + v_sum[lane];
+                    end
                     if (mac_t == 8) begin
                         // 末 tap：写回最终值（acc_local 尚缺本 tap 部分和）
-                        acc[acc_waddr_mac] <= acc_local + acc_delta;
+                        for (lane = 0; lane < 8; lane = lane + 1)
+                            acc[acc_waddr_mac][32*lane +: 32] <= acc_local[32*lane +: 32] + v_sum[lane];
                         mac_t <= 0;
                         if (mac_col == out_w_reg - 1) begin
                             mac_col <= 0;
@@ -374,13 +376,34 @@ module cnn_core_v2 #(
     //-----------------------------------------------------------------------
     // 组合乘加树（MAC）：lb_q[cb][r][c] × wbuf[lane][t][m] 累加
     //-----------------------------------------------------------------------
+    // 窗口 tap 位置：k_reg ∈ {1,3}（model_profile 实测）、mac_t ∈ [0,8]，
+    // 查表替代 32-bit 除法器（lpm_divide，组合链超长导致 setup 违例 -82ns）
     wire [31:0] mac_cb   = (type_reg == 4) ? o_group : i_group;
-    wire [31:0] mac_kh   = mac_t / k_reg;
-    wire [31:0] mac_kw   = mac_t % k_reg;
-    // 行（lb 索引）：窗口第 kh 行 = o_row*stride + kh + pad（装载时行 0 = base 行）
-    wire [31:0] mac_r    = mac_row * stride_reg + mac_kh;
+    reg [3:0] mac_kh, mac_kw;
+    always @(*) begin
+        if (k_reg == 3) begin
+            case (mac_t[3:0])
+                4'd0: begin mac_kh = 0; mac_kw = 0; end
+                4'd1: begin mac_kh = 0; mac_kw = 1; end
+                4'd2: begin mac_kh = 0; mac_kw = 2; end
+                4'd3: begin mac_kh = 1; mac_kw = 0; end
+                4'd4: begin mac_kh = 1; mac_kw = 1; end
+                4'd5: begin mac_kh = 1; mac_kw = 2; end
+                4'd6: begin mac_kh = 2; mac_kw = 0; end
+                4'd7: begin mac_kh = 2; mac_kw = 1; end
+                default: begin mac_kh = 2; mac_kw = 2; end
+            endcase
+        end else begin
+            mac_kh = mac_t[3:0];   // k=1：kh=mac_t, kw=0（mac_t%1=0）
+            mac_kw = 4'd0;
+        end
+    end
+    // 行（lb 索引）：窗口第 kh 行 = o_row*stride + kh + pad（装载时行 0 = base 行）；
+    // stride_reg ∈ {1,2}，移位替代乘法器（mac_row*stride_reg 会被综合成 32-bit 乘法）
+    wire [31:0] mac_r = ((stride_reg == 2) ? {mac_row[30:0], 1'b0} : mac_row) + mac_kh;
     // 列（输入列）：w*stride + kw - pad，越界补 0
-    wire signed [31:0] mac_c = $signed(mac_col * stride_reg + mac_kw) - $signed(pad_reg);
+    wire signed [31:0] mac_c = $signed((stride_reg == 2) ? {mac_col[30:0], 1'b0} : mac_col)
+                            + $signed(mac_kw) - $signed(pad_reg);
     wire mac_c_valid = (mac_c >= 0) && (mac_c < in_w_reg);
     wire [31:0] mac_c_cl = mac_c[31:0];
 
