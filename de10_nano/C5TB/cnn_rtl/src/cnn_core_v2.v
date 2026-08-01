@@ -296,16 +296,21 @@ module cnn_core_v2 #(
                     // 8 lane 独立 32-bit 累加（acc_local 打包为 256-bit，但每个 lane
                     // 是独立 int32，无跨 lane 进位；整体 256-bit 加法器进位链过长，
                     // 拆成 lane 级加法消除，语义不变）
+                    // 注意：必须先用组合变量拼成整字再整字写 acc_local/acc——
+                    // 直接 part-select 写（acc[...][32*lane +: 32] <= ...）会阻止
+                    // Quartus 把 acc 推断为 M10K，导致 A&S 内存反弹（10+GB）。
                     for (lane = 0; lane < 8; lane = lane + 1) begin
                         if (mac_t == 0)
-                            acc_local[32*lane +: 32] <= acc_q[32*lane +: 32] + v_sum[lane];
+                            acc_next[32*lane +: 32] = acc_q[32*lane +: 32] + v_sum[lane];
                         else
-                            acc_local[32*lane +: 32] <= acc_local[32*lane +: 32] + v_sum[lane];
+                            acc_next[32*lane +: 32] = acc_local[32*lane +: 32] + v_sum[lane];
                     end
+                    acc_local <= acc_next;
                     if (mac_t == 8) begin
                         // 末 tap：写回最终值（acc_local 尚缺本 tap 部分和）
                         for (lane = 0; lane < 8; lane = lane + 1)
-                            acc[acc_waddr_mac][32*lane +: 32] <= acc_local[32*lane +: 32] + v_sum[lane];
+                            acc_wr_next[32*lane +: 32] = acc_local[32*lane +: 32] + v_sum[lane];
+                        acc[acc_waddr_mac] <= acc_wr_next;
                         mac_t <= 0;
                         if (mac_col == out_w_reg - 1) begin
                             mac_col <= 0;
@@ -425,6 +430,11 @@ module cnn_core_v2 #(
 
     integer lane, m;
     reg signed [31:0] v_sum [0:7];
+
+    // 组合中间变量：8 lane 独立 32-bit 加法后拼成整字（避免 part-select 写 RAM
+    // 破坏 M10K 推断；acc_local/acc 保持整字写，Quartus 才可推断 block RAM）
+    reg [255:0] acc_next;      // acc_local 的下一拍值（每 lane 独立 int32 累加）
+    reg [255:0] acc_wr_next;   // 末 tap 写回 acc 的整字（每 lane = acc_local + 本 tap 部分和）
 
     //-----------------------------------------------------------------------
     // requant + 输出数据（S_REQ_OUT 拍用上拍采样的 acc_q）
