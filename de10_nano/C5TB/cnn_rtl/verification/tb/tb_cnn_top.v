@@ -10,11 +10,12 @@
 module tb_cnn_top;
 
     localparam MEM_WORDS = 1 << 20;   // 8MB
+    // 基址间距按最大层需求（in 最大 38×38×2cb×8B≈0x5A40；w≈0x0D80；out≈0x8760）
     localparam PARAM_BASE  = 32'h000000;
     localparam SCALE_BASE  = 32'h001000;
     localparam DDRIN_BASE  = 32'h002000;
-    localparam DDRW_BASE   = 32'h004000;
-    localparam DDROUT_BASE = 32'h100000;
+    localparam DDRW_BASE   = 32'h010000;
+    localparam DDROUT_BASE = 32'h020000;
 
     reg clk = 0;
     always #5 clk = ~clk;
