@@ -188,6 +188,7 @@ module cnn_core_v2 #(
             wf_cnt <= 0; o_group <= 0; i_group <= 0;
             mac_row <= 0; mac_col <= 0; mac_t <= 0;
             rq_row <= 0; rq_col <= 0;
+            acc_local <= 256'sd0;   // 复位归并到主状态机（单一驱动，避免 Quartus 10028）
         end else begin
             case (state)
                 S_IDLE: begin
@@ -390,7 +391,6 @@ module cnn_core_v2 #(
         if (!rst_n) begin
             lb_q <= 64'h0;
             acc_q <= 256'sd0;
-            acc_local <= 256'sd0;
         end else begin
             lb_q <= lb[lb_raddr];
             if (state == S_REQ_ADDR || state == S_REQ_OUT)
