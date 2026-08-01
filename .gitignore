@@ -3,3 +3,22 @@ __pycache__/
 .ipynb_checkpoints/
 *.pyc
 *.pyo
+
+# 二进制库 / 可执行（FPGA 侧部署产物与第三方库）
+*.so
+*.so.*
+*.a
+*.ko
+*.nb
+*.o
+*.bin
+de10_nano/ssd_detection/deploy/ssd_detection
+
+# cnn_rtl 仿真产物（回归脚本生成，可再生）
+de10_nano/C5TB/cnn_rtl/verification/vec/
+de10_nano/C5TB/cnn_rtl/verification/vec_core/
+de10_nano/C5TB/cnn_rtl/verification/v2/
+de10_nano/C5TB/cnn_rtl/verification/vct/
+de10_nano/C5TB/cnn_rtl/verification/vec_cnn_top*
+de10_nano/C5TB/cnn_rtl/verification/vec_core_v2*
+de10_nano/C5TB/cnn_rtl/vec_core_v2*
