@@ -109,6 +109,7 @@ cnn_rtl/
 1. 把 `ip/` 下 3 个 `.v` 随工程提交（已复制）；Platform Designer 打开 `soc_system.qsys` → Generate HDL（顶层会例化 `cnn_top` = 新 wrapper）
 2. 全量编译（Analysis & Synthesis → Fitter → Timing；黑盒换 RTL 不能增量）
 3. 关注 `clk_cnn`（50MHz）时序；board 验证：寄存器读写 → 单层对拍（软件侧跑一层，比对 DDR 输出）
+- **排查「还是旧黑盒」**：① Windows 工程 `ip/` 下 4 个文件必须覆盖为仓库版（hw.tcl + 3 个 .v，**不要拷 cnn_top.qxp**）；② 删掉 `soc_system/synthesis/` 整个目录（旧生成物，PD 重建）；③ 重开 Platform Designer → cnn_top_0 右键 Properties 确认源为 3 个 .v（若仍显示 qxp 说明 hw.tcl 没覆盖）；④ Generate 后检查 `soc_system/synthesis/submodules/` 应出现 cnn_top.v 等、无 cnn_top.qxp
 - 适配要点：burstcount 固定 1、byteenable 全 1、readdatavalid 为 bridge 输入不采；**权重读复用 load master**（黑盒无独立权重 master，core S_LOAD/S_WEIGHT 串行分时，已验证 lr/wr 不同时拉高）；41 个 QSys HDL_PARAMETER 照单声明、值忽略
 
 **阶段 5 关键设计**：
