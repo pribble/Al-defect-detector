@@ -1,6 +1,6 @@
 # ssd_detection/ — FPGA 推理服务（SSD MobileNet V1 + Paddle Lite + CNN 加速器）
 
-> 导航：上一级 [de10_nano/](../README.md) · 相关 [kernel/](../kernel/README.md)（cmadrv 驱动）、[C5TB/](../C5TB/README.md)（CNN 加速器硬件）
+> 导航：上一级 [de10_nano/](../README.md) · 相关 [kernel/](../kernel/README.md)、[C5TB/](../C5TB/README.md)
 
 运行在 DE10-Nano（Cyclone V SoC）HPS 侧 Linux 上的 C++ 推理服务：加载量化后的
 SSD MobileNet V1 模型（`.nb`），把卷积计算卸载到 FPGA 侧的 CNN 加速器

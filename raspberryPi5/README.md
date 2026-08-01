@@ -1,6 +1,6 @@
 # raspberryPi5/ — 树莓派 5 主控制器平台
 
-> 导航：上一级 [根 README](../README.md) · 子模块 [GrabImage/](GrabImage/README.md)、[ArmControl/](ArmControl/README.md) · 相关 [de10_nano/](../de10_nano/README.md)（FPGA 推理板）
+> 导航：上一级 [README.md](../README.md) · 相关 [GrabImage/](GrabImage/README.md)、[ArmControl/](ArmControl/README.md)、[de10_nano/](../de10_nano/README.md)
 
 树莓派 5（Debian 12 Bookworm, aarch64）是整个系统的**主控制器**：采集 Hikvision
 工业相机图像（MVS SDK）、做 SSIM 触发判定、调用 FPGA 推理（172.16.68.110:8080）、

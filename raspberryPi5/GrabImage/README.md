@@ -1,6 +1,6 @@
 # GrabImage/ — 检测服务（Flask :7777）
 
-> 导航：上一级 [raspberryPi5/](../README.md) · 相关 [ArmControl/](../ArmControl/README.md)、[de10_nano/ssd_detection/](../../de10_nano/ssd_detection/README.md)
+> 导航：上一级 [raspberryPi5/](../README.md) · 相关 [ArmControl/](../ArmControl/README.md)、[ssd_detection/](../../de10_nano/ssd_detection/README.md)
 
 缺陷检测主服务：Hikvision 工业相机实时采集（MVS SDK）→ SSIM 触发判定 → FPGA 推理
 （172.16.68.110:8080）→ 按结果触发机械臂分拣（ArmControl :8899）与蜂鸣器报警
