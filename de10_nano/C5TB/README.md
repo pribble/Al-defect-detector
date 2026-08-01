@@ -11,7 +11,7 @@ SDMMC、USB、UART）接到 QSys 生成的 `soc_system` 系统上，并在其中
 编译产物 `soc_system.rbf`（FPGA 配置比特流）在 HPS 启动时加载到 FPGA，
 `soc_system.dtb`（设备树）交给 HPS 侧 Linux 使用。
 
-## 工程结构
+## 目录结构
 
 | 路径 | 说明 |
 |------|------|

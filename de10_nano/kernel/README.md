@@ -13,7 +13,7 @@ FPGA 加速器提供两块基础能力：
 用户空间通过 `/dev/cmadrv0` 的 `ioctl`/`mmap` 使用，调用方是
 [`ssd_detection/intelfpga.cc`](../ssd_detection/intelfpga.cc)（FPGA 推理服务）。
 
-## 文件清单
+## 目录结构
 
 | 文件 | 说明 |
 |------|------|

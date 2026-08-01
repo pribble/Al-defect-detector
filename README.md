@@ -52,6 +52,8 @@ FPGA: Mat(300×300, CV_8UC1) → NEON 1ch→3ch NCHW tensor → SSD MobileNet V1
 
 ## 快速开始
 
+### 树莓派服务（:7777 / :8899）
+
 ```bash
 # 检测服务（GrabImage :7777）
 systemctl start detect-api.service
@@ -66,7 +68,21 @@ tail -f /var/logs/detect_server.log    # GrabImage 调试日志
 tail -f /var/logs/api_server.log       # ArmControl 调试日志
 ```
 
+### FPGA 推理板（172.16.68.110 :8080）
+
+```bash
+# 在 FPGA 板部署目录（/opt/paddle_frame）
+cd /opt/paddle_frame
+insmod cmadrv.ko                       # CMA + DMA 内核驱动
+./run.sh                               # 启动 HTTP 推理服务（监听 :8080）
+```
+
+> 推理板由开发机交叉编译后部署，完整构建/运行说明见
+> [de10_nano/README.md](de10_nano/README.md) 与 [ssd_detection/README.md](de10_nano/ssd_detection/README.md)。
+
 ## 部署
+
+### 树莓派代码
 
 ```bash
 # 开发机：推送 raspberryPi5 代码到树莓派（dry-run 预览后确认）
@@ -76,7 +92,19 @@ cd raspberryPi5 && bash deploy.sh [user@pi-ip] [/opt/HaoYao]
 cd raspberryPi5 && bash restart.sh
 ```
 
-FPGA 板（de10_nano）构建/部署见其平台文档。
+### FPGA 推理板
+
+```bash
+# 开发机（x86_64）：交叉编译内核驱动与推理服务
+cd de10_nano/kernel && bash build.sh           # 编译 cmadrv.ko 并拷入 deploy/
+cd de10_nano/ssd_detection && bash build.sh    # 3 阶段：libvnna → Paddle-Lite → 二进制
+
+# 增量同步到 FPGA 板（root@172.16.68.110:/opt/paddle_frame）
+cd de10_nano/ssd_detection && bash upload.sh
+```
+
+> FPGA 侧全流程（含 Quartus 硬件工程 C5TB 的构建/烧录）见
+> [de10_nano/README.md](de10_nano/README.md)。
 
 ## 文档地图
 
