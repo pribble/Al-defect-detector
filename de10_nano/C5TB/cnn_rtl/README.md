@@ -121,7 +121,10 @@ cnn_rtl/
 **阶段 4 关键设计**（对齐黑盒，见 [cnn_top_spec.md §6/§8](../cnn_top_spec.md)）：
 - 输入流 64-bit NHWC8 块序 `[C/8][H][W][8]`，DDR 顺序 burst 读；pad 行由模块补 0（不拉 `i_ready`，DMA 自动跳过，地址=已发字节数）
 - 行缓冲按输入通道块组织 `[in_cb][in_row_tile][W][8]`（模型 max 4×39×302×8 ≈ 106KB BRAM）；计算序 = 输出组 × 输入组 × 窗口（对齐 ref）
-- **可综合性（同步读改造，2025）**：原 `lb`/`acc` 为组合（异步）读，Quartus 无法推断 M10K，约 4Mbit 存储被展开成寄存器+读端口 mux，`quartus_map` 内存爆到 66GB 仍 OOM。改造后 `lb` 为 64-bit 字数组 `[cb][row][col]`（8 lane/字）、`acc` 为 256-bit 字数组 `[o_row][o_col]`（8 lane×int32/字），读改为同步采样（`lb_q`/`acc_q` 晚一拍），`S_MAC` 拆 `S_MAC_RD`/`S_MAC_ACC` 两拍、`S_REQUANT` 拆 `S_REQ_ADDR`/`S_REQ_OUT` 两拍，并加 `(* ramstyle="M10K" *)` 强制推断。tap 率/事件率减半，功能 bit-exact（`run_cnn_core_v2.sh` 24/24 层回归通过；tb 仅按握手比对事件序列，不测周期数）
+- **可综合性（同步读改造，2025；单维展平，2026）**：
+  - 2025 同步读改造：原 `lb`/`acc` 为组合（异步）读，Quartus 无法推断 M10K，约 4Mbit 存储被展开成寄存器+读端口 mux，`quartus_map` 内存爆到 66GB 仍 OOM。改造后 `lb` 为 64-bit 字数组（8 lane/字）、`acc` 为 256-bit 字数组（8 lane×int32/字），读改为同步采样（`lb_q`/`acc_q` 晚一拍），`S_MAC` 拆 `S_MAC_RD`/`S_MAC_ACC` 两拍、`S_REQUANT` 拆 `S_REQ_ADDR`/`S_REQ_OUT` 两拍。tap 率/事件率减半。
+  - 2026 单维展平（解决 40GB/1h A&S）：同步读改造后仍多维 unpacked 数组（`lb[cb][row][col]` 三维 + `acc` 256-bit 超宽），Quartus 对多维数组的 RAM 推断仍不可靠，A&S 实测 40GB+ / 1h。**改为单维数组**：`lb[0:CB*ROWS*W-1]`、`acc[0:OROWS*OW-1]`，索引用常量乘法拼接（`lb_waddr`/`lb_raddr`/`acc_waddr_*`/`acc_raddr_*` wire，综合折叠为移位/加法），保留 `(* ramstyle="M10K" *)`。功能/时序不变（读写仍同一拍采样），`run_cnn_core_v2.sh` 24/24 层回归通过。
+  - 若换回多维写法，A&S 内存会复现爆炸——**不要改回多维 unpacked 数组**。
 - 权重 slice 布局 `[Co/8][Ci/8][8][9][8]` 在 DDR 连续 → DMA 顺序读，slice 序号 = 权重流计数/72
 - 单行块执行（`start→o_done`），行块循环/地址重定位留待 cnn_top 层
 - **已修 RTL bug 记录**（对拍暴露）：cfg 打包 54→64-bit（readmemh 半 hex 截断丢 sel 位）、`cfg_sel` 3 位（sel=4 截断）、输入 pad 通道补 0、输出/输入区内存重叠（`out_off` 分离）、signed 输入语义回归（`$signed(lb_m)`）、窗口行索引多 `+pad`、DW slice 位置 `(cb_out,cb_out)`、输出末事件 `o_valid` 时序

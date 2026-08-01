@@ -126,14 +126,24 @@ module cnn_core_v2 #(
     end
 
     //-----------------------------------------------------------------------
-    // 存储：行缓冲 lb [cb][row][col]（64-bit 字 = 8 lane，col 0..G_MAX_W-1）
-    //       acc [o_row][o_col]（256-bit 字 = 8 lane × int32）
+    // 存储：行缓冲 lb（64-bit 字 = 8 lane，col 0..G_MAX_W-1）
+    //       acc（256-bit 字 = 8 lane × int32）
     //       wbuf [lane*72 + t*8 + m]（权重 slice，小数组保持寄存器）
-    // 强制 ramstyle = M10K：组合读已改为同步采样（lb_q/acc_q），
-    // 确保 Quartus 推断 block RAM 而不是把 ~4 Mbit 展开成寄存器。
+    // 强制 ramstyle = M10K 且展平为单维数组（Quartus 对多维 unpacked 数组
+    // 的 RAM 推断不可靠：lb[cb][row][col] 三维 + acc 256-bit 超宽会被展开成
+    // 寄存器堆 + 读端口 mux，A&S 内存爆到 40GB+；单维数组 + 常量乘法拼接
+    // 地址是官方推荐的可靠推断写法，功能/时序完全不变）。
     //-----------------------------------------------------------------------
-    (* ramstyle = "M10K" *) reg [63:0] lb [0:G_MAX_IN_CB-1][0:G_MAX_IN_ROWS-1][0:G_MAX_W-1];
-    (* ramstyle = "M10K" *) reg signed [255:0] acc [0:G_MAX_OROWS-1][0:G_MAX_OW-1];
+    (* ramstyle = "M10K" *) reg [63:0] lb [0:G_MAX_IN_CB*G_MAX_IN_ROWS*G_MAX_W-1];
+    (* ramstyle = "M10K" *) reg signed [255:0] acc [0:G_MAX_OROWS*G_MAX_OW-1];
+
+    // 单维索引拼接（常量乘法综合时折叠成移位/加法，不产生逻辑）
+    wire [31:0] lb_waddr = load_cb*G_MAX_IN_ROWS*G_MAX_W + load_row*G_MAX_W + load_col;
+    wire [31:0] lb_raddr = mac_cb*G_MAX_IN_ROWS*G_MAX_W + mac_r*G_MAX_W + mac_c_cl;
+    wire [31:0] acc_waddr_clr = rq_row*G_MAX_OW + rq_col;
+    wire [31:0] acc_waddr_mac = mac_row*G_MAX_OW + mac_col;
+    wire [31:0] acc_raddr_clr = rq_row*G_MAX_OW + rq_col;
+    wire [31:0] acc_raddr_mac = mac_row*G_MAX_OW + mac_col;
     reg signed [7:0] wbuf [0:8*9*8-1];
 
     // 同步读采样寄存器（RAM 读输出，读地址 = 组合函数，晚一拍有效）
@@ -193,7 +203,7 @@ module cnn_core_v2 #(
                 S_LOAD: begin
                     if (load_row_valid) begin
                         if (i_valid) begin
-                            lb[load_cb][load_row][load_col] <= i_data;
+                            lb[lb_waddr] <= i_data;
                             if (load_col == in_w_reg - 1) begin
                                 load_col <= 0;
                                 if (load_row == in_row_tile_reg - 1) begin
@@ -212,7 +222,7 @@ module cnn_core_v2 #(
                         end
                     end else begin
                         // pad 行：写 0 并跳过（不消费输入；BRAM 上电不定须清零）
-                        lb[load_cb][load_row][load_col] <= 64'h0;
+                        lb[lb_waddr] <= 64'h0;
                         if (load_col == in_w_reg - 1) begin
                             load_col <= 0;
                             if (load_row == in_row_tile_reg - 1) begin
@@ -234,7 +244,7 @@ module cnn_core_v2 #(
                 //---- acc 清零（每输出组开始，逐 256-bit 字）----
                 S_ACC_CLR: begin
                     o_valid <= 1'b0;
-                    acc[rq_row][rq_col] <= 256'sd0;
+                    acc[acc_waddr_clr] <= 256'sd0;
                     if (rq_row == out_row_tile_reg - 1 && rq_col == out_w_reg - 1) begin
                         rq_row <= 0; rq_col <= 0;
                         i_group <= 0;
@@ -292,7 +302,7 @@ module cnn_core_v2 #(
                         acc_local <= acc_local + acc_delta;
                     if (mac_t == 8) begin
                         // 末 tap：写回最终值（acc_local 尚缺本 tap 部分和）
-                        acc[mac_row][mac_col] <= acc_local + acc_delta;
+                        acc[acc_waddr_mac] <= acc_local + acc_delta;
                         mac_t <= 0;
                         if (mac_col == out_w_reg - 1) begin
                             mac_col <= 0;
@@ -382,11 +392,11 @@ module cnn_core_v2 #(
             acc_q <= 256'sd0;
             acc_local <= 256'sd0;
         end else begin
-            lb_q <= lb[mac_cb][mac_r][mac_c_cl];
+            lb_q <= lb[lb_raddr];
             if (state == S_REQ_ADDR || state == S_REQ_OUT)
-                acc_q <= acc[rq_row][rq_col];
+                acc_q <= acc[acc_raddr_clr];
             else
-                acc_q <= acc[mac_row][mac_col];
+                acc_q <= acc[acc_raddr_mac];
         end
     end
 

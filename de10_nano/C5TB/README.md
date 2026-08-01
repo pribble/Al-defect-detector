@@ -56,7 +56,7 @@ QSys 系统中 `cnn_top_0` 的关键参数（`soc_system.qsys`）：`IMAGE_MAX_W
 ## 构建流程
 
 ```text
-1. Quartus Prime（18.1 Standard）打开 C5TB_top.qpf
+1. Quartus Prime（23.1 Lite Edition；工程创建于 18.1 Standard，SDC 为 18.1 生成，兼容正常）打开 C5TB_top.qpf
 2. 全编译（Analysis & Synthesis → Fitter → Assembler）
    —— 顶层 = C5TB_top.v + soc_system/synthesis/soc_system.qip（QSys 生成，目录被 gitignore）
         + ip/pll/pll_inst.qip + ip/cnn_top（cnn_top.qxp / cnn_top_hw.tcl）
