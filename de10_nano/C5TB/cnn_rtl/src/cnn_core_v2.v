@@ -400,7 +400,7 @@ module cnn_core_v2 #(
                     v_rq64 = v_rq64 + (64'sd1 << (rq_r_store[v_out_ch] - 1));
                 v_rq64 = v_rq64 >>> rq_r_store[v_out_ch];
                 if (v_rq64 > 64'sd127)      v_q[ln] = 8'sd127;
-                else if (v_rq64 < -64'sd128) v_q[ln] = -8'sd128;
+                else if (v_rq64 < -64'sd128) v_q[ln] = 8'h80;   // -128（8'sd128 字面量溢出）
                 else                         v_q[ln] = v_rq64[7:0];
                 end
             end
