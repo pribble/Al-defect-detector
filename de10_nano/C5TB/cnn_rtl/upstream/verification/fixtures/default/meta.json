@@ -1,0 +1,12 @@
+{
+  "run_id": 0,
+  "true_class": 7,
+  "predicted_class": 7,
+  "correct": true,
+  "image_shape": [
+    64,
+    64
+  ],
+  "dtype": "uint8",
+  "layout": "H x W, row-major"
+}

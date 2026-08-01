@@ -19,6 +19,8 @@ SDMMC、USB、UART）接到 QSys 生成的 `soc_system` 系统上，并在其中
 | `C5TB_top.v` | 顶层 Verilog：例化 `pll_inst`（PLL）与 `soc_system`（QSys 系统），连接 HPS 外设引脚 |
 | `C5TB_top.sdc` | 时序约束（Quartus 18.1 生成） |
 | `soc_system.qsys` / `soc_system.sopcinfo` | QSys 系统描述：HPS + 时钟 + `cnn_top_0` 加速器 |
+| `cnn_top_spec.md` | **cnn_top 黑盒规格书**：接口/寄存器/指令格式/数据布局/数值语义，纯 RTL 复现 `cnn_top` 的依据 |
+| `cnn_rtl/` | **cnn_top 开源复现工作区**：上游卷积数据通路（MIT）+ 差距矩阵与分阶段改造路线图 |
 | `soc_system_board_info.xml` / `hps_common_board_info.xml` | 生成设备树时使用的板级信息（供 sopc2dts） |
 | `ip/cnn_top.qxp`、`ip/cnn_top_hw.tcl` | 自定义 CNN 加速器 IP（归档 + 硬件描述，随工程提交） |
 | `ip/pll/` | PLL IP：`FPGA_CLK1_50`（50 MHz）分出 `fpga_clk_50` / `fpga_clk_cnn` / `fpga_clk_stp` 三路时钟 |
