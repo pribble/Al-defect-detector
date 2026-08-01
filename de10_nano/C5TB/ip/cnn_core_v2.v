@@ -161,8 +161,10 @@ module cnn_core_v2 #(
     localparam S_MAC_RD   = 4'd4;   // 窗口 tap 请求拍（同步采样 lb_q/acc_q）
     localparam S_MAC_ACC  = 4'd5;   // 窗口 tap 累加拍（乘加 → acc_local）
     localparam S_REQ_ADDR = 4'd6;   // requant 请求拍（采样 acc_q）
-    localparam S_REQ_OUT  = 4'd7;   // requant 输出拍（组合 requant → o_data）
-    localparam S_DONE     = 4'd8;
+    localparam S_REQ_MUL  = 4'd7;   // requant 乘加拍（bias+act，寄存 v_act_l）
+    localparam S_REQ_MUL2 = 4'd8;   // requant 乘法拍（32×32 mult，寄存 v_rq64_l）
+    localparam S_REQ_OUT  = 4'd9;   // requant 输出拍（round+shift+饱和 → o_data）
+    localparam S_DONE     = 4'd10;
 
     reg [3:0] state;
     reg [31:0] load_cb, load_row, load_col;
@@ -334,10 +336,20 @@ module cnn_core_v2 #(
                 //---- requant 请求拍：采样 acc[rq_row][rq_col] ----
                 S_REQ_ADDR: begin
                     o_valid <= 1'b0;
+                    state <= S_REQ_MUL;
+                end
+
+                //---- requant 乘加拍：bias+act（快），结果寄存 v_act_l ----
+                S_REQ_MUL: begin
+                    state <= S_REQ_MUL2;
+                end
+
+                //---- requant 乘法拍：32×32 mult，结果寄存 v_rq64_l ----
+                S_REQ_MUL2: begin
                     state <= S_REQ_OUT;
                 end
 
-                //---- requant 输出拍（行→列→8 通道，块序）----
+                //---- requant 输出拍（round+移位+饱和，行→列→8 通道，块序）----
                 S_REQ_OUT: begin
                     o_valid <= 1'b1;
                     if (o_ready) begin
@@ -421,7 +433,7 @@ module cnn_core_v2 #(
             acc_q <= 256'sd0;
         end else begin
             lb_q <= lb[lb_raddr];
-            if (state == S_REQ_ADDR || state == S_REQ_OUT)
+            if (state == S_REQ_ADDR || state == S_REQ_MUL || state == S_REQ_MUL2)
                 acc_q <= acc[acc_raddr_clr];
             else
                 acc_q <= acc[acc_raddr_mac];
@@ -437,20 +449,27 @@ module cnn_core_v2 #(
     reg [255:0] acc_wr_next;   // 末 tap 写回 acc 的整字（每 lane = acc_local + 本 tap 部分和）
 
     //-----------------------------------------------------------------------
-    // requant + 输出数据（S_REQ_OUT 拍用上拍采样的 acc_q）
+    // requant 流水（拆三段，避免单拍组合链过深）：
+    //   S_REQ_MUL  拍：bias+act → v_act_l（寄存 32-bit）
+    //   S_REQ_MUL2 拍：32×32 mult → v_rq64_l（寄存 64-bit 积）
+    //   S_REQ_OUT  拍：round+shift+饱和 → o_data（用上拍寄存的积）
+    // 拆流水后功能/事件序列不变（tb 按事件对拍，不测周期数）。
     //-----------------------------------------------------------------------
     integer ln;
     reg signed [31:0] v_raw, v_biased, v_act;
     reg signed [63:0] v_rq64;
+    reg signed [31:0] v_act_l [0:7];   // 每 lane 的 act 后值（流水级 1）
+    reg signed [63:0] v_rq64_l [0:7];  // 每 lane 的 64-bit 积（流水级 2）
     reg [31:0] v_out_ch;
     reg [7:0] v_q [0:7];
 
+    // 乘加拍：acc_q（S_REQ_ADDR 采样的值）→ bias → act，寄存 v_act_l
     always @(posedge clk) begin
-        if (state == S_REQ_OUT) begin
+        if (state == S_REQ_MUL) begin
             for (ln = 0; ln < 8; ln = ln + 1) begin
                 v_out_ch = o_group * 8 + ln;
                 if (v_out_ch >= out_c_reg) begin
-                    v_q[ln] = 8'd0;
+                    v_act_l[ln] <= 32'sd0;
                 end else begin
                 v_raw = acc_q[32*ln +: 32];
                 v_biased = v_raw + bias_store[v_out_ch];
@@ -461,7 +480,34 @@ module cnn_core_v2 #(
                     v_act = v_biased[31] ? 32'sd0 : v_biased;
                     if (v_act > rcl6_store[v_out_ch]) v_act = rcl6_store[v_out_ch];
                 end
-                v_rq64 = $signed(v_act) * $signed({1'b0, rq_m_store[v_out_ch]});
+                v_act_l[ln] <= v_act;
+                end
+            end
+        end
+    end
+
+    // 乘法拍：v_act_l × rq_m_store（32×32），寄存 v_rq64_l
+    always @(posedge clk) begin
+        if (state == S_REQ_MUL2) begin
+            for (ln = 0; ln < 8; ln = ln + 1) begin
+                v_out_ch = o_group * 8 + ln;
+                if (v_out_ch >= out_c_reg)
+                    v_rq64_l[ln] <= 64'sd0;
+                else
+                    v_rq64_l[ln] <= $signed(v_act_l[ln]) * $signed({1'b0, rq_m_store[v_out_ch]});
+            end
+        end
+    end
+
+    // 输出拍：round + shift + 饱和 → o_data
+    always @(posedge clk) begin
+        if (state == S_REQ_OUT) begin
+            for (ln = 0; ln < 8; ln = ln + 1) begin
+                v_out_ch = o_group * 8 + ln;
+                if (v_out_ch >= out_c_reg) begin
+                    v_q[ln] = 8'd0;
+                end else begin
+                v_rq64 = v_rq64_l[ln];
                 if (rq_r_store[v_out_ch] > 0)
                     v_rq64 = v_rq64 + (64'sd1 << (rq_r_store[v_out_ch] - 1));
                 v_rq64 = v_rq64 >>> rq_r_store[v_out_ch];
