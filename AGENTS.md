@@ -28,7 +28,20 @@ README.md                    总览：数据流、硬件/网络、快速开始�
 规则：`raspberryPi5/`、`de10_nano/` 内每个子目录的 README 才是权威细节来源。
 写文档/改文档时保持此分层，不要向高层文档堆底层细节。
 
-## 常用命令速查
+## 命令边界（重要）
+
+当前开发环境是**个人电脑/开发机**，目标设备（树莓派 172.16.68.111、FPGA 板
+172.16.68.110）需要 ssh 密码访问。**agent 不执行任何需要设备或密码的命令**，
+包括但不限于：
+
+- `deploy.sh`、`upload.sh`（rsync/ssh 到设备）
+- `systemctl`、`insmod`、`./run.sh`（设备上的服务/驱动操作）
+- 任何直接 ssh/scp 到 172.16.68.111 / 172.16.68.110 的命令
+
+agent 的工作边界：**本机工作区内的代码阅读、修改、文档编写、git 操作、本地校验
+（如 Python/grep 检查）**。部署到设备一律由用户手动执行。
+
+## 人工部署速查（供用户参考，agent 不执行）
 
 ```bash
 # 树莓派侧部署（开发机 → Pi）
@@ -42,7 +55,7 @@ cd de10_nano/ssd_detection && bash build.sh    # 3 阶段：libvnna → Paddle-L
 # FPGA 侧部署
 cd de10_nano/ssd_detection && bash upload.sh   # 增量同步 → root@172.16.68.110:/opt/paddle_frame
 
-# 日志
+# 日志（设备上）
 tail -f /var/logs/detect_server.log   # GrabImage
 tail -f /var/logs/api_server.log      # ArmControl
 journalctl -u detect-api.service -n 50 --no-pager -l
@@ -70,4 +83,6 @@ journalctl -u api.service -n 50 --no-pager -l
 - 回复用简体中文；代码、路径、命令保持原文。
 - 走轻量流程：需要分析直接回答；落地任务自行维护简洁清单，不做繁重的逐步骤
   签核；只有大范围/不可逆改动才先出方案再动手。
+- **不操作真实设备**：不执行需要 ssh 密码/设备访问的命令（见"命令边界"），
+  部署、重启服务、加载驱动等一律留给用户手动完成。
 - 修改代码前先读对应模块的 README（上文地图），避免凭旧文档或记忆猜测。
