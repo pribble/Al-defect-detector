@@ -20,7 +20,15 @@ echo "=== [3/3] ssd_detection ==="
 cd "$ROOT"
 mkdir -p build
 cd build
-if [ ! -f Makefile ]; then
+# 旧 CMakeCache 可能残留其他源码树路径（如 /opt/HAOYAO/nna），
+# 导致增量 make 编译的不是本仓库源码。始终校验 cache 源码根：
+CACHE_ROOT=""
+if [ -f CMakeCache.txt ]; then
+    CACHE_ROOT=$(grep -E '^CMAKE_HOME_DIRECTORY:INTERNAL=' CMakeCache.txt | cut -d= -f2)
+fi
+if [ ! -f Makefile ] || [ "$CACHE_ROOT" != "$ROOT" ]; then
+    echo "--- cmake configure (cache root: ${CACHE_ROOT:-none} -> $ROOT) ---"
+    rm -rf ./*
     cmake -DCMAKE_BUILD_TYPE=Release ..
 fi
 make -j4 ssd_detection

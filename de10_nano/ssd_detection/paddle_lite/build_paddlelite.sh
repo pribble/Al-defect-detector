@@ -5,8 +5,16 @@ ROOT=$(cd "$(dirname "$0")" && pwd)
 BUILD=$ROOT/build
 OUT_LIB="$ROOT/../lib/libpaddle_light_api_shared.so"
 
-if [ ! -f "$BUILD/CMakeCache.txt" ] || [ ! -f "$BUILD/api/paddle_use_kernels.h" ]; then
-    echo "=== [2/3a] cmake configure ==="
+# 旧 CMakeCache 可能残留其他源码树路径（如 /opt/HAOYAO/nna），
+# 导致增量 make 编译的不是本仓库源码。始终校验 cache 源码根：
+CACHE_ROOT=""
+if [ -f "$BUILD/CMakeCache.txt" ]; then
+    CACHE_ROOT=$(grep -E '^CMAKE_HOME_DIRECTORY:INTERNAL=' "$BUILD/CMakeCache.txt" | cut -d= -f2)
+fi
+
+if [ ! -f "$BUILD/CMakeCache.txt" ] || [ ! -f "$BUILD/api/paddle_use_kernels.h" ] || [ "$CACHE_ROOT" != "$ROOT" ]; then
+    echo "=== [2/3a] cmake configure (cache root: ${CACHE_ROOT:-none} -> $ROOT) ==="
+    rm -rf "$BUILD"
     mkdir -p "$BUILD"
     cd "$BUILD"
     cmake "$ROOT" \
