@@ -12,6 +12,17 @@
 //   4) 单行块执行：行块循环/地址重定位在 cnn_top 层。本行块的输入 base
 //      行号（= rb*out_row_tile*stride - pad）经 cfg 标量 15 写入。
 //
+// 可综合性（2025 同步读改造，解决 quartus_map OOM）：
+//   - lb 声明为 64-bit 字数组 [cb][row][col]（每字 = 8 lane），S_LOAD 每拍
+//     写一字；S_MAC 拆成 S_MAC_RD（同步采样 lb_q）/S_MAC_ACC（乘加累加）
+//     两拍流水，使 lb 可被 Quartus 推断为 M10K（原组合读会被展开成
+//     寄存器堆 + 读端口 mux，A&S 内存爆掉）。
+//   - acc 声明为 256-bit 字数组 [o_row][o_col]（每字 = 8 lane × int32），
+//     窗口内只在首 tap 读回 acc_q、寄存器内累加、末 tap 一次性写回；
+//     requant 拆 S_REQ_ADDR（采样 acc_q）/S_REQ_OUT（组合 requant）两拍。
+//   - 性能：S_MAC/S_REQUANT 每拍流变两拍（tap 率/事件率减半），功能
+//     bit-exact（tb 仅按握手比对事件序列，不测周期数）。
+//
 // 接口（供 cnn_top 的 DMA 层驱动）：
 //   cfg：sel=0 标量（addr 索引见下）、sel=1..4 requant 数组（addr=通道）
 //   i_stream / iw_stream：64-bit 握手（DMA 连续读，地址 = 已发字节数）
@@ -115,31 +126,41 @@ module cnn_core_v2 #(
     end
 
     //-----------------------------------------------------------------------
-    // 存储：行缓冲 [cb][row][w*8+m]；权重 slice wbuf [lane*72 + t*8 + m]
+    // 存储：行缓冲 lb [cb][row][col]（64-bit 字 = 8 lane，col 0..G_MAX_W-1）
+    //       acc [o_row][o_col]（256-bit 字 = 8 lane × int32）
+    //       wbuf [lane*72 + t*8 + m]（权重 slice，小数组保持寄存器）
+    // 强制 ramstyle = M10K：组合读已改为同步采样（lb_q/acc_q），
+    // 确保 Quartus 推断 block RAM 而不是把 ~4 Mbit 展开成寄存器。
     //-----------------------------------------------------------------------
-    reg [7:0] lb [0:G_MAX_IN_CB-1][0:G_MAX_IN_ROWS-1][0:G_MAX_W*8-1];
+    (* ramstyle = "M10K" *) reg [63:0] lb [0:G_MAX_IN_CB-1][0:G_MAX_IN_ROWS-1][0:G_MAX_W-1];
+    (* ramstyle = "M10K" *) reg signed [255:0] acc [0:G_MAX_OROWS-1][0:G_MAX_OW-1];
     reg signed [7:0] wbuf [0:8*9*8-1];
 
-    // acc 行块缓冲 [o_row][w][lane]（int32）
-    reg signed [31:0] acc [0:G_MAX_OROWS-1][0:G_MAX_OW-1][0:7];
+    // 同步读采样寄存器（RAM 读输出，读地址 = 组合函数，晚一拍有效）
+    reg [63:0]          lb_q;
+    reg signed [255:0]  acc_q;
+    reg signed [255:0]  acc_local;   // 窗口内累加（首 tap 用 acc_q 初始化）
+    reg signed [255:0]  acc_delta;   // 本 tap 8 lane 部分和（打包 256-bit）
 
     //-----------------------------------------------------------------------
     // 状态机
     //-----------------------------------------------------------------------
-    localparam S_IDLE     = 3'd0;
-    localparam S_LOAD     = 3'd1;   // 装载输入行块
-    localparam S_ACC_CLR  = 3'd2;   // acc 清零（每输出组）
-    localparam S_WEIGHT   = 3'd3;   // 装载权重 slice（72 拍）
-    localparam S_MAC      = 3'd4;   // 窗口 MAC（9 tap/窗口 × 全行块窗口）
-    localparam S_REQUANT  = 3'd5;   // requant + 输出事件
-    localparam S_DONE     = 3'd6;
+    localparam S_IDLE     = 4'd0;
+    localparam S_LOAD     = 4'd1;   // 装载输入行块
+    localparam S_ACC_CLR  = 4'd2;   // acc 清零（每输出组）
+    localparam S_WEIGHT   = 4'd3;   // 装载权重 slice（72 拍）
+    localparam S_MAC_RD   = 4'd4;   // 窗口 tap 请求拍（同步采样 lb_q/acc_q）
+    localparam S_MAC_ACC  = 4'd5;   // 窗口 tap 累加拍（乘加 → acc_local）
+    localparam S_REQ_ADDR = 4'd6;   // requant 请求拍（采样 acc_q）
+    localparam S_REQ_OUT  = 4'd7;   // requant 输出拍（组合 requant → o_data）
+    localparam S_DONE     = 4'd8;
 
-    reg [2:0] state;
+    reg [3:0] state;
     reg [31:0] load_cb, load_row, load_col;
     reg [31:0] wf_cnt;
     reg [31:0] o_group, i_group;
     reg [31:0] mac_row, mac_col, mac_t;
-    reg [31:0] rq_row, rq_col, rq_ln;
+    reg [31:0] rq_row, rq_col;
 
     // 行缓冲行 r 对应输入行 base_row_reg + r；有效 = 输入行 ∈ [0, in_h)
     wire signed [31:0] load_in_row = base_row_reg + load_row;
@@ -156,7 +177,7 @@ module cnn_core_v2 #(
             load_cb <= 0; load_row <= 0; load_col <= 0;
             wf_cnt <= 0; o_group <= 0; i_group <= 0;
             mac_row <= 0; mac_col <= 0; mac_t <= 0;
-            rq_row <= 0; rq_col <= 0; rq_ln <= 0;
+            rq_row <= 0; rq_col <= 0;
         end else begin
             case (state)
                 S_IDLE: begin
@@ -172,14 +193,7 @@ module cnn_core_v2 #(
                 S_LOAD: begin
                     if (load_row_valid) begin
                         if (i_valid) begin
-                            lb[load_cb][load_row][load_col*8 + 0] <= i_data[7:0];
-                            lb[load_cb][load_row][load_col*8 + 1] <= i_data[15:8];
-                            lb[load_cb][load_row][load_col*8 + 2] <= i_data[23:16];
-                            lb[load_cb][load_row][load_col*8 + 3] <= i_data[31:24];
-                            lb[load_cb][load_row][load_col*8 + 4] <= i_data[39:32];
-                            lb[load_cb][load_row][load_col*8 + 5] <= i_data[47:40];
-                            lb[load_cb][load_row][load_col*8 + 6] <= i_data[55:48];
-                            lb[load_cb][load_row][load_col*8 + 7] <= i_data[63:56];
+                            lb[load_cb][load_row][load_col] <= i_data;
                             if (load_col == in_w_reg - 1) begin
                                 load_col <= 0;
                                 if (load_row == in_row_tile_reg - 1) begin
@@ -187,7 +201,7 @@ module cnn_core_v2 #(
                                     if (load_cb == in_cb_reg - 1) begin
                                         load_cb <= 0;
                                         o_group <= 0;
-                                        rq_row <= 0; rq_col <= 0; rq_ln <= 0;
+                                        rq_row <= 0; rq_col <= 0;
                                         state <= S_ACC_CLR;
                                     end else
                                         load_cb <= load_cb + 1;
@@ -198,14 +212,7 @@ module cnn_core_v2 #(
                         end
                     end else begin
                         // pad 行：写 0 并跳过（不消费输入；BRAM 上电不定须清零）
-                        lb[load_cb][load_row][load_col*8 + 0] <= 8'h00;
-                        lb[load_cb][load_row][load_col*8 + 1] <= 8'h00;
-                        lb[load_cb][load_row][load_col*8 + 2] <= 8'h00;
-                        lb[load_cb][load_row][load_col*8 + 3] <= 8'h00;
-                        lb[load_cb][load_row][load_col*8 + 4] <= 8'h00;
-                        lb[load_cb][load_row][load_col*8 + 5] <= 8'h00;
-                        lb[load_cb][load_row][load_col*8 + 6] <= 8'h00;
-                        lb[load_cb][load_row][load_col*8 + 7] <= 8'h00;
+                        lb[load_cb][load_row][load_col] <= 64'h0;
                         if (load_col == in_w_reg - 1) begin
                             load_col <= 0;
                             if (load_row == in_row_tile_reg - 1) begin
@@ -213,7 +220,7 @@ module cnn_core_v2 #(
                                 if (load_cb == in_cb_reg - 1) begin
                                     load_cb <= 0;
                                     o_group <= 0;
-                                    rq_row <= 0; rq_col <= 0; rq_ln <= 0;
+                                    rq_row <= 0; rq_col <= 0;
                                     state <= S_ACC_CLR;
                                 end else
                                     load_cb <= load_cb + 1;
@@ -224,24 +231,19 @@ module cnn_core_v2 #(
                     end
                 end
 
-                //---- acc 清零（每输出组开始）----
+                //---- acc 清零（每输出组开始，逐 256-bit 字）----
                 S_ACC_CLR: begin
                     o_valid <= 1'b0;
-                    acc[rq_row][rq_col][rq_ln] <= 32'sd0;
-                    if (rq_row == out_row_tile_reg - 1 && rq_col == out_w_reg - 1
-                        && rq_ln == 7) begin
-                        rq_row <= 0; rq_col <= 0; rq_ln <= 0;
+                    acc[rq_row][rq_col] <= 256'sd0;
+                    if (rq_row == out_row_tile_reg - 1 && rq_col == out_w_reg - 1) begin
+                        rq_row <= 0; rq_col <= 0;
                         i_group <= 0;
                         state <= S_WEIGHT;
-                    end else if (rq_ln == 7) begin
-                        rq_ln <= 0;
-                        if (rq_col == out_w_reg - 1) begin
-                            rq_col <= 0;
-                            rq_row <= rq_row + 1;
-                        end else
-                            rq_col <= rq_col + 1;
+                    end else if (rq_col == out_w_reg - 1) begin
+                        rq_col <= 0;
+                        rq_row <= rq_row + 1;
                     end else
-                        rq_ln <= rq_ln + 1;
+                        rq_col <= rq_col + 1;
                 end
 
                 //---- 装载权重 slice（72 拍，64-bit/拍）----
@@ -258,15 +260,39 @@ module cnn_core_v2 #(
                         if (wf_cnt == 8*9 - 1) begin
                             wf_cnt <= 0;
                             mac_row <= 0; mac_col <= 0; mac_t <= 0;
-                            state <= S_MAC;
+                            state <= S_MAC_RD;
                         end else
                             wf_cnt <= wf_cnt + 1;
                     end
                 end
 
-                //---- 窗口 MAC：全行块窗口 × 当前 (o_group, i_group) slice ----
-                S_MAC: begin
+                //---- 窗口 MAC（请求拍）：组合地址稳定，上升沿同步采样 lb_q/acc_q ----
+                S_MAC_RD: begin
+                    state <= S_MAC_ACC;
+                end
+
+                //---- 窗口 MAC（累加拍）：用上拍采样的 lb_q 乘加，累加到 acc_local；
+                //     首 tap（mac_t==0）以 acc_q 初始化；末 tap（mac_t==8）写回 acc ----
+                S_MAC_ACC: begin
+                    // 组合乘加树：lb_q[8*m +: 8]（本 tap 输入 8 lane）× wbuf slice
+                    for (lane = 0; lane < 8; lane = lane + 1) begin
+                        v_sum[lane] = 0;
+                        for (m = 0; m < 8; m = m + 1) begin
+                            v_sum[lane] = v_sum[lane] +
+                                $signed(lb_q[8*m +: 8]) *
+                                wbuf[lane*72 + mac_t*8 + m];
+                        end
+                    end
+                    // 8 lane 部分和打包成 256-bit（阻塞赋值，本拍内可见）
+                    for (lane = 0; lane < 8; lane = lane + 1)
+                        acc_delta[32*lane +: 32] = v_sum[lane];
+                    if (mac_t == 0)
+                        acc_local <= acc_q + acc_delta;
+                    else
+                        acc_local <= acc_local + acc_delta;
                     if (mac_t == 8) begin
+                        // 末 tap：写回最终值（acc_local 尚缺本 tap 部分和）
+                        acc[mac_row][mac_col] <= acc_local + acc_delta;
                         mac_t <= 0;
                         if (mac_col == out_w_reg - 1) begin
                             mac_col <= 0;
@@ -274,7 +300,7 @@ module cnn_core_v2 #(
                                 mac_row <= 0;
                                 if (type_reg == 4 || i_group == in_cb_reg - 1) begin
                                     rq_row <= 0; rq_col <= 0;
-                                    state <= S_REQUANT;
+                                    state <= S_REQ_ADDR;
                                 end else begin
                                     i_group <= i_group + 1;
                                     state <= S_WEIGHT;
@@ -287,8 +313,14 @@ module cnn_core_v2 #(
                         mac_t <= mac_t + 1;
                 end
 
-                //---- requant + 输出事件（行→列→8 通道，块序）----
-                S_REQUANT: begin
+                //---- requant 请求拍：采样 acc[rq_row][rq_col] ----
+                S_REQ_ADDR: begin
+                    o_valid <= 1'b0;
+                    state <= S_REQ_OUT;
+                end
+
+                //---- requant 输出拍（行→列→8 通道，块序）----
+                S_REQ_OUT: begin
                     o_valid <= 1'b1;
                     if (o_ready) begin
                         if (rq_col == out_w_reg - 1) begin
@@ -301,13 +333,14 @@ module cnn_core_v2 #(
                                     state <= S_DONE;
                                 end else begin
                                     o_group <= o_group + 1;
-                                    rq_row <= 0; rq_col <= 0; rq_ln <= 0;
+                                    rq_row <= 0; rq_col <= 0;
                                     state <= S_ACC_CLR;
                                 end
                             end else
                                 rq_row <= rq_row + 1;
                         end else
                             rq_col <= rq_col + 1;
+                        state <= S_REQ_ADDR;
                     end
                 end
 
@@ -328,7 +361,7 @@ module cnn_core_v2 #(
     assign ow_ready = (state == S_WEIGHT);
 
     //-----------------------------------------------------------------------
-    // 组合乘加树（MAC）：lb[cb][r][c] × wbuf[lane][t][m] 累加
+    // 组合乘加树（MAC）：lb_q[cb][r][c] × wbuf[lane][t][m] 累加
     //-----------------------------------------------------------------------
     wire [31:0] mac_cb   = (type_reg == 4) ? o_group : i_group;
     wire [31:0] mac_kh   = mac_t / k_reg;
@@ -340,38 +373,28 @@ module cnn_core_v2 #(
     wire mac_c_valid = (mac_c >= 0) && (mac_c < in_w_reg);
     wire [31:0] mac_c_cl = mac_c[31:0];
 
-    wire [7:0] lb_m [0:7];
-    assign lb_m[0] = mac_c_valid ? lb[mac_cb][mac_r][mac_c_cl*8 + 0] : 8'h00;
-    assign lb_m[1] = mac_c_valid ? lb[mac_cb][mac_r][mac_c_cl*8 + 1] : 8'h00;
-    assign lb_m[2] = mac_c_valid ? lb[mac_cb][mac_r][mac_c_cl*8 + 2] : 8'h00;
-    assign lb_m[3] = mac_c_valid ? lb[mac_cb][mac_r][mac_c_cl*8 + 3] : 8'h00;
-    assign lb_m[4] = mac_c_valid ? lb[mac_cb][mac_r][mac_c_cl*8 + 4] : 8'h00;
-    assign lb_m[5] = mac_c_valid ? lb[mac_cb][mac_r][mac_c_cl*8 + 5] : 8'h00;
-    assign lb_m[6] = mac_c_valid ? lb[mac_cb][mac_r][mac_c_cl*8 + 6] : 8'h00;
-    assign lb_m[7] = mac_c_valid ? lb[mac_cb][mac_r][mac_c_cl*8 + 7] : 8'h00;
+    // 同步采样：RAM 读端口（组合地址在上升沿被采样，数据晚一拍到 lb_q/acc_q）
+    // acc 读复用同一端口（S_MAC 读 {mac_row,mac_col}，requant 读 {rq_row,rq_col}，
+    // 两阶段状态互斥）
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            lb_q <= 64'h0;
+            acc_q <= 256'sd0;
+            acc_local <= 256'sd0;
+        end else begin
+            lb_q <= lb[mac_cb][mac_r][mac_c_cl];
+            if (state == S_REQ_ADDR || state == S_REQ_OUT)
+                acc_q <= acc[rq_row][rq_col];
+            else
+                acc_q <= acc[mac_row][mac_col];
+        end
+    end
 
     integer lane, m;
     reg signed [31:0] v_sum [0:7];
 
-    always @(posedge clk) begin
-        if (state == S_MAC) begin
-            for (lane = 0; lane < 8; lane = lane + 1) begin
-                v_sum[lane] = 0;
-                for (m = 0; m < 8; m = m + 1) begin
-                    v_sum[lane] = v_sum[lane] +
-                        $signed(lb_m[m]) *
-                        wbuf[lane*72 + mac_t*8 + m];
-                end
-            end
-            for (lane = 0; lane < 8; lane = lane + 1) begin
-                acc[mac_row][mac_col][lane] <=
-                    acc[mac_row][mac_col][lane] + v_sum[lane];
-            end
-        end
-    end
-
     //-----------------------------------------------------------------------
-    // requant + 输出数据
+    // requant + 输出数据（S_REQ_OUT 拍用上拍采样的 acc_q）
     //-----------------------------------------------------------------------
     integer ln;
     reg signed [31:0] v_raw, v_biased, v_act;
@@ -380,13 +403,13 @@ module cnn_core_v2 #(
     reg [7:0] v_q [0:7];
 
     always @(posedge clk) begin
-        if (state == S_REQUANT) begin
+        if (state == S_REQ_OUT) begin
             for (ln = 0; ln < 8; ln = ln + 1) begin
                 v_out_ch = o_group * 8 + ln;
                 if (v_out_ch >= out_c_reg) begin
                     v_q[ln] = 8'd0;
                 end else begin
-                v_raw = acc[rq_row][rq_col][ln];
+                v_raw = acc_q[32*ln +: 32];
                 v_biased = v_raw + bias_store[v_out_ch];
                 v_act = v_biased;
                 if (act_reg == 2'd1) begin
