@@ -39,7 +39,9 @@ add_fileset QUARTUS_SYNTH QUARTUS_SYNTH "" ""
 set_fileset_property QUARTUS_SYNTH TOP_LEVEL cnn_top
 set_fileset_property QUARTUS_SYNTH ENABLE_RELATIVE_INCLUDE_PATHS false
 set_fileset_property QUARTUS_SYNTH ENABLE_FILE_OVERWRITE_MODE false
-add_fileset_file cnn_top.qxp QXP PATH cnn_top.qxp
+add_fileset_file cnn_top.v VERILOG PATH cnn_top.v
+add_fileset_file cnn_top_core.v VERILOG PATH cnn_top_core.v
+add_fileset_file cnn_core_v2.v VERILOG PATH cnn_core_v2.v
 
 
 # 

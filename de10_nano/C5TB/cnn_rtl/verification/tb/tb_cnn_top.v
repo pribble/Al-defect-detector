@@ -1,5 +1,5 @@
 //=============================================================================
-// tb_cnn_top — 端到端对拍（阶段 5）
+// tb_cnn_top — 端到端对拍（阶段 5；dut = cnn_top_core，QSys 由 cnn_top wrapper 适配）
 //=============================================================================
 // 模拟：DDR 内存模型（param/scale/输入/权重/输出）+ Avalon 从（ARM 侧）
 //       + 主接口响应。流程：填内存 → 写 6 寄存器 → START → 轮询自清 →
@@ -50,7 +50,7 @@ module tb_cnn_top;
     wire [63:0] ow_writedata;
     reg         ow_waitrequest = 0;
 
-    cnn_top dut (
+    cnn_top_core dut (
         .clk(clk), .rst_n(rst_n),
         .as_address(as_address), .as_write(as_write), .as_read(as_read),
         .as_writedata(as_writedata), .as_readdata(as_readdata),
@@ -105,6 +105,11 @@ module tb_cnn_top;
                      dut.pr_read);
             $finish;
         end
+    end
+    // 断言：lr/wr 分时（load master 复用前提）
+    always @(posedge clk) begin
+        if (dut.lr_read && dut.wr_read)
+            $display("  ASSERT FAIL: lr_read && wr_read 同时拉高（load master 复用冲突）");
     end
 
     task arm_write(input [7:0] addr, input [31:0] data);

@@ -105,6 +105,12 @@ cnn_rtl/
 | 5 ✅ | `cnn_top.v` Avalon 顶层（从接口 + 6 寄存器 + param/scale 解析 + DMA + 行块调度）；requant 定点参数**软件侧预转**（`conv_op.cc` scale 区每通道 4 字：mult/bias_int/shift/rcl6，RTL 无浮点） | 端到端 tb：**6/6 层 bit-exact**（单块/多块/多组、38 高长层） |
 | 7 ⬜ | 打包 QSys IP 上板替换 | 与旧 IP 检测结果一致 |
 
+**阶段 5 交付（Quartus 接入）**：`cnn_top.v`（QSys 适配层，端口与 `ip/cnn_top_hw.tcl` 一致）+ `cnn_top_core.v`（RTL 本体，tb 直接对拍）+ `cnn_core_v2.v`；`ip/cnn_top_hw.tcl` 已把 `cnn_top.qxp` 黑盒引用改为 3 个 `.v`。接入步骤（Windows Quartus）：
+1. 把 `ip/` 下 3 个 `.v` 随工程提交（已复制）；Platform Designer 打开 `soc_system.qsys` → Generate HDL（顶层会例化 `cnn_top` = 新 wrapper）
+2. 全量编译（Analysis & Synthesis → Fitter → Timing；黑盒换 RTL 不能增量）
+3. 关注 `clk_cnn`（50MHz）时序；board 验证：寄存器读写 → 单层对拍（软件侧跑一层，比对 DDR 输出）
+- 适配要点：burstcount 固定 1、byteenable 全 1、readdatavalid 为 bridge 输入不采；**权重读复用 load master**（黑盒无独立权重 master，core S_LOAD/S_WEIGHT 串行分时，已验证 lr/wr 不同时拉高）；41 个 QSys HDL_PARAMETER 照单声明、值忽略
+
 **阶段 5 关键设计**：
 - requant 定点参数**软件侧预转**（量化优先、RTL 无浮点）：`conv_op.cc` 把 float scale（ws/bias/os）转成每通道 4 个 int32（mult/bias_int/shift/rcl6）写入 scale 区，公式与舍入（away-from-zero）对齐 `ref_int8.quantize_params`（500 轮随机验证一致）；`intelfpga.cc` memcpy 4×out_c 字
 - `cnn_top.v` 端到端：寄存器（START=0x00/DDRIN=0x10/DDRW=0x1C/DDROUT=0x28/PARAM=0x34/SCALE=0x40）→ param 块 27 字解析 → scale 读取 → cfg 配 cnn_core_v2 → 行块循环（base_row 重定位 + DMA 跟随 core 流握手）
