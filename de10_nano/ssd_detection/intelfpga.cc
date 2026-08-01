@@ -634,8 +634,9 @@ int intelfpga_subgraph(struct DeviceGraphNode *node) {
 
       memset(uparam, 0, sizeof(parameter));
       memcpy(uparam, (int *)(&(argp->param)), sizeof(struct parameter));
-      memcpy((float *)uscale, argp->scale,
-             sizeof(float) * (2 * argp->param.output_c));
+      // scale 区：每输出通道 4 个 int32（mult/bias_int/shift/rcl6），软件预转
+      memcpy((int *)uscale, argp->scale,
+             sizeof(int32_t) * (4 * argp->param.output_c));
 
       if (global_mem_cfg.valid) {
         memcpy(global_mem_cfg.dst, global_mem_cfg.src, global_mem_cfg.size);

@@ -14,6 +14,8 @@
 
 #include "lite/operators/conv_op.h"
 #include<intelfpga.h>
+#include <cstdio>
+#include <cmath>
 #include "lite/kernels/intel_fpga/bridges/graph.h"
 #include "core/subgraph/subgraph_bridge_registry.h"
 
@@ -115,31 +117,35 @@ int ConvConverter(void *ctx, OpLite *op, KernelBase *kernel) {
         at_ = INTELFPGA_ACT_NONE;
         break;
     }
-    //init scale
-    device_param->scale = new float[2*o_dims[1]];
+    // init scale：每输出通道 4 个 int32 定点 requant 参数（FPGA 侧量化优先，无浮点）
+    //   scale[0..out_c)          = mult   = round_half_away((ws*is/os)*2^30)
+    //   scale[out_c..2*out_c)    = bias_int = round_half_away(bias/(ws*is))
+    //   scale[2*out_c..3*out_c)  = shift  = 30
+    //   scale[3*out_c..4*out_c)  = rcl6   = round_half_away(6*os/(ws*is))
+    // 公式与舍入（away-from-zero）对齐 tools/ref_int8.py quantize_params，已验证 500 轮一致
+    device_param->scale = new int32_t[4*o_dims[1]];
     device_param->param.input_scale = param.input_scale;
     device_param->param.output_scale = param.output_scale;
 
     VLOG(4) << "input scale: " << param.input_scale;
     VLOG(4) << "output scale: " << param.output_scale;
-    if(scale){
-        for(int i=0;i<o_dims[1];i++)
-        {
-            device_param->scale[i]=scale[i];
+    {
+        auto rnd = [](double x) -> int32_t {
+            return (int32_t)(x >= 0 ? std::floor(x + 0.5) : std::ceil(x - 0.5));
+        };
+        const double is_ = (double)param.input_scale;
+        const double os_ = (double)param.output_scale;
+        for (int i = 0; i < o_dims[1]; i++) {
+            const double ws = scale ? (double)scale[i] : 1.0;
+            const double b  = ba    ? (double)ba[i]    : 0.0;
+            const double f  = ws * is_ / os_;
+            device_param->scale[i] = rnd(f * (double)(1 << 30));
+            device_param->scale[o_dims[1] + i] = rnd(b / (ws * is_));
+            device_param->scale[2 * o_dims[1] + i] = 30;
+            device_param->scale[3 * o_dims[1] + i] = rnd(6.0 * os_ / (ws * is_));
         }
     }
-    if(ba){
-        for(int i=0;i<o_dims[1];i++)
-        {
-            device_param->scale[o_dims[1]+i]=ba[i]/param.output_scale;
-        }
-    }else{
-        for(int i=0;i<o_dims[1];i++)
-        {
-            device_param->scale[o_dims[1]+i]=0;
-        }
-    }
-    
+
     //ignore batch dimension TODO
     device_param->param.scale_offset = 0;
     device_param->d_ka = nullptr;

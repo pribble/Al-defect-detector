@@ -171,7 +171,7 @@ struct FpgaConvParam: public NodeParam {
 	int8_t*            d_ka{nullptr}; // device kernel address, [Co/INPUT_CHANNLE_TILE,Ci,Hk,Wk,INPUT_CHANNLE_TILE]
 	int8_t*            oa{nullptr}; // output address, [N,Co,Ho,Wo]
 	int8_t*            d_oa{nullptr}; // output address, [N,Co/INPUT_CHANNLE_TILE,Ho,Wo/INPUT_CHANNLE_TILE]
-	float *			   scale{nullptr}; // filter scale
+	int32_t *		   scale{nullptr}; // 定点 requant 参数，每通道 4 字：mult/bias_int/shift/rcl6（软件预转）
 	struct parameter param;
 };
 
