@@ -289,8 +289,9 @@ module cnn_core_v2 #(
                     for (lane = 0; lane < 8; lane = lane + 1) begin
                         v_sum[lane] = 0;
                         for (m = 0; m < 8; m = m + 1) begin
+                            // pad 列（mac_c<0 或 >=in_w）：贡献 0，禁止越界读 lb
                             v_sum[lane] = v_sum[lane] +
-                                $signed(lb_q[8*m +: 8]) *
+                                (mac_c_valid ? $signed(lb_q[8*m +: 8]) : 8'sd0) *
                                 wbuf[lane*72 + mac_t*8 + m];
                         end
                     end
@@ -332,12 +333,18 @@ module cnn_core_v2 #(
                                     i_group <= i_group + 1;
                                     state <= S_WEIGHT;
                                 end
-                            end else
+                            end else begin
                                 mac_row <= mac_row + 1;
-                        end else
+                                state <= S_MAC_RD;
+                            end
+                        end else begin
                             mac_col <= mac_col + 1;
-                    end else
+                            state <= S_MAC_RD;
+                        end
+                    end else begin
                         mac_t <= mac_t + 1;
+                        state <= S_MAC_RD;
+                    end
                 end
 
                 //---- requant 请求拍：采样 acc[rq_row][rq_col] ----
@@ -373,11 +380,14 @@ module cnn_core_v2 #(
                                     rq_row <= 0; rq_col <= 0;
                                     state <= S_ACC_CLR;
                                 end
-                            end else
+                            end else begin
                                 rq_row <= rq_row + 1;
-                        end else
+                                state <= S_REQ_ADDR;
+                            end
+                        end else begin
                             rq_col <= rq_col + 1;
-                        state <= S_REQ_ADDR;
+                            state <= S_REQ_ADDR;
+                        end
                     end
                 end
 
