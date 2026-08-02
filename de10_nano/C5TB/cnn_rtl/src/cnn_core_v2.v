@@ -159,7 +159,8 @@ module cnn_core_v2 #(
     localparam S_ACC_CLR  = 4'd2;   // acc 清零（每输出组）
     localparam S_WEIGHT   = 4'd3;   // 装载权重 slice（72 拍）
     localparam S_MAC_RD   = 4'd4;   // 窗口 tap 请求拍（同步采样 lb_q/acc_q）
-    localparam S_MAC_ACC  = 4'd5;   // 窗口 tap 累加拍（乘加 → acc_local）
+    localparam S_MAC_MUL  = 4'd11;  // 窗口 tap 乘拍（乘加树 → v_sum_r）
+    localparam S_MAC_ACC  = 4'd5;   // 窗口 tap 累加拍（v_sum_r → acc_local）
     localparam S_REQ_ADDR = 4'd6;   // requant 请求拍（采样 acc_q）
     localparam S_REQ_MUL  = 4'd7;   // requant 乘加拍（bias+act，寄存 v_act_l）
     localparam S_REQ_MUL2 = 4'd8;   // requant 乘法拍（32×32 mult，寄存 v_rq64_l）
@@ -280,13 +281,11 @@ module cnn_core_v2 #(
 
                 //---- 窗口 MAC（请求拍）：组合地址稳定，上升沿同步采样 lb_q/acc_q ----
                 S_MAC_RD: begin
-                    state <= S_MAC_ACC;
+                    state <= S_MAC_MUL;
                 end
 
-                //---- 窗口 MAC（累加拍）：用上拍采样的 lb_q 乘加，累加到 acc_local；
-                //     首 tap（mac_t==0）以 acc_q 初始化；末 tap（mac_t==8）写回 acc ----
-                S_MAC_ACC: begin
-                    // 组合乘加树：lb_q[8*m +: 8]（本 tap 输入 8 lane）× wbuf slice
+                //---- 窗口 MAC（乘拍）：乘加树 → v_sum_r 寄存（拆开累加，缩短组合链）----
+                S_MAC_MUL: begin
                     for (lane = 0; lane < 8; lane = lane + 1) begin
                         v_sum[lane] = 0;
                         for (m = 0; m < 8; m = m + 1) begin
@@ -295,6 +294,14 @@ module cnn_core_v2 #(
                                 wbuf[lane*72 + mac_t*8 + m];
                         end
                     end
+                    for (lane = 0; lane < 8; lane = lane + 1)
+                        v_sum_r[lane] <= v_sum[lane];
+                    state <= S_MAC_ACC;
+                end
+
+                //---- 窗口 MAC（累加拍）：用上拍寄存的 v_sum_r 累加到 acc_local；
+                //     首 tap（mac_t==0）以 acc_q 初始化；末 tap（mac_t==8）写回 acc ----
+                S_MAC_ACC: begin
                     // 8 lane 独立 32-bit 累加（acc_local 打包为 256-bit，但每个 lane
                     // 是独立 int32，无跨 lane 进位；整体 256-bit 加法器进位链过长，
                     // 拆成 lane 级加法消除，语义不变）
@@ -303,15 +310,15 @@ module cnn_core_v2 #(
                     // Quartus 把 acc 推断为 M10K，导致 A&S 内存反弹（10+GB）。
                     for (lane = 0; lane < 8; lane = lane + 1) begin
                         if (mac_t == 0)
-                            acc_next[32*lane +: 32] = acc_q[32*lane +: 32] + v_sum[lane];
+                            acc_next[32*lane +: 32] = acc_q[32*lane +: 32] + v_sum_r[lane];
                         else
-                            acc_next[32*lane +: 32] = acc_local[32*lane +: 32] + v_sum[lane];
+                            acc_next[32*lane +: 32] = acc_local[32*lane +: 32] + v_sum_r[lane];
                     end
                     acc_local <= acc_next;
                     if (mac_t == 8) begin
                         // 末 tap：写回最终值（acc_local 尚缺本 tap 部分和）
                         for (lane = 0; lane < 8; lane = lane + 1)
-                            acc_wr_next[32*lane +: 32] = acc_local[32*lane +: 32] + v_sum[lane];
+                            acc_wr_next[32*lane +: 32] = acc_local[32*lane +: 32] + v_sum_r[lane];
                         acc[acc_waddr_mac] <= acc_wr_next;
                         mac_t <= 0;
                         if (mac_col == out_w_reg - 1) begin
@@ -442,6 +449,7 @@ module cnn_core_v2 #(
 
     integer lane, m;
     reg signed [31:0] v_sum [0:7];
+    reg signed [31:0] v_sum_r [0:7];   // S_MAC_MUL 拍寄存的乘加树结果（拆流水）
 
     // 组合中间变量：8 lane 独立 32-bit 加法后拼成整字（避免 part-select 写 RAM
     // 破坏 M10K 推断；acc_local/acc 保持整字写，Quartus 才可推断 block RAM）
