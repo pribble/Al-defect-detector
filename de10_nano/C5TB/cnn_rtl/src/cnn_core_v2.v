@@ -458,7 +458,7 @@ module cnn_core_v2 #(
     end
 
     integer lane, m;
-    reg signed [31:0] v_sum [0:7];
+    (* multstyle = "logic" *) reg signed [31:0] v_sum [0:7];   // 8×8 MAC 树用 LUT（省 DSP，~4ns 无时序风险）
     reg signed [31:0] v_sum_r [0:7];   // S_MAC_MUL 拍寄存的乘加树结果（拆流水）
 
     // 组合中间变量：8 lane 独立 32-bit 加法后拼成整字（避免 part-select 写 RAM
@@ -477,7 +477,7 @@ module cnn_core_v2 #(
     reg signed [31:0] v_raw, v_biased, v_act;
     reg signed [63:0] v_rq64;
     reg signed [31:0] v_act_l [0:7];   // 每 lane 的 act 后值（流水级 1）
-    reg signed [63:0] v_rq64_l [0:7];  // 每 lane 的 64-bit 积（流水级 2）
+    (* multstyle = "dsp" *) reg signed [63:0] v_rq64_l [0:7];  // 每 lane 的 64-bit 积（流水级 2，保 DSP）
     reg [31:0] v_out_ch;
     reg [7:0] v_q [0:7];
 
