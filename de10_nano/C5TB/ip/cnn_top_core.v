@@ -18,7 +18,7 @@
 // 主接口（简单读/写，burstcount=1）：pr/sr 32b，lr/wr 64b 读，ow 64b 写。
 //=============================================================================
 
-(* multstyle = "logic" *) module cnn_top_core (   // 预计算乘法走 LUT（每层/行块一次，时序余量大）
+module cnn_top_core (
     input  wire                clk,
     input  wire                rst_n,
 
