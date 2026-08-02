@@ -281,6 +281,7 @@ module cnn_core_v2 #(
 
                 //---- 窗口 MAC（请求拍）：组合地址稳定，上升沿同步采样 lb_q/acc_q ----
                 S_MAC_RD: begin
+                    mac_c_valid_r <= mac_c_valid;   // 组合 valid 寄存（断 k_reg→乘加树链）
                     state <= S_MAC_MUL;
                 end
 
@@ -291,7 +292,7 @@ module cnn_core_v2 #(
                         for (m = 0; m < 8; m = m + 1) begin
                             // pad 列（mac_c<0 或 >=in_w）：贡献 0，禁止越界读 lb
                             v_sum[lane] = v_sum[lane] +
-                                (mac_c_valid ? $signed(lb_q[8*m +: 8]) : 8'sd0) *
+                                (mac_c_valid_r ? $signed(lb_q[8*m +: 8]) : 8'sd0) *
                                 wbuf[lane*72 + mac_t*8 + m];
                         end
                     end
@@ -441,6 +442,9 @@ module cnn_core_v2 #(
     wire mac_c_valid = (mac_c >= 0) && (mac_c < in_w_reg);
     wire [31:0] mac_c_cl = mac_c[31:0];
 
+    // S_MAC_RD 拍寄存 tap 列有效位（拆 k_reg→乘加树组合链，setup 违例 -6.18ns 主因）
+    reg mac_c_valid_r;
+
     // 同步采样：RAM 读端口（组合地址在上升沿被采样，数据晚一拍到 lb_q/acc_q）
     // acc 读复用同一端口（S_MAC 读 {mac_row,mac_col}，requant 读 {rq_row,rq_col}，
     // 两阶段状态互斥）
@@ -448,6 +452,7 @@ module cnn_core_v2 #(
         if (!rst_n) begin
             lb_q <= 64'h0;
             acc_q <= 256'sd0;
+            mac_c_valid_r <= 1'b0;
         end else begin
             lb_q <= lb[lb_raddr];
             if (state == S_REQ_ADDR || state == S_REQ_MUL || state == S_REQ_MUL2)
