@@ -42,6 +42,8 @@ set_fileset_property QUARTUS_SYNTH ENABLE_FILE_OVERWRITE_MODE false
 add_fileset_file cnn_top.v VERILOG PATH cnn_top.v
 add_fileset_file cnn_top_core.v VERILOG PATH cnn_top_core.v
 add_fileset_file cnn_core_v2.v VERILOG PATH cnn_core_v2.v
+add_fileset_file mac8x8_dsp.v VERILOG PATH mac8x8_dsp.v
+add_fileset_file mac8x8_lut.v VERILOG PATH mac8x8_lut.v
 
 
 # 
