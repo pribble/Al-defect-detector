@@ -150,6 +150,10 @@ module cnn_core_v2 #(
     // lane 0-3 走 DSP（32 个 × ≤2 block = ≤64）、lane 4-7 走 LUT（32 个 ≈2K ALUT）。
     // 乘法器与加法树物理隔离，避免 Quartus 重新融合成 mult_hlmac（每乘加 2 block）。
     wire signed [15:0] mac_p [0:7][0:7];  // signed：负积需符号扩展进加法树
+
+    // w_q：权重读寄存器（S_MAC_RD 拍与 lb_q 同步采样，拆掉 mac_t→wbuf 读 mux
+    // →乘法→加法树 的整条组合链；S_MAC_MUL 拍只用寄存器值，3 拍/tap 不变）
+    reg [7:0] w_q [0:7][0:7];
     genvar mac_lane_i, mac_m_i;
     generate
         for (mac_lane_i = 0; mac_lane_i < 8; mac_lane_i = mac_lane_i + 1) begin : mac_lane_g
@@ -158,14 +162,14 @@ module cnn_core_v2 #(
                     mac8x8_dsp u_mac (
                         .en(mac_c_valid_r),
                         .a (lb_q[8*mac_m_i +: 8]),
-                        .b (wbuf[mac_lane_i*72 + mac_t*8 + mac_m_i]),
+                        .b (w_q[mac_lane_i][mac_m_i]),
                         .p (mac_p[mac_lane_i][mac_m_i])
                     );
                 end else begin : u_lut
                     mac8x8_lut u_mac (
                         .en(mac_c_valid_r),
                         .a (lb_q[8*mac_m_i +: 8]),
-                        .b (wbuf[mac_lane_i*72 + mac_t*8 + mac_m_i]),
+                        .b (w_q[mac_lane_i][mac_m_i]),
                         .p (mac_p[mac_lane_i][mac_m_i])
                     );
                 end
@@ -478,6 +482,10 @@ module cnn_core_v2 #(
             acc_q <= 256'sd0;
         end else begin
             lb_q <= lb[lb_raddr];
+            // 权重同拍采样：mac_t 在 S_MAC_ACC 末更新，本拍（S_MAC_RD）稳定
+            for (lane = 0; lane < 8; lane = lane + 1)
+                for (m = 0; m < 8; m = m + 1)
+                    w_q[lane][m] <= wbuf[lane*72 + mac_t*8 + m];
             if (state == S_REQ_ADDR || state == S_REQ_MUL || state == S_REQ_MUL2)
                 acc_q <= acc[acc_raddr_clr];
             else
