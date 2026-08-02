@@ -134,9 +134,9 @@
     reg [31:0] param_buf [0:26];
     reg [31:0] req_buf [0:511];
 
-    reg [31:0] p_in_c, p_in_h, p_in_w, p_out_c, p_out_h, p_out_w;
-    reg [31:0] p_k, p_pad, p_stride, p_act, p_type;
-    reg [31:0] p_out_row_tile, p_in_row_tile, p_in_cb, p_out_cb, p_row_block;
+    reg [15:0] p_in_c, p_in_h, p_in_w, p_out_c, p_out_h, p_out_w;   // ≤302
+    reg [7:0]  p_k, p_pad, p_stride, p_act, p_type;
+    reg [7:0]  p_out_row_tile, p_in_row_tile, p_in_cb, p_out_cb, p_row_block;   // ≤19/4
 
     //-----------------------------------------------------------------------
     // 派生量预计算（消除 S_RUN 每拍 32-bit 变量乘法链——setup 违例 -30.8ns 主因）
@@ -157,15 +157,15 @@
     reg [31:0] w_cb_r;                  // p_out_cb * (type==4 ? 1 : p_in_cb)
     reg [31:0] w_rb_beats_r;            // w_cb_r * 72（每行块权重拍数）
     reg [31:0] in_row_w8_r;             // p_in_w * 8
-    reg signed [31:0] r0_in_r;          // max(rb_base_r, 0)
-    reg signed [31:0] r1_in_r;          // min(rb_base_r + in_row_tile, in_h)
-    reg [31:0] load_rows_r;             // max(r1_in_r - r0_in_r, 0)
+    reg signed [15:0] r0_in_r;          // max(rb_base_r, 0)，≤in_h
+    reg signed [15:0] r1_in_r;          // min(rb_base_r + in_row_tile, in_h)
+    reg [7:0]  load_rows_r;             // max(r1_in_r - r0_in_r, 0)，≤in_row_tile
     reg [31:0] in_rb_base_r;            // r0_in_r * p_in_w * 8（输入行块内偏移）
     reg [31:0] in_seg_words_r;          // load_rows_r * p_in_w（每输入块段拍数）
     reg [31:0] in_seg_tail_r;           // (in_seg_words_r - 1) * 8（段尾地址回退）
     reg [31:0] out_rb_base_r;           // rb * out_rb_stride_r（输出行块内偏移）
-    reg [31:0] out_row_prod_r;          // rb * p_out_row_tile
-    reg [31:0] rb_out_rows_r;           // min(out_row_prod_r + tile, out_h) - out_row_prod_r 裁剪
+    reg [15:0] out_row_prod_r;          // rb * p_out_row_tile
+    reg [15:0] rb_out_rows_r;           // min(out_row_prod_r + tile, out_h) - out_row_prod_r 裁剪
     reg [31:0] out_seg_words_r;         // rb_out_rows_r * p_out_w（每输出块段拍数）
     reg [31:0] out_seg_tail_r;          // (out_seg_words_r - 1) * 8（段尾地址回退）
 
@@ -188,12 +188,14 @@
     reg [3:0] state;
     reg [31:0] rd_cnt;          // param/scale 读计数
     reg [31:0] cfg_idx;         // cfg 写入索引
-    reg [31:0] rb;              // 行块索引
+    reg [15:0] rb;              // 行块索引（≤row_block）
 
     // DMA 计数器
-    reg [31:0] dma_icb, dma_ibeat;    // 输入：块、段内拍
-    reg [31:0] dma_wbeat;             // 权重：总拍（64-bit）
-    reg [31:0] dma_ocb, dma_obeat;    // 输出：块、段内拍
+    reg [7:0]  dma_icb;                 // 输入：块（≤4）
+    reg [15:0] dma_ibeat;             // 输入：段内拍（≤in_seg_words）
+    reg [15:0] dma_wbeat;             // 权重：总拍（64-bit，≤w_rb_beats）
+    reg [7:0]  dma_ocb;                 // 输出：块（≤4）
+    reg [15:0] dma_obeat;             // 输出：段内拍（≤out_seg_words）
     reg        input_done, weight_done, output_done;   // 本行块完成标志
 
     // 主接口握手完成
