@@ -29,7 +29,7 @@
 //   o_stream：64-bit 输出事件（8 通道/拍，NHWC8 块序）
 //=============================================================================
 
-(* multstyle = "dsp" *) module cnn_core_v2 #(   // MAC 8×8 独立乘法器用 DSP（加法树不融合），requant 保 DSP
+module cnn_core_v2 #(
     parameter G_MAX_IN_CB  = 4,    // 最大输入通道块（模型 in_c<=32）
     parameter G_MAX_OUT_CB = 4,    // 最大输出通道块（模型 out_c<=32）
     parameter G_MAX_IN_ROWS= 41,   // 最大输入行块高度（模型 max in_tile=39）
@@ -145,6 +145,33 @@
     wire [31:0] acc_raddr_clr = rq_row*G_MAX_OW + rq_col;
     wire [31:0] acc_raddr_mac = mac_row*G_MAX_OW + mac_col;
     reg signed [7:0] wbuf [0:8*9*8-1];
+
+    // MAC 8×8 乘法器：拆成独立子模块（模块级 multstyle 强制 DSP/LUT 分配），
+    // lane 0-3 走 DSP（32 个 × ≤2 block = ≤64）、lane 4-7 走 LUT（32 个 ≈2K ALUT）。
+    // 乘法器与加法树物理隔离，避免 Quartus 重新融合成 mult_hlmac（每乘加 2 block）。
+    wire signed [15:0] mac_p [0:7][0:7];  // signed：负积需符号扩展进加法树
+    genvar mac_lane_i, mac_m_i;
+    generate
+        for (mac_lane_i = 0; mac_lane_i < 8; mac_lane_i = mac_lane_i + 1) begin : mac_lane_g
+            for (mac_m_i = 0; mac_m_i < 8; mac_m_i = mac_m_i + 1) begin : mac_mul_g
+                if (mac_lane_i < 4) begin : u_dsp
+                    mac8x8_dsp u_mac (
+                        .en(mac_c_valid_r),
+                        .a (lb_q[8*mac_m_i +: 8]),
+                        .b (wbuf[mac_lane_i*72 + mac_t*8 + mac_m_i]),
+                        .p (mac_p[mac_lane_i][mac_m_i])
+                    );
+                end else begin : u_lut
+                    mac8x8_lut u_mac (
+                        .en(mac_c_valid_r),
+                        .a (lb_q[8*mac_m_i +: 8]),
+                        .b (wbuf[mac_lane_i*72 + mac_t*8 + mac_m_i]),
+                        .p (mac_p[mac_lane_i][mac_m_i])
+                    );
+                end
+            end
+        end
+    endgenerate
 
     // 同步读采样寄存器（RAM 读输出，读地址 = 组合函数，晚一拍有效）
     reg [63:0]          lb_q;
@@ -288,22 +315,11 @@
 
                 //---- 窗口 MAC（乘拍）：乘加树 → v_sum_r 寄存（拆开累加，缩短组合链）----
                 S_MAC_MUL: begin
-                    // 显式 8 项加法树：独立乘法器（每个 8×8 用 1 个 18×18），
-                    // 避免累加形式被综合成 mult_hlmac 融合原语（每个乘加 2 个 DSP block）
-                    for (lane = 0; lane < 8; lane = lane + 1) begin
-                        // 两乘数都显式 signed 8-bit：wbuf 若保持 unsigned 会与 $signed(lb_q)
-                        // 混乘导致两边扩展成 16-bit 有符号（16×16 → 每个 8×8 占 2 个 DSP block），
-                        // signed×signed 8×8 只会占 1 个 18×18（9×9 模式）
+                    // 乘拍：mac_p[lane][m]（子模块乘法器，DSP/LUT 混合）→ 8 项加法树
+                    for (lane = 0; lane < 8; lane = lane + 1)
                         v_sum[lane] =
-                            (mac_c_valid_r ? $signed(lb_q[7:0])   : 8'sd0) * $signed(wbuf[lane*72 + mac_t*8 + 0]) +
-                            (mac_c_valid_r ? $signed(lb_q[15:8])  : 8'sd0) * $signed(wbuf[lane*72 + mac_t*8 + 1]) +
-                            (mac_c_valid_r ? $signed(lb_q[23:16]) : 8'sd0) * $signed(wbuf[lane*72 + mac_t*8 + 2]) +
-                            (mac_c_valid_r ? $signed(lb_q[31:24]) : 8'sd0) * $signed(wbuf[lane*72 + mac_t*8 + 3]) +
-                            (mac_c_valid_r ? $signed(lb_q[39:32]) : 8'sd0) * $signed(wbuf[lane*72 + mac_t*8 + 4]) +
-                            (mac_c_valid_r ? $signed(lb_q[47:40]) : 8'sd0) * $signed(wbuf[lane*72 + mac_t*8 + 5]) +
-                            (mac_c_valid_r ? $signed(lb_q[55:48]) : 8'sd0) * $signed(wbuf[lane*72 + mac_t*8 + 6]) +
-                            (mac_c_valid_r ? $signed(lb_q[63:56]) : 8'sd0) * $signed(wbuf[lane*72 + mac_t*8 + 7]);
-                    end
+                            mac_p[lane][0] + mac_p[lane][1] + mac_p[lane][2] + mac_p[lane][3] +
+                            mac_p[lane][4] + mac_p[lane][5] + mac_p[lane][6] + mac_p[lane][7];
                     for (lane = 0; lane < 8; lane = lane + 1)
                         v_sum_r[lane] <= v_sum[lane];
                     state <= S_MAC_ACC;
