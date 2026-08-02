@@ -18,7 +18,7 @@
 // 主接口（简单读/写，burstcount=1）：pr/sr 32b，lr/wr 64b 读，ow 64b 写。
 //=============================================================================
 
-module cnn_top_core (
+(* multstyle = "logic" *) module cnn_top_core (   // 模块级属性：子模块 cnn_core_v2 的 MAC 8×8 走 LUT（数组信号属性不生效）
     input  wire                clk,
     input  wire                rst_n,
 
