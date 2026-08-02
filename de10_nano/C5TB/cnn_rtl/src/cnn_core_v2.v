@@ -29,7 +29,7 @@
 //   o_stream：64-bit 输出事件（8 通道/拍，NHWC8 块序）
 //=============================================================================
 
-module cnn_core_v2 #(
+(* multstyle = "dsp" *) module cnn_core_v2 #(   // MAC 8×8 独立乘法器用 DSP（加法树不融合），requant 保 DSP
     parameter G_MAX_IN_CB  = 4,    // 最大输入通道块（模型 in_c<=32）
     parameter G_MAX_OUT_CB = 4,    // 最大输出通道块（模型 out_c<=32）
     parameter G_MAX_IN_ROWS= 41,   // 最大输入行块高度（模型 max in_tile=39）
@@ -288,14 +288,18 @@ module cnn_core_v2 #(
 
                 //---- 窗口 MAC（乘拍）：乘加树 → v_sum_r 寄存（拆开累加，缩短组合链）----
                 S_MAC_MUL: begin
+                    // 显式 8 项加法树：独立乘法器（每个 8×8 用 1 个 18×18），
+                    // 避免累加形式被综合成 mult_hlmac 融合原语（每个乘加 2 个 DSP block）
                     for (lane = 0; lane < 8; lane = lane + 1) begin
-                        v_sum[lane] = 0;
-                        for (m = 0; m < 8; m = m + 1) begin
-                            // pad 列（mac_c<0 或 >=in_w）：贡献 0，禁止越界读 lb
-                            v_sum[lane] = v_sum[lane] +
-                                (mac_c_valid_r ? $signed(lb_q[8*m +: 8]) : 8'sd0) *
-                                wbuf[lane*72 + mac_t*8 + m];
-                        end
+                        v_sum[lane] =
+                            (mac_c_valid_r ? $signed(lb_q[7:0])   : 8'sd0) * wbuf[lane*72 + mac_t*8 + 0] +
+                            (mac_c_valid_r ? $signed(lb_q[15:8])  : 8'sd0) * wbuf[lane*72 + mac_t*8 + 1] +
+                            (mac_c_valid_r ? $signed(lb_q[23:16]) : 8'sd0) * wbuf[lane*72 + mac_t*8 + 2] +
+                            (mac_c_valid_r ? $signed(lb_q[31:24]) : 8'sd0) * wbuf[lane*72 + mac_t*8 + 3] +
+                            (mac_c_valid_r ? $signed(lb_q[39:32]) : 8'sd0) * wbuf[lane*72 + mac_t*8 + 4] +
+                            (mac_c_valid_r ? $signed(lb_q[47:40]) : 8'sd0) * wbuf[lane*72 + mac_t*8 + 5] +
+                            (mac_c_valid_r ? $signed(lb_q[55:48]) : 8'sd0) * wbuf[lane*72 + mac_t*8 + 6] +
+                            (mac_c_valid_r ? $signed(lb_q[63:56]) : 8'sd0) * wbuf[lane*72 + mac_t*8 + 7];
                     end
                     for (lane = 0; lane < 8; lane = lane + 1)
                         v_sum_r[lane] <= v_sum[lane];
