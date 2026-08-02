@@ -134,8 +134,8 @@ module cnn_core_v2 #(
     // 寄存器堆 + 读端口 mux，A&S 内存爆到 40GB+；单维数组 + 常量乘法拼接
     // 地址是官方推荐的可靠推断写法，功能/时序完全不变）。
     //-----------------------------------------------------------------------
-    (* ramstyle = "M10K" *) reg [63:0] lb [0:G_MAX_IN_CB*G_MAX_IN_ROWS*G_MAX_W-1];
-    (* ramstyle = "M10K" *) reg signed [255:0] acc [0:G_MAX_OROWS*G_MAX_OW-1];
+    (* ramstyle = "M10K, no_rw_check" *) reg [63:0] lb [0:G_MAX_IN_CB*G_MAX_IN_ROWS*G_MAX_W-1];
+    (* ramstyle = "M10K, no_rw_check" *) reg signed [255:0] acc [0:G_MAX_OROWS*G_MAX_OW-1];
 
     // 单维索引拼接（常量乘法综合时折叠成移位/加法，不产生逻辑）
     wire [31:0] lb_waddr = load_cb*G_MAX_IN_ROWS*G_MAX_W + load_row*G_MAX_W + load_col;
