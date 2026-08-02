@@ -291,15 +291,18 @@
                     // 显式 8 项加法树：独立乘法器（每个 8×8 用 1 个 18×18），
                     // 避免累加形式被综合成 mult_hlmac 融合原语（每个乘加 2 个 DSP block）
                     for (lane = 0; lane < 8; lane = lane + 1) begin
+                        // 两乘数都显式 signed 8-bit：wbuf 若保持 unsigned 会与 $signed(lb_q)
+                        // 混乘导致两边扩展成 16-bit 有符号（16×16 → 每个 8×8 占 2 个 DSP block），
+                        // signed×signed 8×8 只会占 1 个 18×18（9×9 模式）
                         v_sum[lane] =
-                            (mac_c_valid_r ? $signed(lb_q[7:0])   : 8'sd0) * wbuf[lane*72 + mac_t*8 + 0] +
-                            (mac_c_valid_r ? $signed(lb_q[15:8])  : 8'sd0) * wbuf[lane*72 + mac_t*8 + 1] +
-                            (mac_c_valid_r ? $signed(lb_q[23:16]) : 8'sd0) * wbuf[lane*72 + mac_t*8 + 2] +
-                            (mac_c_valid_r ? $signed(lb_q[31:24]) : 8'sd0) * wbuf[lane*72 + mac_t*8 + 3] +
-                            (mac_c_valid_r ? $signed(lb_q[39:32]) : 8'sd0) * wbuf[lane*72 + mac_t*8 + 4] +
-                            (mac_c_valid_r ? $signed(lb_q[47:40]) : 8'sd0) * wbuf[lane*72 + mac_t*8 + 5] +
-                            (mac_c_valid_r ? $signed(lb_q[55:48]) : 8'sd0) * wbuf[lane*72 + mac_t*8 + 6] +
-                            (mac_c_valid_r ? $signed(lb_q[63:56]) : 8'sd0) * wbuf[lane*72 + mac_t*8 + 7];
+                            (mac_c_valid_r ? $signed(lb_q[7:0])   : 8'sd0) * $signed(wbuf[lane*72 + mac_t*8 + 0]) +
+                            (mac_c_valid_r ? $signed(lb_q[15:8])  : 8'sd0) * $signed(wbuf[lane*72 + mac_t*8 + 1]) +
+                            (mac_c_valid_r ? $signed(lb_q[23:16]) : 8'sd0) * $signed(wbuf[lane*72 + mac_t*8 + 2]) +
+                            (mac_c_valid_r ? $signed(lb_q[31:24]) : 8'sd0) * $signed(wbuf[lane*72 + mac_t*8 + 3]) +
+                            (mac_c_valid_r ? $signed(lb_q[39:32]) : 8'sd0) * $signed(wbuf[lane*72 + mac_t*8 + 4]) +
+                            (mac_c_valid_r ? $signed(lb_q[47:40]) : 8'sd0) * $signed(wbuf[lane*72 + mac_t*8 + 5]) +
+                            (mac_c_valid_r ? $signed(lb_q[55:48]) : 8'sd0) * $signed(wbuf[lane*72 + mac_t*8 + 6]) +
+                            (mac_c_valid_r ? $signed(lb_q[63:56]) : 8'sd0) * $signed(wbuf[lane*72 + mac_t*8 + 7]);
                     end
                     for (lane = 0; lane < 8; lane = lane + 1)
                         v_sum_r[lane] <= v_sum[lane];
