@@ -138,18 +138,36 @@ module cnn_top_core (
     reg [31:0] p_k, p_pad, p_stride, p_act, p_type;
     reg [31:0] p_out_row_tile, p_in_row_tile, p_in_cb, p_out_cb, p_row_block;
 
-    // 派生
-    wire signed [31:0] rb_s   = $signed(rb);
-    wire signed [31:0] rb_base = rb_s * $signed(p_out_row_tile) * $signed(p_stride) - $signed(p_pad);
-    wire signed [31:0] r0_in  = (rb_base > 0) ? rb_base : 0;
-    wire signed [31:0] r1_in  = (rb_base + $signed(p_in_row_tile) < $signed(p_in_h))
-                                ? (rb_base + $signed(p_in_row_tile)) : $signed(p_in_h);
-    wire [31:0] load_rows = (r1_in > r0_in) ? (r1_in - r0_in) : 0;
-    wire [31:0] in_seg_words = load_rows * p_in_w;                 // 每输入块段拍数
-    wire [31:0] w_beats_per_rb = p_out_cb * (p_type == 4 ? 1 : p_in_cb) * 72;
-    wire [31:0] rb_out_rows = (rb * p_out_row_tile + p_out_row_tile < p_out_h) ?
-                              p_out_row_tile : (p_out_h - rb * p_out_row_tile);
-    wire [31:0] out_seg_words = rb_out_rows * p_out_w;             // 每输出块段拍数
+    //-----------------------------------------------------------------------
+    // 派生量预计算（消除 S_RUN 每拍 32-bit 变量乘法链——setup 违例 -30.8ns 主因）
+    // 层级常量（每层一次，S_PREP_L 拍）：in_cb_stride / out_cb_stride /
+    //   out_rb_stride / rb_tile_stride / w_rb_beats
+    // 行块常量（每行块一次，S_PREP 拍）：rb_base / r0 / r1 / load_rows /
+    //   in_rb_base / in_seg_words / in_seg_tail / out_rb_base / out_seg_words
+    // S_RUN 地址全改增量（段内 +8，段尾 +in_cb_stride - in_seg_tail），无乘法。
+    // 与原组合公式数学等价（见 ref_cnn_top.py / 旧注释），事件序列不变。
+    //-----------------------------------------------------------------------
+    reg signed [31:0] rb_base_r;        // 当前行块 base 行号（= rb*tile*stride - pad，增量维护）
+    reg [31:0] in_hw_r;                 // p_in_h * p_in_w
+    reg [31:0] out_hw_r;                // p_out_h * p_out_w
+    reg [31:0] in_cb_stride_r;          // p_in_h*p_in_w*8（输入每 cb 块字节偏移）
+    reg [31:0] out_cb_stride_r;         // p_out_h*p_out_w*8（输出每 cb 块字节偏移）
+    reg [31:0] out_rb_stride_r;         // p_out_row_tile*p_out_w*8（输出每行块字节偏移）
+    reg signed [31:0] rb_tile_stride_r; // p_out_row_tile * p_stride（rb_base 增量）
+    reg [31:0] w_cb_r;                  // p_out_cb * (type==4 ? 1 : p_in_cb)
+    reg [31:0] w_rb_beats_r;            // w_cb_r * 72（每行块权重拍数）
+    reg [31:0] in_row_w8_r;             // p_in_w * 8
+    reg signed [31:0] r0_in_r;          // max(rb_base_r, 0)
+    reg signed [31:0] r1_in_r;          // min(rb_base_r + in_row_tile, in_h)
+    reg [31:0] load_rows_r;             // max(r1_in_r - r0_in_r, 0)
+    reg [31:0] in_rb_base_r;            // r0_in_r * p_in_w * 8（输入行块内偏移）
+    reg [31:0] in_seg_words_r;          // load_rows_r * p_in_w（每输入块段拍数）
+    reg [31:0] in_seg_tail_r;           // (in_seg_words_r - 1) * 8（段尾地址回退）
+    reg [31:0] out_rb_base_r;           // rb * out_rb_stride_r（输出行块内偏移）
+    reg [31:0] out_row_prod_r;          // rb * p_out_row_tile
+    reg [31:0] rb_out_rows_r;           // min(out_row_prod_r + tile, out_h) - out_row_prod_r 裁剪
+    reg [31:0] out_seg_words_r;         // rb_out_rows_r * p_out_w（每输出块段拍数）
+    reg [31:0] out_seg_tail_r;          // (out_seg_words_r - 1) * 8（段尾地址回退）
 
     //-----------------------------------------------------------------------
     // 执行状态机
@@ -159,7 +177,9 @@ module cnn_top_core (
     localparam S_RD_SCALE  = 4'd2;
     localparam S_CFG       = 4'd3;
     localparam S_WR_CFG    = 4'd4;
+    localparam S_PREP_L    = 4'd11;   // 层级派生量预计算（每层一次）
     localparam S_WR_BASE   = 4'd5;
+    localparam S_PREP      = 4'd10;   // 行块派生量预计算（每行块一次）
     localparam S_START     = 4'd6;
     localparam S_RUN       = 4'd7;
     localparam S_NEXT_RB   = 4'd8;
@@ -193,22 +213,6 @@ module cnn_top_core (
     assign core_o_ready  = !output_done;   // core 输出不阻塞（与 v2 tb 的 o_ready=1 一致）
     assign ow_writedata  = core_o_data;
     assign ow_write      = core_o_valid;
-
-    // DMA 地址
-    wire [31:0] in_addr   = reg_ddrin + dma_icb * (p_in_h * p_in_w * 8) +
-                            (r0_in * p_in_w * 8) + dma_ibeat * 8;
-    wire [31:0] w_addr    = reg_ddrw + dma_wbeat * 8;
-    wire [31:0] out_addr  = reg_ddrout + dma_ocb * (p_out_h * p_out_w * 8) +
-                            (rb * p_out_row_tile * p_out_w * 8) + dma_obeat * 8;
-    // 预取地址（握手拍推进计数后）——避免组合读重复同一地址
-    wire [31:0] n_ibeat = (dma_ibeat == in_seg_words - 1) ? 0 : dma_ibeat + 1;
-    wire [31:0] n_icb   = (dma_ibeat == in_seg_words - 1) ? (dma_icb + 1) : dma_icb;
-    wire [31:0] n_obeat = (dma_obeat == out_seg_words - 1) ? 0 : dma_obeat + 1;
-    wire [31:0] n_ocb   = (dma_obeat == out_seg_words - 1) ? (dma_ocb + 1) : dma_ocb;
-    wire [31:0] next_in_addr  = reg_ddrin + n_icb * (p_in_h * p_in_w * 8) +
-                                (r0_in * p_in_w * 8) + n_ibeat * 8;
-    wire [31:0] next_out_addr = reg_ddrout + n_ocb * (p_out_h * p_out_w * 8) +
-                                (rb * p_out_row_tile * p_out_w * 8) + n_obeat * 8;
 
     //-----------------------------------------------------------------------
     // 主状态机
@@ -284,7 +288,27 @@ module cnn_top_core (
                     p_in_cb  <= (param_buf[4]  + 7) >> 3;
                     p_out_cb <= (param_buf[7] + 7) >> 3;
                     cfg_idx <= 0; rb <= 0;
-                    state <= S_RD_SCALE;   // 先解析再读 scale（需 p_out_c）
+                    state <= S_PREP_L;   // 先预计算层级常量，再读 scale（需 p_out_c）
+                end
+
+                //---- 层级派生量预计算（每层一次，2 拍；消除 S_RUN 每拍 32×32 乘法链）----
+                S_PREP_L: begin
+                    if (rd_cnt == 0) begin
+                        rd_cnt <= 1;
+                        rb_base_r <= 32'sd0 - $signed(p_pad);   // rb=0：0*tile*stride - pad
+                        in_hw_r  <= p_in_h * p_in_w;
+                        out_hw_r <= p_out_h * p_out_w;
+                        rb_tile_stride_r <= p_out_row_tile * p_stride;
+                        w_cb_r   <= p_out_cb * (p_type == 4 ? 1 : p_in_cb);
+                        in_row_w8_r <= p_in_w << 3;
+                    end else begin
+                        rd_cnt <= 0;
+                        in_cb_stride_r  <= in_hw_r << 3;
+                        out_cb_stride_r <= out_hw_r << 3;
+                        out_rb_stride_r <= (p_out_row_tile * p_out_w) << 3;
+                        w_rb_beats_r    <= w_cb_r * 72;
+                        state <= S_RD_SCALE;
+                    end
                 end
 
                 //---- 写 cfg（16 标量 + 4×out_c requant + base_row）----
@@ -308,7 +332,7 @@ module cnn_top_core (
                             12: begin core_cfg_addr <= 12; core_cfg_wdata <= p_in_row_tile; end
                             13: begin core_cfg_addr <= 13; core_cfg_wdata <= p_in_cb; end
                             14: begin core_cfg_addr <= 14; core_cfg_wdata <= p_out_cb; end
-                            15: begin core_cfg_addr <= 15; core_cfg_wdata <= rb_base[31:0]; end
+                            15: begin core_cfg_addr <= 15; core_cfg_wdata <= rb_base_r[31:0]; end
                             default: begin core_cfg_addr <= 0; core_cfg_wdata <= 0; end
                         endcase
                     end else if (cfg_idx < 16 + p_out_c) begin
@@ -343,45 +367,77 @@ module cnn_top_core (
                 S_WR_BASE: begin
                     core_cfg_we <= 1'b1;
                     core_cfg_sel <= 0; core_cfg_addr <= 15;
-                    core_cfg_wdata <= rb_base[31:0];
-                    state <= S_START;
+                    core_cfg_wdata <= rb_base_r[31:0];
+                    state <= S_PREP;
+                end
+
+                //---- 行块派生量预计算（每行块一次，5 拍；消除 S_RUN 每拍乘法）----
+                S_PREP: begin
+                    if (rd_cnt == 0) begin
+                        rd_cnt <= 1;
+                        r0_in_r <= (rb_base_r > 32'sd0) ? rb_base_r : 32'sd0;
+                        r1_in_r <= (rb_base_r + $signed(p_in_row_tile) < $signed(p_in_h)) ?
+                                   (rb_base_r + $signed(p_in_row_tile)) : $signed(p_in_h);
+                        out_rb_base_r  <= rb * out_rb_stride_r;
+                        out_row_prod_r <= rb * p_out_row_tile;
+                    end else if (rd_cnt == 1) begin
+                        rd_cnt <= 2;
+                        load_rows_r  <= (r1_in_r > r0_in_r) ? (r1_in_r - r0_in_r) : 32'sd0;
+                        in_rb_base_r <= r0_in_r * in_row_w8_r;
+                    end else if (rd_cnt == 2) begin
+                        rd_cnt <= 3;
+                        in_seg_words_r <= load_rows_r * p_in_w;
+                        rb_out_rows_r <= (out_row_prod_r + p_out_row_tile < p_out_h) ?
+                                         p_out_row_tile : (p_out_h - out_row_prod_r);
+                    end else if (rd_cnt == 3) begin
+                        rd_cnt <= 4;
+                        in_seg_tail_r  <= (in_seg_words_r - 1) * 8;
+                        out_seg_words_r <= rb_out_rows_r * p_out_w;
+                    end else begin
+                        rd_cnt <= 0;
+                        out_seg_tail_r <= (out_seg_words_r - 1) * 8;
+                        state <= S_START;
+                    end
                 end
 
                 S_START: begin
                     core_cfg_we <= 0;
-                    lr_address <= in_addr;
-                    wr_address <= w_addr;
-                    ow_address <= out_addr;
+                    lr_address <= reg_ddrin + in_rb_base_r;
+                    wr_address <= reg_ddrw;
+                    ow_address <= reg_ddrout + out_rb_base_r;
                     core_start <= 1'b1;
                     state <= S_RUN;
                 end
 
-                //---- 运行：DMA 跟随 core 流（握手拍预取下一地址）----
+                //---- 运行：DMA 跟随 core 流（地址增量推进，无每拍乘法）----
                 S_RUN: begin
                     core_start <= 0;
 
-
                     if (lr_got &&
-                        !(dma_icb == p_in_cb - 1 && dma_ibeat == in_seg_words - 1)) begin
-                        lr_address <= next_in_addr;
-                        if (dma_ibeat == in_seg_words - 1) begin
+                        !(dma_icb == p_in_cb - 1 && dma_ibeat == in_seg_words_r - 1)) begin
+                        if (dma_ibeat == in_seg_words_r - 1) begin
+                            lr_address <= lr_address + in_cb_stride_r - in_seg_tail_r;
                             dma_ibeat <= 0;
                             dma_icb <= dma_icb + 1;
-                        end else
+                        end else begin
+                            lr_address <= lr_address + 8;
                             dma_ibeat <= dma_ibeat + 1;
+                        end
                     end
-                    if (wr_got && dma_wbeat < w_beats_per_rb - 1) begin
+                    if (wr_got && dma_wbeat < w_rb_beats_r - 1) begin
                         dma_wbeat <= dma_wbeat + 1;
-                        wr_address <= reg_ddrw + (dma_wbeat + 1) * 8;
+                        wr_address <= wr_address + 8;
                     end
                     if (ow_got &&
-                        !(dma_ocb == p_out_cb - 1 && dma_obeat == out_seg_words - 1)) begin
-                        ow_address <= next_out_addr;
-                        if (dma_obeat == out_seg_words - 1) begin
+                        !(dma_ocb == p_out_cb - 1 && dma_obeat == out_seg_words_r - 1)) begin
+                        if (dma_obeat == out_seg_words_r - 1) begin
+                            ow_address <= ow_address + out_cb_stride_r - out_seg_tail_r;
                             dma_obeat <= 0;
                             dma_ocb <= dma_ocb + 1;
-                        end else
+                        end else begin
+                            ow_address <= ow_address + 8;
                             dma_obeat <= dma_obeat + 1;
+                        end
                     end
 
                     if (core_done) begin
@@ -394,6 +450,7 @@ module cnn_top_core (
                         state <= S_CLEAR;
                     else begin
                         rb <= rb + 1;
+                        rb_base_r <= rb_base_r + rb_tile_stride_r;   // 增量：base += tile*stride
                         dma_icb <= 0; dma_ibeat <= 0; dma_wbeat <= 0;
                         dma_ocb <= 0; dma_obeat <= 0;
                         input_done <= 0; weight_done <= 0; output_done <= 0;
