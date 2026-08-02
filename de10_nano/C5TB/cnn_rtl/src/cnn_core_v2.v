@@ -151,9 +151,11 @@ module cnn_core_v2 #(
     // 乘法器与加法树物理隔离，避免 Quartus 重新融合成 mult_hlmac（每乘加 2 block）。
     wire signed [15:0] mac_p [0:7][0:7];  // signed：负积需符号扩展进加法树
 
-    // w_q：权重读寄存器（S_MAC_RD 拍与 lb_q 同步采样，拆掉 mac_t→wbuf 读 mux
-    // →乘法→加法树 的整条组合链；S_MAC_MUL 拍只用寄存器值，3 拍/tap 不变）
+    // w_q：权重读寄存器（S_MAC_RD 拍与 lb_q 同步采样，拆掉 mac_t→wbuf 读 mux）
     reg [7:0] w_q [0:7][0:7];
+    // mac_p_r：乘法结果寄存器（S_MAC_MUL 拍采样），把 lb M10K 输出→乘法→
+    // 加法树→v_sum_r 的组合链再拆一段（4 拍/tap：RD/MUL/MUL2/ACC）
+    reg signed [15:0] mac_p_r [0:7][0:7];
     genvar mac_lane_i, mac_m_i;
     generate
         for (mac_lane_i = 0; mac_lane_i < 8; mac_lane_i = mac_lane_i + 1) begin : mac_lane_g
@@ -190,7 +192,8 @@ module cnn_core_v2 #(
     localparam S_ACC_CLR  = 4'd2;   // acc 清零（每输出组）
     localparam S_WEIGHT   = 4'd3;   // 装载权重 slice（72 拍）
     localparam S_MAC_RD   = 4'd4;   // 窗口 tap 请求拍（同步采样 lb_q/acc_q）
-    localparam S_MAC_MUL  = 4'd11;  // 窗口 tap 乘拍（乘加树 → v_sum_r）
+    localparam S_MAC_MUL  = 4'd11;  // 窗口 tap 乘拍（乘法器 → mac_p_r）
+    localparam S_MAC_MUL2 = 4'd12;  // 窗口 tap 加法树拍（mac_p_r → v_sum_r）
     localparam S_MAC_ACC  = 4'd5;   // 窗口 tap 累加拍（v_sum_r → acc_local）
     localparam S_REQ_ADDR = 4'd6;   // requant 请求拍（采样 acc_q）
     localparam S_REQ_MUL  = 4'd7;   // requant 乘加拍（bias+act，寄存 v_act_l）
@@ -319,11 +322,18 @@ module cnn_core_v2 #(
 
                 //---- 窗口 MAC（乘拍）：乘加树 → v_sum_r 寄存（拆开累加，缩短组合链）----
                 S_MAC_MUL: begin
-                    // 乘拍：mac_p[lane][m]（子模块乘法器，DSP/LUT 混合）→ 8 项加法树
+                    // 乘拍：采样乘法器输出（mac_p → mac_p_r）
+                    for (lane = 0; lane < 8; lane = lane + 1)
+                        for (m = 0; m < 8; m = m + 1)
+                            mac_p_r[lane][m] <= mac_p[lane][m];
+                    state <= S_MAC_MUL2;
+                end
+                S_MAC_MUL2: begin
+                    // 加法树拍：mac_p_r（寄存器）→ 8 项加法树 → v_sum_r
                     for (lane = 0; lane < 8; lane = lane + 1)
                         v_sum[lane] =
-                            mac_p[lane][0] + mac_p[lane][1] + mac_p[lane][2] + mac_p[lane][3] +
-                            mac_p[lane][4] + mac_p[lane][5] + mac_p[lane][6] + mac_p[lane][7];
+                            mac_p_r[lane][0] + mac_p_r[lane][1] + mac_p_r[lane][2] + mac_p_r[lane][3] +
+                            mac_p_r[lane][4] + mac_p_r[lane][5] + mac_p_r[lane][6] + mac_p_r[lane][7];
                     for (lane = 0; lane < 8; lane = lane + 1)
                         v_sum_r[lane] <= v_sum[lane];
                     state <= S_MAC_ACC;
