@@ -216,6 +216,7 @@ int start_fpga(uint32_t *ip, uint32_t start_reg_addr) {
   foo_set(ip, start_reg_addr, status);
   status = foo_get(ip, start_reg_addr);
   auto waitip_start = std::chrono::steady_clock::now();
+  float last_dbg_print = 0.0f;
 
   while (status & 1) {
     status = foo_get(ip, start_reg_addr);
@@ -225,6 +226,26 @@ int start_fpga(uint32_t *ip, uint32_t start_reg_addr) {
       printf("wait ip fail.\n");
       fpga_release();
       exit(-1);
+    }
+    // 调试：等待期间每 500ms 打印一次 FPGA 状态机现场（0x44/0x48 是复现核
+    // 的调试只读寄存器，非黑盒协议；正常完成时这里不会打印）
+    if (wait_ip_time.count() - last_dbg_print >= 0.5f) {
+      last_dbg_print = wait_ip_time.count();
+      uint32_t dbg0 = foo_get(ip, 0x44);
+      uint32_t dbg1 = foo_get(ip, 0x48);
+      printf("[DBG] t=%.1fs state=%x lr_p=%d wr_p=%d icb=%d ibeat=%d "
+             "| wbeat=%d round_end=%d reset=%d i_ready=%d ow_ready=%d\n",
+             wait_ip_time.count(),
+             (dbg0 >> 22) & 0xF,   // state
+             (dbg0 >> 19) & 0x7,   // lr_pending
+             (dbg0 >> 16) & 0x7,   // wr_pending
+             (dbg0 >> 8) & 0xFF,   // dma_icb
+             ((dbg0 & 0xFF) | ((dbg1 >> 4) & 0xFF) << 8),  // dma_ibeat 16-bit
+             (dbg1 >> 12) & 0xFFFFF,  // dma_wbeat
+             (dbg1 >> 3) & 1,      // lr_round_end
+             (dbg1 >> 2) & 1,      // lr_round_reset
+             (dbg1 >> 1) & 1,      // core_i_ready
+             dbg1 & 1);            // core_ow_ready
     }
   }
 }

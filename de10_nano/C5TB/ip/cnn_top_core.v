@@ -103,6 +103,19 @@ module cnn_top_core (
             8'h28: as_readdata = reg_ddrout;
             8'h34: as_readdata = reg_param;
             8'h40: as_readdata = reg_scale;
+            // 调试只读寄存器（复现核专用，非黑盒协议；软件 start_fpga
+            // 轮询超时期间读取，定位死锁现场）：
+            //   0x44 = {3'b0, start_clear_pending, core_done, 1'b0,
+            //          state[3:0], lr_pending[2:0], wr_pending[2:0],
+            //          dma_icb[7:0], dma_ibeat[7:0]}
+            //   0x48 = {dma_wbeat[19:0], dma_ibeat[15:8],
+            //          lr_round_end, lr_round_reset, core_i_ready, core_ow_ready}
+            8'h11: as_readdata = {3'b0, start_clear_pending, core_done, 1'b0,
+                                  state, lr_pending, wr_pending,
+                                  dma_icb, dma_ibeat[7:0]};
+            8'h12: as_readdata = {dma_wbeat, dma_ibeat[15:8],
+                                  lr_round_end, lr_round_reset,
+                                  core_i_ready, core_ow_ready};
             default: as_readdata = 32'h0;
         endcase
     end
