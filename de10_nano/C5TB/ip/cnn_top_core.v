@@ -201,7 +201,6 @@ module cnn_top_core (
     reg [19:0] dma_wbeat;             // 权重：总拍（64-bit，≤w_rb_beats ≤1.18M）
     reg [7:0]  dma_ocb;                 // 输出：块（≤4）
     reg [15:0] dma_obeat;             // 输出：段内拍（≤out_seg_words）
-    reg        output_done;                    // 本行块输出完成标志
 
     // 主接口读握手（mm_bridge_sdram0 为流水读桥：waitrequest 拉低仅表示命令
     // 被接受，数据由 readdatavalid 延迟返回）：
@@ -232,7 +231,7 @@ module cnn_top_core (
     wire lr_round_reset = (lr_pending == 0 && lr_round_end && core_i_ready);
     assign lr_read = core_i_ready && (lr_pending < 3'd4) && !lr_round_end && !lr_round_reset;
     assign wr_read = core_ow_ready && (wr_pending < 3'd4) && (dma_wbeat < w_rb_beats_r);
-    assign core_o_ready  = !output_done;   // core 输出不阻塞（与 v2 tb 的 o_ready=1 一致）
+    assign core_o_ready  = 1'b1;   // core 输出不阻塞（与 v2 tb 的 o_ready=1 一致）
     assign ow_writedata  = core_o_data;
     assign ow_write      = core_o_valid;
 
@@ -267,7 +266,6 @@ module cnn_top_core (
             start_clear_pending <= 0;
             dma_icb <= 0; dma_ibeat <= 0; dma_wbeat <= 0;
             dma_ocb <= 0; dma_obeat <= 0;
-            output_done <= 0;
         end else begin
             case (state)
                 S_IDLE: begin
@@ -422,7 +420,6 @@ module cnn_top_core (
                         cfg_idx <= 0;
                         dma_icb <= 0; dma_ibeat <= 0; dma_wbeat <= 0;
                         dma_ocb <= 0; dma_obeat <= 0;
-                        output_done <= 0;
                         state <= S_WR_BASE;
                     end else
                         cfg_idx <= cfg_idx + 1;
@@ -527,7 +524,6 @@ module cnn_top_core (
                         rb_base_r <= rb_base_r + rb_tile_stride_r;   // 增量：base += tile*stride
                         dma_icb <= 0; dma_ibeat <= 0; dma_wbeat <= 0;
                         dma_ocb <= 0; dma_obeat <= 0;
-                        output_done <= 0;
                         state <= S_WR_BASE;
                     end
                 end

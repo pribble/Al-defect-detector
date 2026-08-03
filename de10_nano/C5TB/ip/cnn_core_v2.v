@@ -76,13 +76,12 @@ module cnn_core_v2 #(
     //  13:in_cb 14:out_cb 15:base_row（本行块输入 base 行号）
     //-----------------------------------------------------------------------
     reg [3:0]  type_reg, act_reg;
-    reg [31:0] in_c_reg,  in_h_reg,  in_w_reg;
-    reg [31:0] out_c_reg, out_h_reg, out_w_reg;
+    reg [31:0] in_h_reg,  in_w_reg;
+    reg [31:0] out_c_reg, out_w_reg;
     reg [31:0] k_reg, pad_reg, stride_reg;
     reg [31:0] out_row_tile_reg, in_row_tile_reg;
     reg [31:0] in_cb_reg, out_cb_reg;
     reg signed [31:0] base_row_reg;
-    reg [31:0] row_block_reg;      // 供 tb/调度层读取（cnn_core 本身单行块）
 
     // requant 参数存储（cfg_sel 1/2/3/4 = bias/mult/shift/rcl6，addr=输出通道）
     // 见下方 generate 块 g_rq_param：8 lane 并行读 8 个不同通道地址，
@@ -96,11 +95,9 @@ module cnn_core_v2 #(
                     case (cfg_addr)
                         20'd0: type_reg      <= cfg_wdata[3:0];
                         20'd1: act_reg       <= cfg_wdata[1:0];
-                        20'd2: in_c_reg      <= cfg_wdata;
                         20'd3: in_h_reg      <= cfg_wdata;
                         20'd4: in_w_reg      <= cfg_wdata;
                         20'd5: out_c_reg     <= cfg_wdata;
-                        20'd6: out_h_reg     <= cfg_wdata;
                         20'd7: out_w_reg     <= cfg_wdata;
                         20'd8: k_reg         <= cfg_wdata;
                         20'd9: pad_reg       <= cfg_wdata;
@@ -110,7 +107,6 @@ module cnn_core_v2 #(
                         20'd13: in_cb_reg     <= cfg_wdata;
                         20'd14: out_cb_reg    <= cfg_wdata;
                         20'd15: base_row_reg  <= cfg_wdata;
-                        20'd16: row_block_reg <= cfg_wdata;
                         default: ;
                     endcase
                 end
