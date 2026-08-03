@@ -172,20 +172,21 @@ module cnn_core_v2 #(
                     rcl6_store[cfg_addr[9:0]] <= cfg_wdata;
             end
 
-            // 同步读（地址 = o_group*8 + rqg，10-bit 与 RAM 深度匹配）
+            // 读：无条件同步采样（与 lb_q/acc_q 完全同构）。原条件使能
+            // （if (state == S_REQ_ADDR) 等）是 M10K 推断的最后障碍——
+            // 实测独立写 always 后 Quartus 仍只靠 RAM 恢复救回 16/32 个
+            // 数组（g_rq_param 奇数实例），读端口复杂使能即推断失败。
+            // 语义等价：rq_raddr 只随 o_group 变（S_REQ_OUT 末更新），
+            // 各 q_* 在使用拍前 1 拍采到的就是当前组的参数值。
             reg signed [31:0] q_bias;
             reg [31:0] q_mult;
             reg [7:0]  q_shift;
             reg signed [31:0] q_rcl6;
             always @(posedge clk) begin
-                if (state == S_REQ_ADDR) begin
-                    q_bias <= bias_store[rq_raddr];
-                    q_rcl6 <= rcl6_store[rq_raddr];
-                end
-                if (state == S_REQ_MUL)
-                    q_mult <= rq_m_store[rq_raddr];
-                if (state == S_REQ_MUL2)
-                    q_shift <= rq_r_store[rq_raddr];
+                q_bias  <= bias_store[rq_raddr];
+                q_rcl6  <= rcl6_store[rq_raddr];
+                q_mult  <= rq_m_store[rq_raddr];
+                q_shift <= rq_r_store[rq_raddr];
             end
 
             assign rq_bias_q[rqg]  = q_bias;
