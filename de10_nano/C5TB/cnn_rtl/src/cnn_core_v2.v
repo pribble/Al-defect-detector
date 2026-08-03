@@ -126,7 +126,14 @@ module cnn_core_v2 #(
     // M10K 同步读 1 拍延迟：bias/rcl6 于 S_REQ_ADDR 发起（S_REQ_MUL 用）、
     // mult 于 S_REQ_MUL 发起（S_REQ_MUL2 用）、shift 于 S_REQ_MUL2 发起
     // （S_REQ_OUT 用）——正好插入现有 4 拍 requant 流水，事件序列不变。
+    // 读数据经 q_* 输出到模块顶层 wire 数组（generate 实例内声明的对象
+    // 作用域只在实例内，主逻辑引用不到）。
     //-----------------------------------------------------------------------
+    wire signed [31:0] rq_bias_q  [0:7];
+    wire [31:0]        rq_mult_q  [0:7];
+    wire [7:0]         rq_shift_q [0:7];
+    wire signed [31:0] rq_rcl6_q  [0:7];
+
     genvar rqg;
     generate
         for (rqg = 0; rqg < 8; rqg = rqg + 1) begin : g_rq_param
@@ -164,10 +171,10 @@ module cnn_core_v2 #(
                     q_shift <= rq_r_store[o_group[6:0]*8 + rqg];
             end
 
-            wire signed [31:0] rq_bias_q  = q_bias;
-            wire [31:0]        rq_mult_q  = q_mult;
-            wire [7:0]         rq_shift_q = q_shift;
-            wire signed [31:0] rq_rcl6_q  = q_rcl6;
+            assign rq_bias_q[rqg]  = q_bias;
+            assign rq_mult_q[rqg]  = q_mult;
+            assign rq_shift_q[rqg] = q_shift;
+            assign rq_rcl6_q[rqg]  = q_rcl6;
         end
     endgenerate
 
