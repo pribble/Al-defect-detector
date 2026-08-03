@@ -136,7 +136,6 @@ module cnn_top_core (
     // param 解析缓存 + 派生量
     //-----------------------------------------------------------------------
     reg [31:0] param_buf [0:26];
-    reg [31:0] req_buf [0:511];
 
     reg [15:0] p_in_c, p_in_h, p_in_w, p_out_c, p_out_h, p_out_w;   // ≤302
     reg [7:0]  p_k, p_pad, p_stride, p_act, p_type;
@@ -300,10 +299,29 @@ module cnn_top_core (
                     end
                 end
 
-                //---- 读 scale（4×out_c 字）----
+                //---- 读 scale（4×out_c 字），边读边写 core requant 数组 ----
+                // 数据返回拍直接把 sr_readdata 写进 core（无需 req_buf 中转：
+                // 4096 字寄存器堆爆资源；布局与软件一致：mult/bias/shift/rcl6
+                // 各 out_c 字），S_WR_CFG 只写标量 0..15。数组/标量写入顺序
+                // 无依赖（core 按地址索引）。
                 S_RD_SCALE: begin
+                    core_cfg_we <= 1'b0;
                     if (sr_got) begin
-                        req_buf[rd_cnt] <= sr_readdata;
+                        core_cfg_we    <= 1'b1;
+                        core_cfg_wdata <= sr_readdata;
+                        if (rd_cnt < p_out_c) begin
+                            core_cfg_sel  <= 3'd2;                 // mult
+                            core_cfg_addr <= rd_cnt;
+                        end else if (rd_cnt < 2 * p_out_c) begin
+                            core_cfg_sel  <= 3'd1;                 // bias_int
+                            core_cfg_addr <= rd_cnt - p_out_c;
+                        end else if (rd_cnt < 3 * p_out_c) begin
+                            core_cfg_sel  <= 3'd3;                 // shift
+                            core_cfg_addr <= rd_cnt - 2 * p_out_c;
+                        end else begin
+                            core_cfg_sel  <= 3'd4;                 // rcl6
+                            core_cfg_addr <= rd_cnt - 3 * p_out_c;
+                        end
                         sr_address <= sr_address + 4;
                         sr_pending <= 0;
                         if (rd_cnt == 4 * p_out_c - 1) begin
@@ -363,48 +381,30 @@ module cnn_top_core (
                 end
 
                 //---- 写 cfg（16 标量 + 4×out_c requant + base_row）----
+                //---- 写标量 cfg（0..15）；requant 数组已在 S_RD_SCALE 边读边写 ----
                 S_WR_CFG: begin
                     core_cfg_we <= 1'b1;
-                    if (cfg_idx < 16) begin
-                        core_cfg_sel <= 0;
-                        case (cfg_idx)
-                            0:  begin core_cfg_addr <= 0;  core_cfg_wdata <= p_type; end
-                            1:  begin core_cfg_addr <= 1;  core_cfg_wdata <= p_act; end
-                            2:  begin core_cfg_addr <= 2;  core_cfg_wdata <= p_in_c; end
-                            3:  begin core_cfg_addr <= 3;  core_cfg_wdata <= p_in_h; end
-                            4:  begin core_cfg_addr <= 4;  core_cfg_wdata <= p_in_w; end
-                            5:  begin core_cfg_addr <= 5;  core_cfg_wdata <= p_out_c; end
-                            6:  begin core_cfg_addr <= 6;  core_cfg_wdata <= p_out_h; end
-                            7:  begin core_cfg_addr <= 7;  core_cfg_wdata <= p_out_w; end
-                            8:  begin core_cfg_addr <= 8;  core_cfg_wdata <= p_k; end
-                            9:  begin core_cfg_addr <= 9;  core_cfg_wdata <= p_pad; end
-                            10: begin core_cfg_addr <= 10; core_cfg_wdata <= p_stride; end
-                            11: begin core_cfg_addr <= 11; core_cfg_wdata <= p_out_row_tile; end
-                            12: begin core_cfg_addr <= 12; core_cfg_wdata <= p_in_row_tile; end
-                            13: begin core_cfg_addr <= 13; core_cfg_wdata <= p_in_cb; end
-                            14: begin core_cfg_addr <= 14; core_cfg_wdata <= p_out_cb; end
-                            15: begin core_cfg_addr <= 15; core_cfg_wdata <= rb_base_r[31:0]; end
-                            default: begin core_cfg_addr <= 0; core_cfg_wdata <= 0; end
-                        endcase
-                    end else if (cfg_idx < 16 + p_out_c) begin
-                        core_cfg_sel <= 3'd1;   // bias_int
-                        core_cfg_addr <= cfg_idx - 16;
-                        core_cfg_wdata <= req_buf[p_out_c + (cfg_idx - 16)];
-                    end else if (cfg_idx < 16 + 2 * p_out_c) begin
-                        core_cfg_sel <= 3'd2;   // mult
-                        core_cfg_addr <= cfg_idx - 16 - p_out_c;
-                        core_cfg_wdata <= req_buf[cfg_idx - 16 - p_out_c];
-                    end else if (cfg_idx < 16 + 3 * p_out_c) begin
-                        core_cfg_sel <= 3'd3;   // shift
-                        core_cfg_addr <= cfg_idx - 16 - 2 * p_out_c;
-                        core_cfg_wdata <= req_buf[2 * p_out_c + (cfg_idx - 16 - 2 * p_out_c)];
-                    end else begin
-                        core_cfg_sel <= 3'd4;   // rcl6
-                        core_cfg_addr <= cfg_idx - 16 - 3 * p_out_c;
-                        core_cfg_wdata <= req_buf[3 * p_out_c + (cfg_idx - 16 - 3 * p_out_c)];
-                    end
-                    if (cfg_idx == 16 + 4 * p_out_c - 1) begin
-                        // 最后一个 cfg（rcl6[out_c-1]）写入后由 S_WR_BASE 拉低 cfg_we
+                    core_cfg_sel <= 0;
+                    case (cfg_idx)
+                        0:  begin core_cfg_addr <= 0;  core_cfg_wdata <= p_type; end
+                        1:  begin core_cfg_addr <= 1;  core_cfg_wdata <= p_act; end
+                        2:  begin core_cfg_addr <= 2;  core_cfg_wdata <= p_in_c; end
+                        3:  begin core_cfg_addr <= 3;  core_cfg_wdata <= p_in_h; end
+                        4:  begin core_cfg_addr <= 4;  core_cfg_wdata <= p_in_w; end
+                        5:  begin core_cfg_addr <= 5;  core_cfg_wdata <= p_out_c; end
+                        6:  begin core_cfg_addr <= 6;  core_cfg_wdata <= p_out_h; end
+                        7:  begin core_cfg_addr <= 7;  core_cfg_wdata <= p_out_w; end
+                        8:  begin core_cfg_addr <= 8;  core_cfg_wdata <= p_k; end
+                        9:  begin core_cfg_addr <= 9;  core_cfg_wdata <= p_pad; end
+                        10: begin core_cfg_addr <= 10; core_cfg_wdata <= p_stride; end
+                        11: begin core_cfg_addr <= 11; core_cfg_wdata <= p_out_row_tile; end
+                        12: begin core_cfg_addr <= 12; core_cfg_wdata <= p_in_row_tile; end
+                        13: begin core_cfg_addr <= 13; core_cfg_wdata <= p_in_cb; end
+                        14: begin core_cfg_addr <= 14; core_cfg_wdata <= p_out_cb; end
+                        15: begin core_cfg_addr <= 15; core_cfg_wdata <= rb_base_r[31:0]; end
+                        default: begin core_cfg_addr <= 0; core_cfg_wdata <= 0; end
+                    endcase
+                    if (cfg_idx == 15) begin
                         cfg_idx <= 0;
                         dma_icb <= 0; dma_ibeat <= 0; dma_wbeat <= 0;
                         dma_ocb <= 0; dma_obeat <= 0;

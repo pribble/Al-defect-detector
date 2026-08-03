@@ -36,7 +36,7 @@ module cnn_core_v2 #(
     parameter G_MAX_OROWS  = 20,   // 最大输出行块高度（模型 max tile=19）
     parameter G_MAX_W      = 302,  // 最大输入宽度（IMAGE_MAX_W）
     parameter G_MAX_OW     = 150,  // 最大输出宽度（OUTPUT_MAX_W）
-    parameter G_MAX_C      = 128   // 最大输出通道数（requant 数组容量）
+    parameter G_MAX_C      = 1024  // 最大输出通道数（requant 数组容量，模型 out_c 最大 1024）
 )(
     input  wire                clk,
     input  wire                rst_n,
@@ -84,11 +84,9 @@ module cnn_core_v2 #(
     reg signed [31:0] base_row_reg;
     reg [31:0] row_block_reg;      // 供 tb/调度层读取（cnn_core 本身单行块）
 
-    // requant 数组（cfg_sel 1/2/3/4 = bias/mult/shift/rcl6，addr=输出通道）
-    reg signed [31:0] bias_store [0:G_MAX_C-1];
-    reg [31:0] rq_m_store [0:G_MAX_C-1];
-    reg [7:0]  rq_r_store [0:G_MAX_C-1];
-    reg signed [31:0] rcl6_store [0:G_MAX_C-1];
+    // requant 参数存储（cfg_sel 1/2/3/4 = bias/mult/shift/rcl6，addr=输出通道）
+    // 见下方 generate 块 g_rq_param：8 lane 并行读 8 个不同通道地址，
+    // 单端口 RAM 每拍只能 1 地址 → 每 lane 独立一份 M10K（8×4 组）
 
     integer i;
     always @(posedge clk) begin
@@ -116,14 +114,62 @@ module cnn_core_v2 #(
                         default: ;
                     endcase
                 end
-                3'd1: if (cfg_addr < G_MAX_C) bias_store[cfg_addr]  <= cfg_wdata;
-                3'd2: if (cfg_addr < G_MAX_C) rq_m_store[cfg_addr]  <= cfg_wdata;
-                3'd3: if (cfg_addr < G_MAX_C) rq_r_store[cfg_addr]  <= cfg_wdata[7:0];
-                3'd4: if (cfg_addr < G_MAX_C) rcl6_store[cfg_addr]  <= cfg_wdata;
                 default: ;
             endcase
         end
     end
+
+    //-----------------------------------------------------------------------
+    // requant 参数存储：8 lane 独立 M10K（cfg_sel 1/2/3/4 = bias/mult/shift/rcl6，
+    // addr=输出通道）。8 lane 并行读 8 个不同通道地址（v_out_ch = o_group*8+ln），
+    // 单端口 RAM 每拍只能 1 地址 → 每 lane 一份（8×4 组，约 104 块 M10K）。
+    // M10K 同步读 1 拍延迟：bias/rcl6 于 S_REQ_ADDR 发起（S_REQ_MUL 用）、
+    // mult 于 S_REQ_MUL 发起（S_REQ_MUL2 用）、shift 于 S_REQ_MUL2 发起
+    // （S_REQ_OUT 用）——正好插入现有 4 拍 requant 流水，事件序列不变。
+    //-----------------------------------------------------------------------
+    genvar rqg;
+    generate
+        for (rqg = 0; rqg < 8; rqg = rqg + 1) begin : g_rq_param
+            (* ramstyle = "M10K, no_rw_check" *) reg signed [31:0] bias_store [0:G_MAX_C-1];
+            (* ramstyle = "M10K, no_rw_check" *) reg [31:0] rq_m_store [0:G_MAX_C-1];
+            (* ramstyle = "M10K, no_rw_check" *) reg [7:0]  rq_r_store [0:G_MAX_C-1];
+            (* ramstyle = "M10K, no_rw_check" *) reg signed [31:0] rcl6_store [0:G_MAX_C-1];
+
+            // cfg 写 8 份（同一 cfg_we 拍、同地址同数据）
+            always @(posedge clk) begin
+                if (cfg_we) begin
+                    case (cfg_sel)
+                        3'd1: if (cfg_addr < G_MAX_C) bias_store[cfg_addr]  <= cfg_wdata;
+                        3'd2: if (cfg_addr < G_MAX_C) rq_m_store[cfg_addr]  <= cfg_wdata;
+                        3'd3: if (cfg_addr < G_MAX_C) rq_r_store[cfg_addr]  <= cfg_wdata[7:0];
+                        3'd4: if (cfg_addr < G_MAX_C) rcl6_store[cfg_addr]  <= cfg_wdata;
+                        default: ;
+                    endcase
+                end
+            end
+
+            // 同步读（地址 = o_group*8 + rqg，o_group ≤ 127 → [6:0]，乘 8 综合折叠成移位）
+            reg signed [31:0] q_bias;
+            reg [31:0] q_mult;
+            reg [7:0]  q_shift;
+            reg signed [31:0] q_rcl6;
+            always @(posedge clk) begin
+                if (state == S_REQ_ADDR) begin
+                    q_bias <= bias_store[o_group[6:0]*8 + rqg];
+                    q_rcl6 <= rcl6_store[o_group[6:0]*8 + rqg];
+                end
+                if (state == S_REQ_MUL)
+                    q_mult <= rq_m_store[o_group[6:0]*8 + rqg];
+                if (state == S_REQ_MUL2)
+                    q_shift <= rq_r_store[o_group[6:0]*8 + rqg];
+            end
+
+            wire signed [31:0] rq_bias_q  = q_bias;
+            wire [31:0]        rq_mult_q  = q_mult;
+            wire [7:0]         rq_shift_q = q_shift;
+            wire signed [31:0] rq_rcl6_q  = q_rcl6;
+        end
+    endgenerate
 
     //-----------------------------------------------------------------------
     // 存储：行缓冲 lb（64-bit 字 = 8 lane，col 0..G_MAX_W-1）
@@ -557,13 +603,13 @@ module cnn_core_v2 #(
                     v_act_l[ln] <= 32'sd0;
                 end else begin
                 v_raw = acc_q[32*ln +: 32];
-                v_biased = v_raw + bias_store[v_out_ch];
+                v_biased = v_raw + rq_bias_q[ln];
                 v_act = v_biased;
                 if (act_reg == 2'd1) begin
                     v_act = v_biased[31] ? 32'sd0 : v_biased;
                 end else if (act_reg == 2'd2) begin
                     v_act = v_biased[31] ? 32'sd0 : v_biased;
-                    if (v_act > rcl6_store[v_out_ch]) v_act = rcl6_store[v_out_ch];
+                    if (v_act > rq_rcl6_q[ln]) v_act = rq_rcl6_q[ln];
                 end
                 v_act_l[ln] <= v_act;
                 end
@@ -571,7 +617,7 @@ module cnn_core_v2 #(
         end
     end
 
-    // 乘法拍：v_act_l × rq_m_store（32×32），寄存 v_rq64_l
+    // 乘法拍：v_act_l × rq_mult_q（32×32），寄存 v_rq64_l
     always @(posedge clk) begin
         if (state == S_REQ_MUL2) begin
             for (ln = 0; ln < 8; ln = ln + 1) begin
@@ -579,7 +625,7 @@ module cnn_core_v2 #(
                 if (v_out_ch >= out_c_reg)
                     v_rq64_l[ln] <= 64'sd0;
                 else
-                    v_rq64_l[ln] <= $signed(v_act_l[ln]) * $signed({1'b0, rq_m_store[v_out_ch]});
+                    v_rq64_l[ln] <= $signed(v_act_l[ln]) * $signed({1'b0, rq_mult_q[ln]});
             end
         end
     end
@@ -593,9 +639,9 @@ module cnn_core_v2 #(
                     v_q[ln] = 8'd0;
                 end else begin
                 v_rq64 = v_rq64_l[ln];
-                if (rq_r_store[v_out_ch] > 0)
-                    v_rq64 = v_rq64 + (64'sd1 << (rq_r_store[v_out_ch] - 1));
-                v_rq64 = v_rq64 >>> rq_r_store[v_out_ch];
+                if (rq_shift_q[ln] > 0)
+                    v_rq64 = v_rq64 + (64'sd1 << (rq_shift_q[ln] - 1));
+                v_rq64 = v_rq64 >>> rq_shift_q[ln];
                 if (v_rq64 > 64'sd127)      v_q[ln] = 8'sd127;
                 else if (v_rq64 < -64'sd128) v_q[ln] = 8'h80;   // -128（8'sd128 字面量溢出）
                 else                         v_q[ln] = v_rq64[7:0];
