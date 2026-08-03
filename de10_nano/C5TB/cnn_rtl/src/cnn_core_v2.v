@@ -156,6 +156,9 @@ module cnn_core_v2 #(
     // mac_p_r：乘法结果寄存器（S_MAC_MUL 拍采样），把 lb M10K 输出→乘法→
     // 加法树→v_sum_r 的组合链再拆一段（4 拍/tap：RD/MUL/MUL2/ACC）
     reg signed [15:0] mac_p_r [0:7][0:7];
+    // mac_c_valid_r：S_MAC_RD 拍寄存的 tap 列有效位。必须在使用（generate 实例
+    // .en 端口）之前声明为 reg，否则 Verilog 隐式声明为 wire，实例 en 悬空（z）
+    reg mac_c_valid_r;
     genvar mac_lane_i, mac_m_i;
     generate
         for (mac_lane_i = 0; mac_lane_i < 8; mac_lane_i = mac_lane_i + 1) begin : mac_lane_g
@@ -183,6 +186,12 @@ module cnn_core_v2 #(
     reg [63:0]          lb_q;
     reg signed [255:0]  acc_q;
     reg signed [255:0]  acc_local;   // 窗口内累加（首 tap 用 acc_q 初始化）
+    // 读地址寄存（S_MAC_ADDR 拍采样）：lb_raddr/acc_raddr_mac 是 32-bit 常量乘法
+    // 组合链（×41*302 / ×302），直通 M10K 地址端口会超 50MHz 周期（setup 违例
+    // -0.839ns 主因）；打一拍后组合链终点变为普通寄存器，M10K 地址由寄存器驱动。
+    // 最大地址 = 4*41*302-1 = 49527（lb）、19*150+149 = 2999（acc），16-bit 够。
+    reg [15:0]          lb_addr_r;
+    reg [15:0]          acc_addr_mac_r;
 
     //-----------------------------------------------------------------------
     // 状态机
@@ -191,6 +200,7 @@ module cnn_core_v2 #(
     localparam S_LOAD     = 4'd1;   // 装载输入行块
     localparam S_ACC_CLR  = 4'd2;   // acc 清零（每输出组）
     localparam S_WEIGHT   = 4'd3;   // 装载权重 slice（72 拍）
+    localparam S_MAC_ADDR = 4'd13;  // 窗口 tap 地址拍（寄存 lb/acc 读地址，断 32-bit 乘法组合链）
     localparam S_MAC_RD   = 4'd4;   // 窗口 tap 请求拍（同步采样 lb_q/acc_q）
     localparam S_MAC_MUL  = 4'd11;  // 窗口 tap 乘拍（乘法器 → mac_p_r）
     localparam S_MAC_MUL2 = 4'd12;  // 窗口 tap 加法树拍（mac_p_r → v_sum_r）
@@ -226,6 +236,10 @@ module cnn_core_v2 #(
             rq_row <= 0; rq_col <= 0;
             mac_c_valid_r <= 1'b0;
             acc_local <= 256'sd0;   // 复位归并到主状态机（单一驱动，避免 Quartus 10028）
+            // 地址寄存器复位同样归并到主状态机（S_MAC_ADDR 分支在同一块）：
+            // lb_q/acc_q 每拍无条件采样，无复位时 x 地址越界读会污染 acc_q
+            lb_addr_r <= 16'd0;
+            acc_addr_mac_r <= 16'd0;
         end else begin
             case (state)
                 S_IDLE: begin
@@ -308,13 +322,21 @@ module cnn_core_v2 #(
                         if (wf_cnt == 8*9 - 1) begin
                             wf_cnt <= 0;
                             mac_row <= 0; mac_col <= 0; mac_t <= 0;
-                            state <= S_MAC_RD;
+                            state <= S_MAC_ADDR;
                         end else
                             wf_cnt <= wf_cnt + 1;
                     end
                 end
 
-                //---- 窗口 MAC（请求拍）：组合地址稳定，上升沿同步采样 lb_q/acc_q ----
+                //---- 窗口 MAC（地址拍）：组合计算 lb/acc 读地址并寄存，
+                //     断开 32-bit 常量乘法链直通 M10K 地址端口的长路径 ----
+                S_MAC_ADDR: begin
+                    lb_addr_r      <= lb_raddr[15:0];
+                    acc_addr_mac_r <= acc_raddr_mac[15:0];
+                    state <= S_MAC_RD;
+                end
+
+                //---- 窗口 MAC（请求拍）：地址已寄存，上升沿同步采样 lb_q/acc_q ----
                 S_MAC_RD: begin
                     mac_c_valid_r <= mac_c_valid;   // 组合 valid 寄存（断 k_reg→乘加树链）
                     state <= S_MAC_MUL;
@@ -374,15 +396,15 @@ module cnn_core_v2 #(
                                 end
                             end else begin
                                 mac_row <= mac_row + 1;
-                                state <= S_MAC_RD;
+                                state <= S_MAC_ADDR;
                             end
                         end else begin
                             mac_col <= mac_col + 1;
-                            state <= S_MAC_RD;
+                            state <= S_MAC_ADDR;
                         end
                     end else begin
                         mac_t <= mac_t + 1;
-                        state <= S_MAC_RD;
+                        state <= S_MAC_ADDR;
                     end
                 end
 
@@ -481,7 +503,6 @@ module cnn_core_v2 #(
     wire [31:0] mac_c_cl = mac_c[31:0];
 
     // S_MAC_RD 拍寄存 tap 列有效位（拆 k_reg→乘加树组合链，setup 违例 -6.18ns 主因）
-    reg mac_c_valid_r;
 
     // 同步采样：RAM 读端口（组合地址在上升沿被采样，数据晚一拍到 lb_q/acc_q）
     // acc 读复用同一端口（S_MAC 读 {mac_row,mac_col}，requant 读 {rq_row,rq_col}，
@@ -491,15 +512,15 @@ module cnn_core_v2 #(
             lb_q <= 64'h0;
             acc_q <= 256'sd0;
         end else begin
-            lb_q <= lb[lb_raddr];
-            // 权重同拍采样：mac_t 在 S_MAC_ACC 末更新，本拍（S_MAC_RD）稳定
+            lb_q <= lb[lb_addr_r];
+            // 权重同拍采样：mac_t 在 S_MAC_ACC 末更新，S_MAC_ADDR/S_MAC_RD 拍稳定
             for (lane = 0; lane < 8; lane = lane + 1)
                 for (m = 0; m < 8; m = m + 1)
                     w_q[lane][m] <= wbuf[lane*72 + mac_t*8 + m];
             if (state == S_REQ_ADDR || state == S_REQ_MUL || state == S_REQ_MUL2)
                 acc_q <= acc[acc_raddr_clr];
             else
-                acc_q <= acc[acc_raddr_mac];
+                acc_q <= acc[acc_addr_mac_r];
         end
     end
 
