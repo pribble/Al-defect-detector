@@ -25,51 +25,65 @@ module cnn_top #(
     parameter OUTPUT_M_AXI_DATA_WIDTH = 64
 )(
     // ---- clock / reset ----
-    input  wire                sysclk,      // clock_1.clk（clk_cnn，50MHz）
-    input  wire                rst_n,       // reset.reset_n
+    input  wire                sysclk,      // 工作时钟：QSys clk_cnn（PLL fpga_clk_cnn，50MHz），驱动全部逻辑与 4 个 Avalon 主接口
+    input  wire                rst_n,       // 低有效异步复位：QSys clk_cnn.clk_reset
 
-    // ---- hps2cnn_avs（Avalon 从）----
-    input  wire [7:0]          as_address,
-    input  wire                as_write,
-    input  wire                as_read,
-    input  wire [31:0]         as_writedata,
-    output wire [31:0]         as_readdata,
-    output wire                as_data_waitquest,
+    // ---- hps2cnn_avs（Avalon 从接口，HPS→FPGA 寄存器访问）----
+    // HPS 软件（foo_set/foo_get，mmap /dev/mem 0xFF200000）通过此口读写 6 个
+    // 控制寄存器：START(0x00)/DDRIN(0x10)/DDRW(0x1C)/DDROUT(0x28)/PARAM(0x34)/SCALE(0x40)
+    input  wire [7:0]          as_address,      // 寄存器字地址（WORDS 单位，256 个 32-bit 寄存器空间）
+    input  wire                as_write,        // 写请求：HPS 写 START=1（启动）、写 5 个 DDR 基址寄存器
+    input  wire                as_read,         // 读请求：HPS 轮询 START 自清（bit0=0 即完成）
+    input  wire [31:0]         as_writedata,    // 写数据
+    output wire [31:0]         as_readdata,     // 读数据（组合 mux，读地址稳定即有效）
+    output wire                as_data_waitquest, // 反压（恒 0：从接口从不等待，HPS 无感知）
 
-    // ---- param_read_avalon（32b 读）----
-    output wire [CFG_M_AXI_ADDR_WIDTH-1:0]   param_avm_address,
-    output wire [4:0]          param_avm_burstcount,
-    output wire [CFG_M_AXI_DATA_WIDTH/8-1:0] param_avm_byteenable,
-    output wire                param_avm_read,
-    input  wire [CFG_M_AXI_DATA_WIDTH-1:0]   param_avm_readdata,
-    input  wire                param_avm_readdatavalid,
-    input  wire                param_avm_waitrequest,
+    // ---- param_read_avalon（Avalon 主接口 #1：读 param 指令块，32-bit）----
+    // S_RD_PARAM 状态用：从 cb_param（reg_param 基址）逐字读 struct parameter
+    // （27 个字），单笔在途（burstcount 恒 1）
+    output wire [CFG_M_AXI_ADDR_WIDTH-1:0]   param_avm_address,  // 读地址（DDR 物理地址，= reg_param + 4×rd_cnt）
+    output wire [4:0]          param_avm_burstcount,  // 突发长度（恒 5'd1 = 单拍）
+    output wire [CFG_M_AXI_DATA_WIDTH/8-1:0] param_avm_byteenable,  // 字节使能（恒全 1）
+    output wire                param_avm_read,       // 读请求（read 拉高 → 命令接受（!waitrequest）→ 拉低，只发一笔）
+    input  wire [CFG_M_AXI_DATA_WIDTH-1:0]   param_avm_readdata,   // 读数据（与 readdatavalid 同拍有效）
+    input  wire                param_avm_readdatavalid,  // 数据返回标志（流水桥：延迟于命令，必须以此判完成）
+    input  wire                param_avm_waitrequest,   // 桥反压（=1 时命令不被接受）
 
-    // ---- load_read_avalon（64b 读）----
-    output wire [LOAD_M_AXI_ADDR_WIDTH-1:0]  load_avm_address,
-    output wire [4:0]          load_avm_burstcount,
-    output wire [LOAD_M_AXI_DATA_WIDTH/8-1:0] load_avm_byteenable,
-    output wire                load_avm_read,
-    input  wire [LOAD_M_AXI_DATA_WIDTH-1:0]  load_avm_readdata,
-    input  wire                load_avm_readdatavalid,
-    input  wire                load_avm_waitrequest,
+    // ---- load_read_avalon（Avalon 主接口 #2：读输入特征图 + 权重，64-bit）----
+    // 最忙的口，lr/wr 两路分时复用（core 的 S_LOAD 与 S_WEIGHT 互斥）：
+    //   lr（S_LOAD）：读输入 NHWC8 行块，每拍 8 字节 = 8 通道 int8 → lb 行缓冲
+    //   wr（S_WEIGHT）：读权重 slice（k=3 吃 72 拍 / k=1 吃 8 拍）→ wbuf
+    // 多笔在途（≤4，桥 MAX_PENDING_RESPONSES=4），readdata 同时回灌两路
+    output wire [LOAD_M_AXI_ADDR_WIDTH-1:0]  load_avm_address,  // 读地址（lr 时 = reg_ddrin+input_offset×8+行块偏移；wr 时 = reg_ddrw+weight_offset×8）
+    output wire [4:0]          load_avm_burstcount,  // 突发长度（恒 5'd1）
+    output wire [LOAD_M_AXI_DATA_WIDTH/8-1:0] load_avm_byteenable,  // 字节使能（恒全 1）
+    output wire                load_avm_read,       // 读请求（lr_read || wr_read）
+    input  wire [LOAD_M_AXI_DATA_WIDTH-1:0]  load_avm_readdata,   // 读数据（64-bit = 8 个 int8 通道）
+    input  wire                load_avm_readdatavalid,  // 数据返回（lr/wr 共用；不在途一侧的 pending 会下溢，靠回绕自愈）
+    input  wire                load_avm_waitrequest,   // 桥反压
 
-    // ---- output_read_avalon（64b 写）----
-    output wire [OUTPUT_M_AXI_ADDR_WIDTH-1:0] output_avm_address,
-    output wire [4:0]          output_avm_burstcount,
-    output wire [OUTPUT_M_AXI_DATA_WIDTH/8-1:0] output_avm_byteenable,
-    input  wire                output_avm_waitrequest,
-    output wire                output_avm_write,
-    output wire [OUTPUT_M_AXI_DATA_WIDTH-1:0] output_avm_writedata,
+    // ---- output_read_avalon（Avalon 主接口 #3：写输出特征图，64-bit）----
+    // 名字含 read 是黑盒时代遗留（实际是写口）。ow 把 core requant 后的输出
+    // 事件（每拍 1 像素 × 8 通道 int8，NHWC8 块序）写回 DDR
+    // （reg_ddrout + output_offset×8 + 行块偏移）
+    output wire [OUTPUT_M_AXI_ADDR_WIDTH-1:0] output_avm_address,  // 写地址
+    output wire [4:0]          output_avm_burstcount,  // 突发长度（恒 5'd1）
+    output wire [OUTPUT_M_AXI_DATA_WIDTH/8-1:0] output_avm_byteenable,  // 字节使能（恒全 1）
+    input  wire                output_avm_waitrequest,  // 桥反压（写完成 = write && !waitrequest）
+    output wire                output_avm_write,       // 写请求（= core_o_valid，输出事件有效即写）
+    output wire [OUTPUT_M_AXI_DATA_WIDTH-1:0] output_avm_writedata,  // 写数据（= core_o_data，8 通道 int8）
 
-    // ---- scale_avm_avalon（32b 读）----
-    output wire [SCALE_M_AXI_ADDR_WIDTH-1:0] scale_avm_address,
-    output wire [4:0]          scale_avm_burstcount,
-    output wire [SCALE_M_AXI_DATA_WIDTH/8-1:0] scale_avm_byteenable,
-    output wire                scale_avm_read,
-    input  wire [SCALE_M_AXI_DATA_WIDTH-1:0]  scale_avm_readdata,
-    input  wire                scale_avm_readdatavalid,
-    input  wire                scale_avm_waitrequest
+    // ---- scale_avm_avalon（Avalon 主接口 #4：读 requant 定点参数，32-bit）----
+    // S_RD_SCALE 状态用：从 cb_scale（reg_scale 基址）读每通道 4 个 int32
+    // （mult/bias_int/shift/rcl6，共 4×out_c 字），边读边写 core requant 数组。
+    // 单笔在途；接口名 avm 重复为黑盒时代遗留
+    output wire [SCALE_M_AXI_ADDR_WIDTH-1:0] scale_avm_address,  // 读地址（= reg_scale + 4×rd_cnt）
+    output wire [4:0]          scale_avm_burstcount,  // 突发长度（恒 5'd1）
+    output wire [SCALE_M_AXI_DATA_WIDTH/8-1:0] scale_avm_byteenable,  // 字节使能（恒全 1）
+    output wire                scale_avm_read,       // 读请求（单笔在途：拉高 → 接受 → 拉低 → 等 readdatavalid）
+    input  wire [SCALE_M_AXI_DATA_WIDTH-1:0]  scale_avm_readdata,   // 读数据（32-bit）
+    input  wire                scale_avm_readdatavalid,  // 数据返回标志（以此判完成）
+    input  wire                scale_avm_waitrequest   // 桥反压
 );
 
     // ---- core 本体 ----
