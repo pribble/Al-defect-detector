@@ -100,7 +100,7 @@ cnn_rtl/
 | 1 ✅ | `src/conv_layer_s8.v`（定点卷积数据通路，Verilog，阶段 1 中间产物）——**2026-08 清理删除**（历史见 git） | `verification/sim/run_conv_s8.sh`（iverilog/verilator）全绿 |
 | 2 ✅ | `tools/ref_cnn_top.py`（numpy 行为模型，裁判） | 80 随机层 + 真实 47 层 ALL PASS |
 | 3 ✅ | `src/cnn_core.v`（参数驱动单层执行器，k=3 子集）——**2026-08 清理删除**（历史见 git） | `verification/sim/run_cnn_core.sh` 24 层 bit-exact |
-| 4 ✅ | `src/cnn_core_v2.v`（**NHWC8 块序流**：slice 权重、行块 acc 缓冲、单行块执行供 DMA 调度） | `verification/sim/run_cnn_core_v2.sh` 24 层 bit-exact（conv/dw × s1/s2 × act0/1/2 × row_block≥1） |
+| 4 ✅ | `src/cnn_core_v2.v`（**NHWC8 块序流**：slice 权重、行块 acc 缓冲、单行块执行供 DMA 调度） | `verification/sim/run_cnn_core_v2.sh` 24 层 bit-exact（**均为 k=3**；k=1 层 2026-08 权重布局修复后未重新对拍） |
 | 5 ✅ | `cnn_top.v` Avalon 顶层（从接口 + 6 寄存器 + param/scale 解析 + DMA + 行块调度）；requant 定点参数**软件侧预转**（`conv_op.cc` scale 区每通道 4 字：mult/bias_int/shift/rcl6，RTL 无浮点） | 端到端 tb：**6/6 层 bit-exact**（单块/多块/多组、38 高长层） |
 | 6 ✅ | depthwise（type=4）：权重对角化 + MAC 复用 | v2 回归覆盖 dw 层 |
 | 7 ✅ | 打包 QSys IP 上板替换（黑盒 `cnn_top.qxp` 已删除） | 上板 `test.sh` 全链路运行；**检测正确性验证中**（见下节调试历史） |
@@ -148,6 +148,7 @@ cnn_rtl/
 | 4 | 编译报 `10161 not declared` | requant M10K 读数据 wire 声明在 generate 实例内，作用域只在实例内，主逻辑引用不到 | `fb90f2f` 提升到模块顶层 wire 数组（`rq_bias_q[0:7]` 等） |
 | 5 | 有输出但检测不出目标 | **容量假设与实测模型不符**（`model_profile.md` 实测：in_c/out_c 最大 1024）：① `G_MAX_C=128` 的 requant 数组从 conv8（out_c=256）起丢弃参数 → 输出全 0；② `req_buf[0:511]` 中转装不下 4×1024 字 | `d64c2cb`：`G_MAX_C` 128→1024，requant 数组改 8 lane 独立 M10K（8 lane 并行读 8 个通道地址，单端口 RAM 每拍 1 地址 → 每 lane 一份，约 104 块 M10K）；`S_RD_SCALE` 改边读边写 core（删 `req_buf`，4096 字寄存器堆在 5CSEBA6U23 上不可行） |
 | 6 | （架构）lb 全通道驻留不可行 | `G_MAX_IN_CB=4`（in_c≤32）下 lb 4cb 驻留；模型 in_c≤1024 → 需 128cb ≈ 10160 块 M10K > 器件 553 块。层 4（in_c=64）起地址越界错乱，比 G_MAX_C 更早触发 | `368568f` **输入流式化**（对齐黑盒流式部分和架构）：`G_MAX_IN_CB` 4→1，`i_group+1 → S_LOAD` 重装下一 cb（部分和留 acc）、`o_group+1 → S_LOAD` 重装新组 cb；顶层 lr/wr 单笔→**多笔在途**（≤4，桥 `MAX_PENDING_RESPONSES=4`），每 o_group 轮末重置地址（CONV 回行块首、DW +1 cb） |
+| 7 | （编译警告暴露）**k=1 权重错位**：core `S_WEIGHT` 固定消费 72 拍/slice，而软件 k=1 slice 仅 64B=8 拍（`conv2d_weight_reorganize` block_size=8×k×8）→ 层 2 起权重流跨 slice 错位；`w_rb_beats_r` 固定 ×72 多算 9 倍；`dma_wbeat` 16-bit 在 `w_rb_beats>65535` 层（层 12 起）回绕 | `2eb5d8d`：`S_WEIGHT` 按 k 分支（k=1：8 拍、lane 主序跳 72B 到 t=0 组）；`w_rb_beats_r` 按 `p_k==1 ? 8 : 72`；`dma_wbeat` 加宽 20-bit；`mac_t` 末 tap 按 k（k=1 单 tap，避免读 wbuf 未初始化区 + MAC 快 9 倍）；tb 24 层均为 k=3（k=1 未覆盖） |
 
 **遗留**：上板检测正确性待验证（368568f 后）；性能（装载/MAC 未重叠、pr/sr 仍单笔在途）待优化；tb 覆盖仅小通道参数（见上节验证覆盖边界）。
 

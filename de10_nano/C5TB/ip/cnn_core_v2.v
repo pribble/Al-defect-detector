@@ -364,18 +364,19 @@ module cnn_core_v2 #(
                         rq_col <= rq_col + 1;
                 end
 
-                //---- 装载权重 slice（72 拍，64-bit/拍）----
+                //---- 装载权重 slice（k=3：72 拍 [lane][9tap][8]；k=1：8 拍，lane 主序跳 72B 到 t=0 组）----
+                // 软件布局（conv2d_weight_reorganize）：k=3 slice = 8×9×8B，k=1 slice = 8×1×8B
                 S_WEIGHT: begin
                     if (iw_valid) begin
-                        wbuf[wf_cnt*8 + 0] <= iw_data[7:0];
-                        wbuf[wf_cnt*8 + 1] <= iw_data[15:8];
-                        wbuf[wf_cnt*8 + 2] <= iw_data[23:16];
-                        wbuf[wf_cnt*8 + 3] <= iw_data[31:24];
-                        wbuf[wf_cnt*8 + 4] <= iw_data[39:32];
-                        wbuf[wf_cnt*8 + 5] <= iw_data[47:40];
-                        wbuf[wf_cnt*8 + 6] <= iw_data[55:48];
-                        wbuf[wf_cnt*8 + 7] <= iw_data[63:56];
-                        if (wf_cnt == 8*9 - 1) begin
+                        wbuf[(k_reg == 1 ? wf_cnt*72 : wf_cnt*8) + 0] <= iw_data[7:0];
+                        wbuf[(k_reg == 1 ? wf_cnt*72 : wf_cnt*8) + 1] <= iw_data[15:8];
+                        wbuf[(k_reg == 1 ? wf_cnt*72 : wf_cnt*8) + 2] <= iw_data[23:16];
+                        wbuf[(k_reg == 1 ? wf_cnt*72 : wf_cnt*8) + 3] <= iw_data[31:24];
+                        wbuf[(k_reg == 1 ? wf_cnt*72 : wf_cnt*8) + 4] <= iw_data[39:32];
+                        wbuf[(k_reg == 1 ? wf_cnt*72 : wf_cnt*8) + 5] <= iw_data[47:40];
+                        wbuf[(k_reg == 1 ? wf_cnt*72 : wf_cnt*8) + 6] <= iw_data[55:48];
+                        wbuf[(k_reg == 1 ? wf_cnt*72 : wf_cnt*8) + 7] <= iw_data[63:56];
+                        if (wf_cnt == (k_reg == 1 ? 8*1 - 1 : 8*9 - 1)) begin
                             wf_cnt <= 0;
                             mac_row <= 0; mac_col <= 0; mac_t <= 0;
                             state <= S_MAC_ADDR;
@@ -418,7 +419,7 @@ module cnn_core_v2 #(
                 end
 
                 //---- 窗口 MAC（累加拍）：用上拍寄存的 v_sum_r 累加到 acc_local；
-                //     首 tap（mac_t==0）以 acc_q 初始化；末 tap（mac_t==8）写回 acc ----
+                //     首 tap（mac_t==0）以 acc_q 初始化；末 tap（k=3：mac_t==8；k=1：mac_t==0）写回 acc ----
                 S_MAC_ACC: begin
                     // 8 lane 独立 32-bit 累加（acc_local 打包为 256-bit，但每个 lane
                     // 是独立 int32，无跨 lane 进位；整体 256-bit 加法器进位链过长，
@@ -433,10 +434,13 @@ module cnn_core_v2 #(
                             acc_next[32*lane +: 32] = acc_local[32*lane +: 32] + v_sum_r[lane];
                     end
                     acc_local <= acc_next;
-                    if (mac_t == 8) begin
-                        // 末 tap：写回最终值（acc_local 尚缺本 tap 部分和）
+                    if (mac_t == (k_reg == 1 ? 4'd0 : 4'd8)) begin
+                        // 末 tap：写回最终值（acc_local 尚缺本 tap 部分和；
+                        // k=1 单 tap 时直接用 acc_q 累加，避免旧 acc_local 串扰）
                         for (lane = 0; lane < 8; lane = lane + 1)
-                            acc_wr_next[32*lane +: 32] = acc_local[32*lane +: 32] + v_sum_r[lane];
+                            acc_wr_next[32*lane +: 32] = (k_reg == 1) ?
+                                (acc_q[32*lane +: 32] + v_sum_r[lane]) :
+                                (acc_local[32*lane +: 32] + v_sum_r[lane]);
                         acc[acc_waddr_mac] <= acc_wr_next;
                         mac_t <= 0;
                         if (mac_col == out_w_reg - 1) begin

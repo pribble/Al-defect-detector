@@ -197,10 +197,10 @@ module cnn_top_core (
     // DMA 计数器
     reg [7:0]  dma_icb;                 // 输入：块（≤4）
     reg [15:0] dma_ibeat;             // 输入：段内拍（≤in_seg_words）
-    reg [15:0] dma_wbeat;             // 权重：总拍（64-bit，≤w_rb_beats）
+    reg [19:0] dma_wbeat;             // 权重：总拍（64-bit，≤w_rb_beats ≤1.18M）
     reg [7:0]  dma_ocb;                 // 输出：块（≤4）
     reg [15:0] dma_obeat;             // 输出：段内拍（≤out_seg_words）
-    reg        input_done, weight_done, output_done;   // 本行块完成标志
+    reg        output_done;                    // 本行块输出完成标志
 
     // 主接口读握手（mm_bridge_sdram0 为流水读桥：waitrequest 拉低仅表示命令
     // 被接受，数据由 readdatavalid 延迟返回）：
@@ -246,10 +246,10 @@ module cnn_top_core (
             lr_pending <= 0;
             wr_pending <= 0;
         end else begin
-            if (lr_readdatavalid)           lr_pending <= lr_pending - 1;
-            if (lr_read && !lr_waitrequest) lr_pending <= lr_pending + 1;
-            if (wr_readdatavalid)           wr_pending <= wr_pending - 1;
-            if (wr_read && !wr_waitrequest) wr_pending <= wr_pending + 1;
+            if (lr_readdatavalid)           lr_pending <= lr_pending - 3'd1;
+            if (lr_read && !lr_waitrequest) lr_pending <= lr_pending + 3'd1;
+            if (wr_readdatavalid)           wr_pending <= wr_pending - 3'd1;
+            if (wr_read && !wr_waitrequest) wr_pending <= wr_pending + 3'd1;
         end
     end
 
@@ -266,7 +266,7 @@ module cnn_top_core (
             start_clear_pending <= 0;
             dma_icb <= 0; dma_ibeat <= 0; dma_wbeat <= 0;
             dma_ocb <= 0; dma_obeat <= 0;
-            input_done <= 0; weight_done <= 0; output_done <= 0;
+            output_done <= 0;
         end else begin
             case (state)
                 S_IDLE: begin
@@ -381,7 +381,7 @@ module cnn_top_core (
                         in_cb_stride_r  <= in_hw_r << 3;
                         out_cb_stride_r <= out_hw_r << 3;
                         out_rb_stride_r <= (p_out_row_tile * p_out_w) << 3;
-                        w_rb_beats_r    <= w_cb_r * 72;
+                        w_rb_beats_r    <= w_cb_r * (p_k == 1 ? 8 : 72);   // k=1：slice=8 拍；k=3：72 拍
                         state <= S_RD_SCALE;
                     end
                 end
@@ -414,7 +414,7 @@ module cnn_top_core (
                         cfg_idx <= 0;
                         dma_icb <= 0; dma_ibeat <= 0; dma_wbeat <= 0;
                         dma_ocb <= 0; dma_obeat <= 0;
-                        input_done <= 0; weight_done <= 0; output_done <= 0;
+                        output_done <= 0;
                         state <= S_WR_BASE;
                     end else
                         cfg_idx <= cfg_idx + 1;
@@ -519,7 +519,7 @@ module cnn_top_core (
                         rb_base_r <= rb_base_r + rb_tile_stride_r;   // 增量：base += tile*stride
                         dma_icb <= 0; dma_ibeat <= 0; dma_wbeat <= 0;
                         dma_ocb <= 0; dma_obeat <= 0;
-                        input_done <= 0; weight_done <= 0; output_done <= 0;
+                        output_done <= 0;
                         state <= S_WR_BASE;
                     end
                 end
