@@ -2,22 +2,25 @@
 
 > 导航：上一级 [README.md](README.md) · 相关 [ssd_detection/](../ssd_detection/README.md)、[intelfpga.cc](../ssd_detection/intelfpga.cc)、[intelfpga.h](../ssd_detection/include/intelfpga.h)
 
-本文档从**黑盒外部可观测行为**出发，完整描述 `cnn_top` 加速器的接口、寄存器协议、
-指令格式、数据布局与数值语义，作为纯 RTL 复现（替代 `ip/cnn_top.qxp` 黑盒）的编写与
-验收依据。所有信息均来自仓库内可读文件（接口/参数、软件协议、QSys 连接），
-**不包含任何内部微架构/时序的猜测性承诺**，未决点见 §11。
+本文档从**黑盒外部可观测行为**出发，描述 `cnn_top` 加速器的接口、寄存器协议、
+指令格式、数据布局与数值语义。它是纯 RTL 复现（`cnn_rtl/`，已替代黑盒
+`ip/cnn_top.qxp`）的**历史规格依据**——复现已完成并于 2026-08 上板运行，RTL 实现见
+`cnn_rtl/README.md` 与 `ip/` 下三个 `.v`。所有信息均来自仓库内可读文件
+（接口/参数、软件协议、QSys 连接），**不包含任何内部微架构/时序的猜测性承诺**，
+未决点见 §11。
 
 ## 1. 背景与现状
 
-- `cnn_top` 是 QSys 自定义 IP（Component Editor 18.1，v2.0，`ip/cnn_top_hw.tcl`），
-  其综合网表以 **QXP 归档（Netlist Only）** 形式存在（`ip/cnn_top.qxp`，8.3MB），
-  **仓库内无 RTL 源码**，无法直接修改/优化。
+- `cnn_top` 是 QSys 自定义 IP（Component Editor 18.1，v2.0，`ip/cnn_top_hw.tcl`）。
+  原综合网表为 QXP 归档（Netlist Only，`ip/cnn_top.qxp`，8.3MB，无 RTL 源码）；
+  **2026-08 已由开源复现 RTL（`ip/cnn_top.v`/`cnn_top_core.v`/`cnn_core_v2.v`）替代，
+  qxp 已删除**。
 - 系统级连接完整可读：`soc_system.qsys` 中 `cnn_top_0` 的接口连接与基地址；
   `soc_system.xml`（QSys 生成日志）保留全部 IP 参数值。
 - 软件侧协议完整可读：`ssd_detection/intelfpga.cc`（寄存器读写、DMA、重排）、
   `ssd_detection/include/intelfpga.h`（指令结构）、
   `ssd_detection/paddle_lite/lite/kernels/intel_fpga/bridges/conv_op.cc`（参数/scale 填充）。
-- 结论：**功能等价复现可行**，且替换 `cnn_top` 后 QSys 系统、驱动、软件均无需改动。
+- 现状：复现 RTL 已上板运行（`test.sh` 全链路）；检测正确性于 2026-08 流式化改造后待最终验证。
 
 ## 2. 顶层接口
 
@@ -86,7 +89,7 @@
 | `INPUT_RAM_DATA_WIDTH` | 64 | 输入片上 RAM 宽度（8×int8） |
 | `CFG_PARAM_WIDTH` / `CFG_M_AXI_*` | 32 | 指令/寄存器数据宽度 |
 | `LOAD/OUTPUT/SCALE/REORG_M_AXI_*` | 32/64 | 主接口地址/数据宽度 |
-| `SCALE_6` | 1086324736 | 34-bit；位模式 = float **6.0**，relu6 量化上限常量（用法见 §11） |
+| `SCALE_6` | 1086324736 | 34-bit；位模式 = float **6.0**，relu6 量化上限常量（黑盒内部常量；复现核由软件预转 `rcl6` 取代，见 §6.5） |
 | `REORGANIZE_BUFF_DEEP`/`REORG_RAM_*` | — | reorg 残留参数，当前未使用 |
 
 ## 4. 寄存器协议
@@ -176,12 +179,22 @@ Paddle 张量（`global_mem_cfg` 拷贝逻辑，`intelfpga.cc:640/667`）。
 
 ### 6.5 scale/bias（软件写，硬件读）
 
-每输出通道 2 个 float，共 `2*output_c`，从 SCALE 基址连续存放（`conv_op.cc:119`）：
+**2026 定点化后**：每输出通道 4 个 int32，共 `4*output_c`，从 SCALE 基址连续存放
+（`conv_op.cc:120-147` 生成，`intelfpga.cc:638` 整块 memcpy）：
 
 ```
-scale[i]          = weight_scale[i]（模型 per-channel 量化 scale）
-scale[output_c+i] = bias[i] / output_scale   （无 bias 时为 0）
+scale[0..out_c)          = mult      = round_half_away((ws·is/os)·2^30)  // uint32 乘数
+scale[out_c..2·out_c)    = bias_int  = round_half_away(b/(ws·is))        // raw 域 int32
+scale[2·out_c..3·out_c)  = shift     = 30                                // 右移位数
+scale[3·out_c..4·out_c)  = rcl6      = round_half_away(6·os/(ws·is))     // relu6 raw 域上限
 ```
+
+公式与舍入（away-from-zero）对齐 `cnn_rtl/tools/ref_int8.py` 的 `quantize_params`
+（500 轮随机验证一致）。RTL 侧 `S_RD_SCALE` 按此布局边读边写 core requant 数组，
+顺序即 mult/bias_int/shift/rcl6。
+
+> 黑盒时代为每通道 2 个 float（`scale[i]=ws`、`scale[out_c+i]=bias/os`），已被定点化取代，
+> 仅作历史参考。
 
 ## 7. 量化/数值语义
 
@@ -210,7 +223,7 @@ out_int8  = saturate(round(out_fp))               // 可选 relu/relu6/leakyrelu
    input_row_tile       = (output_row_tile-1)*stride + dilation*(kernel-1) + 1   // stride=2 → 11
    output_channel_block_num = ceil(output_c / 8)
    output_row_block_num     = ceil(output_h / output_row_tile)
-3. memcpy param 块 → PARAM；memcpy scale（2*output_c floats）→ SCALE
+3. memcpy param 块 → PARAM；memcpy scale（`4*output_c` int32 定点参数）→ SCALE
 4. 若上一节点有未拷贝输出：先 memcpy 回 Paddle 张量
 5. 写 START → 轮询完成
 6. 若节点是图输出：OutputRearrange 读回并写 Paddle 张量
@@ -265,19 +278,19 @@ out_int8  = saturate(round(out_fp))               // 可选 relu/relu6/leakyrelu
    - 行块 DMA/流水控制（load 读、output 写、行块/通道块循环）
    - MAC 阵列（8×8×3×3）与累加
    - 量化器（scale/bias、relu/relu6/leakyrelu、舍入饱和）
-3. **验证 = 黑盒对拍**：同一软件栈下，新 RTL 与旧 QXP 输出逐层对比；
-   最终以板上 `ssd_detection` 检测结果一致为准（见 `ssd_detection/README.md` 调试技巧）。
+3. **验证**：tb 位精确对拍（`cnn_rtl/verification/`，小通道参数覆盖）＋上板 `test.sh`
+   全链路运行、检测结果正确性比对（黑盒 qxp 已删除，不再有黑盒对拍手段）。
 4. **性能对标**：`intelfpga_subgraph` 打印 `fpga_time`，与旧 IP 对比量级。
 
 ## 11. 未决问题与风险
 
 | # | 问题 | 影响 | 确认手段 |
 |---|---|---|---|
-| 1 | int32 累加的舍入/饱和方式、relu6 对 `SCALE_6` 的具体用法 | 数值一致性的最后细节 | 固定输入对拍旧 IP 输出反推 |
+| 1 | ~~int32 累加的舍入/饱和方式、relu6 对 `SCALE_6` 的具体用法~~ | **已解决**：软件定点预转（§6.5），舍入 away-from-zero 与 `ref_int8.quantize_params` 500 轮随机验证一致；RTL 无浮点 | `ref_int8.py` + 上板对拍 |
 | 2 | 内部流水级数/频率未知 | 仅性能差异，不影响功能 | 复现后调 `clk_cnn` 与阵列规模 |
 | 3 | `param` 结构体尾部字段（`weight_size` 等）硬件是否读取 | 指令块布局一致性 | 按结构体全量搬运即可保守兼容 |
 | 4 | dilation>1、stride=3 等边界参数是否被硬件支持 | SSD 模型只用 dilation=1/stride∈{1,2}，首版可裁剪 | 对拍时覆盖全部 47 层参数组合 |
-| 5 | `output_row_tile` 由软件按缓冲容量计算，硬件假定与参数一致 | 需保证两者公式一致 | 公式已在 §8 固化，照抄即可 |
+| 5 | ~~`output_row_tile` 由软件按缓冲容量计算，硬件假定与参数一致~~ | **已解决**：§8.1 对 47 层实测逐层复算一致 | 设备 `[FPGA-DUMP]` 实测 |
 
 ## 附：证据来源索引
 

@@ -76,7 +76,7 @@ cnn_rtl/
 | 阶段 | 内容 | 验证闸门 |
 |---|---|---|
 | **0** | 上游基线引入（本文件即完成） | 有 GHDL 环境跑 `run_conv.sh` / `run_conv_traversal.sh` / `run_layers.sh` 全绿 |
-| **1** | **数值对齐**（[方案 STAGE1_plan.md](STAGE1_plan.md)）：uint8→int8；requant 改 signed 乘加（软件预转 per-channel `mult`/`bias_rq`/`shift`，RTL 保留乘移位结构）；activation 加 relu6 | 新增 `tb_conv_layer_s8.vhd` + Python 整数参考对拍，定向+随机向量 bit-exact 通过 |
+| **1** | **数值对齐**：uint8→int8；requant 改 signed 乘加（软件预转 per-channel `mult`/`bias_rq`/`shift`，RTL 保留乘移位结构）；activation 加 relu6 | 新增 `tb_conv_layer_s8.vhd` + Python 整数参考对拍，定向+随机向量 bit-exact 通过 |
 | **2** | **维度运行时化**：generic → 运行时参数（in_c/h/w、out_c/h/w、pad、stride）；param 块解析器（DDR 读 `struct parameter`，转成控制信号） | 用软件栈实际 param 内容构造测试向量，逐层对拍 |
 | **3** | **Avalon 接口**：从接口 + 6 寄存器（START/DDRIN/DDRW/DDROUT/PARAM/SCALE）；启动/完成自清/轮询 | 寄存器级 tb：写寄存器→启动→完成时序符合 spec §4 |
 | **4** | **DMA**：4 个 Avalon 主（param/load 读、output 写 64-bit burst）；地址 = 基址寄存器 + word offset×8 | DMA tb：burst 传输 + 地址生成正确 |
@@ -97,20 +97,23 @@ cnn_rtl/
 
 | 阶段 | 交付 | 验证 |
 |---|---|---|
-| 1 ✅ | `src/conv_layer_s8.v`（定点卷积数据通路，Verilog） | `verification/sim/run_conv_s8.sh`（iverilog/verilator）全绿 |
+| 1 ✅ | `src/conv_layer_s8.v`（定点卷积数据通路，Verilog，阶段 1 中间产物） | `verification/sim/run_conv_s8.sh`（iverilog/verilator）全绿 |
 | 2 ✅ | `tools/ref_cnn_top.py`（numpy 行为模型，裁判） | 80 随机层 + 真实 47 层 ALL PASS |
-| 3 ✅ | `src/cnn_core.v`（参数驱动单层执行器） | `verification/sim/run_cnn_core.sh` 24 层 bit-exact（k=3 子集） |
-| 4 ✅ | `src/cnn_core_v2.v`（**行块驻留 + NHWC8 块序流**：输入 `[C/8][H][W][8]`、slice 权重、行块 acc 缓冲、单行块执行供 DMA 调度） | `verification/sim/run_cnn_core_v2.sh` 24 层 bit-exact（conv/dw × s1/s2 × act0/1/2 × row_block≥1） |
-| 3b ⬜ | k=1（1×1 卷积）行缓冲适配 | — |
+| 3 ✅ | `src/cnn_core.v`（参数驱动单层执行器，k=3 子集） | `verification/sim/run_cnn_core.sh` 24 层 bit-exact |
+| 4 ✅ | `src/cnn_core_v2.v`（**NHWC8 块序流**：slice 权重、行块 acc 缓冲、单行块执行供 DMA 调度） | `verification/sim/run_cnn_core_v2.sh` 24 层 bit-exact（conv/dw × s1/s2 × act0/1/2 × row_block≥1） |
 | 5 ✅ | `cnn_top.v` Avalon 顶层（从接口 + 6 寄存器 + param/scale 解析 + DMA + 行块调度）；requant 定点参数**软件侧预转**（`conv_op.cc` scale 区每通道 4 字：mult/bias_int/shift/rcl6，RTL 无浮点） | 端到端 tb：**6/6 层 bit-exact**（单块/多块/多组、38 高长层） |
-| 7 ⬜ | 打包 QSys IP 上板替换 | 与旧 IP 检测结果一致 |
+| 6 ✅ | depthwise（type=4）：权重对角化 + MAC 复用 | v2 回归覆盖 dw 层 |
+| 7 ✅ | 打包 QSys IP 上板替换（黑盒 `cnn_top.qxp` 已删除） | 上板 `test.sh` 全链路运行；**检测正确性验证中**（见下节调试历史） |
+
+> **验证覆盖边界（重要）**：tb 各层向量均为**小通道参数**（`in_c`/`out_c` ≤ 32，见
+> `verification/v2/layer_*/cfg.hex`），**大通道（in_c/out_c 最大 1024）未经仿真覆盖**，
+> 其正确性依赖上板验证与下述 2026-08 容量修复。
 
 **阶段 5 交付（Quartus 接入）**：`cnn_top.v`（QSys 适配层，端口与 `ip/cnn_top_hw.tcl` 一致）+ `cnn_top_core.v`（RTL 本体，tb 直接对拍）+ `cnn_core_v2.v`；`ip/cnn_top_hw.tcl` 已把 `cnn_top.qxp` 黑盒引用改为 3 个 `.v`。接入步骤（Windows Quartus）：
 1. 把 `ip/` 下 3 个 `.v` 随工程提交（已复制）；Platform Designer 打开 `soc_system.qsys` → Generate HDL（顶层会例化 `cnn_top` = 新 wrapper）
 2. 全量编译（Analysis & Synthesis → Fitter → Timing；黑盒换 RTL 不能增量）
 3. 关注 `clk_cnn`（50MHz）时序；board 验证：寄存器读写 → 单层对拍（软件侧跑一层，比对 DDR 输出）
-- **排查「还是旧黑盒」**：① Windows 工程 `ip/` 下 4 个文件必须覆盖为仓库版（hw.tcl + 3 个 .v，**不要拷 cnn_top.qxp**）；② 删掉 `soc_system/synthesis/` 整个目录（旧生成物，PD 重建）；③ 重开 Platform Designer → cnn_top_0 右键 Properties 确认源为 3 个 .v（若仍显示 qxp 说明 hw.tcl 没覆盖）；④ Generate 后检查 `soc_system/synthesis/submodules/` 应出现 cnn_top.v 等、无 cnn_top.qxp
-- 适配要点：burstcount 固定 1、byteenable 全 1、readdatavalid 为 bridge 输入不采；**权重读复用 load master**（黑盒无独立权重 master，core S_LOAD/S_WEIGHT 串行分时，已验证 lr/wr 不同时拉高）；41 个 QSys HDL_PARAMETER 照单声明、值忽略
+- 适配要点：burstcount 固定 1、byteenable 全 1；**读完成以 `readdatavalid` 为准**（2026-08 起，见调试历史；早期实现曾错误地以 `read && !waitrequest` 判完成）；lr/wr 共用 load master（黑盒无独立权重 master），多笔在途独立计数
 
 **阶段 5 关键设计**：
 - requant 定点参数**软件侧预转**（量化优先、RTL 无浮点）：`conv_op.cc` 把 float scale（ws/bias/os）转成每通道 4 个 int32（mult/bias_int/shift/rcl6）写入 scale 区，公式与舍入（away-from-zero）对齐 `ref_int8.quantize_params`（500 轮随机验证一致）；`intelfpga.cc` memcpy 4×out_c 字
@@ -120,7 +123,7 @@ cnn_rtl/
 
 **阶段 4 关键设计**（对齐黑盒，见 [cnn_top_spec.md §6/§8](../cnn_top_spec.md)）：
 - 输入流 64-bit NHWC8 块序 `[C/8][H][W][8]`，DDR 顺序 burst 读；pad 行由模块补 0（不拉 `i_ready`，DMA 自动跳过，地址=已发字节数）
-- 行缓冲按输入通道块组织 `[in_cb][in_row_tile][W][8]`（模型 max 4×39×302×8 ≈ 106KB BRAM）；计算序 = 输出组 × 输入组 × 窗口（对齐 ref）
+- 输入行缓冲：2026-08 前按通道块组织 `[in_cb][in_row_tile][W][8]`（曾假设模型 in_c≤32、4 cb 驻留 ≈ 309 块 M10K）——**该假设与实测不符**（模型 in_c 最大 1024），已改为**单 cb 流式驻留**（`G_MAX_IN_CB=1`，79 块 M10K），每 o_group 轮由顶层 DMA 重读全部输入通道块（见下节调试历史）；计算序 = 输出组 × 输入组 × 窗口（对齐 ref）
 - **可综合性（同步读改造，2025；单维展平，2026）**：
   - 2025 同步读改造：原 `lb`/`acc` 为组合（异步）读，Quartus 无法推断 M10K，约 4Mbit 存储被展开成寄存器+读端口 mux，`quartus_map` 内存爆到 66GB 仍 OOM。改造后 `lb` 为 64-bit 字数组（8 lane/字）、`acc` 为 256-bit 字数组（8 lane×int32/字），读改为同步采样（`lb_q`/`acc_q` 晚一拍），`S_MAC` 拆 `S_MAC_RD`/`S_MAC_ACC` 两拍、`S_REQUANT` 拆 `S_REQ_ADDR`/`S_REQ_OUT` 两拍。tap 率/事件率减半。
   - 2026 单维展平（解决 40GB/1h A&S）：同步读改造后仍多维 unpacked 数组（`lb[cb][row][col]` 三维 + `acc` 256-bit 超宽），Quartus 对多维数组的 RAM 推断仍不可靠，A&S 实测 40GB+ / 1h。**改为单维数组**：`lb[0:CB*ROWS*W-1]`、`acc[0:OROWS*OW-1]`，索引用常量乘法拼接（`lb_waddr`/`lb_raddr`/`acc_waddr_*`/`acc_raddr_*` wire，综合折叠为移位/加法），保留 `(* ramstyle="M10K" *)`。功能/时序不变（读写仍同一拍采样），`run_cnn_core_v2.sh` 24/24 层回归通过。
@@ -128,6 +131,21 @@ cnn_rtl/
 - 权重 slice 布局 `[Co/8][Ci/8][8][9][8]` 在 DDR 连续 → DMA 顺序读，slice 序号 = 权重流计数/72
 - 单行块执行（`start→o_done`），行块循环/地址重定位留待 cnn_top 层
 - **已修 RTL bug 记录**（对拍暴露）：cfg 打包 54→64-bit（readmemh 半 hex 截断丢 sel 位）、`cfg_sel` 3 位（sel=4 截断）、输入 pad 通道补 0、输出/输入区内存重叠（`out_off` 分离）、signed 输入语义回归（`$signed(lb_m)`）、窗口行索引多 `+pad`、DW slice 位置 `(cb_out,cb_out)`、输出末事件 `o_valid` 时序
+
+## 上板调试历史（2026-08，复现核替代黑盒的关键修复）
+
+黑盒 qxp 时代上板正常（`debug_test.log`，fpga_time 475ms/帧）。复现核上板后依次暴露以下问题，按修复顺序记录：
+
+| # | 现象 | 根因 | 修复 |
+|---|---|---|---|
+| 1 | `wait ip fail`（START 写 1 后 5s 未自清） | 读握手用 `read && !waitrequest` 判完成，而 `mm_bridge_sdram0` 是**流水读桥**（`MAX_PENDING_RESPONSES=4`、`PIPELINE_RESPONSE=1`）：waitrequest 拉低仅表示命令被接受，数据由 `readdatavalid` 延迟返回——原实现采到垃圾数据 → param/scale 解析错 → 状态机死锁 | `c7099ac` 改 `readdatavalid` 完成判定；`78cbe65` 补单笔在途（命令接受即拉低 read，防流水桥重复发命令） |
+| 2 | （隔离验证） | 用"收到 START 立即自清、不做任何计算"的验证版（`305ae17`，临时提交）上板：通过 → 从接口/QSys/时钟/FPGA 配置全部正常，问题锁定在正式核内部 | 验证后回退正式版（`121b4da`） |
+| 3 | 编译报 `Quartus 10028` 多驱动 | `lr_pending`/`wr_pending` 被两个 always 赋值（自动机 + 主状态机 S_START 清零） | `401eec6` 行块重置并入自动机（`core_start` 拍触发） |
+| 4 | 编译报 `10161 not declared` | requant M10K 读数据 wire 声明在 generate 实例内，作用域只在实例内，主逻辑引用不到 | `fb90f2f` 提升到模块顶层 wire 数组（`rq_bias_q[0:7]` 等） |
+| 5 | 有输出但检测不出目标 | **容量假设与实测模型不符**（`model_profile.md` 实测：in_c/out_c 最大 1024）：① `G_MAX_C=128` 的 requant 数组从 conv8（out_c=256）起丢弃参数 → 输出全 0；② `req_buf[0:511]` 中转装不下 4×1024 字 | `d64c2cb`：`G_MAX_C` 128→1024，requant 数组改 8 lane 独立 M10K（8 lane 并行读 8 个通道地址，单端口 RAM 每拍 1 地址 → 每 lane 一份，约 104 块 M10K）；`S_RD_SCALE` 改边读边写 core（删 `req_buf`，4096 字寄存器堆在 5CSEBA6U23 上不可行） |
+| 6 | （架构）lb 全通道驻留不可行 | `G_MAX_IN_CB=4`（in_c≤32）下 lb 4cb 驻留；模型 in_c≤1024 → 需 128cb ≈ 10160 块 M10K > 器件 553 块。层 4（in_c=64）起地址越界错乱，比 G_MAX_C 更早触发 | `368568f` **输入流式化**（对齐黑盒流式部分和架构）：`G_MAX_IN_CB` 4→1，`i_group+1 → S_LOAD` 重装下一 cb（部分和留 acc）、`o_group+1 → S_LOAD` 重装新组 cb；顶层 lr/wr 单笔→**多笔在途**（≤4，桥 `MAX_PENDING_RESPONSES=4`），每 o_group 轮末重置地址（CONV 回行块首、DW +1 cb） |
+
+**遗留**：上板检测正确性待验证（368568f 后）；性能（装载/MAC 未重叠、pr/sr 仍单笔在途）待优化；tb 覆盖仅小通道参数（见上节验证覆盖边界）。
 
 ## 相关文档
 
