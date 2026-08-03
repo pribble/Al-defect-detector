@@ -129,68 +129,288 @@ module cnn_core_v2 #(
     wire [31:0]        rq_mult_q  [0:7];
     wire [7:0]         rq_shift_q [0:7];
     wire signed [31:0] rq_rcl6_q  [0:7];
-    // requant 读地址基准 = o_group*8（10-bit，o_group ≤ 127；位宽必须与
-    // RAM 深度匹配，超宽地址表达式会阻止 M10K 推断——见 g_rq_param）
-    wire [9:0] rq_raddr_base = {o_group[6:0], 3'd0};
-
-    genvar rqg;
-    generate
-        for (rqg = 0; rqg < 8; rqg = rqg + 1) begin : g_rq_param
-            (* ramstyle = "M10K, no_rw_check" *) reg signed [31:0] bias_store [0:G_MAX_C-1];
-            (* ramstyle = "M10K, no_rw_check" *) reg [31:0] rq_m_store [0:G_MAX_C-1];
-            (* ramstyle = "M10K, no_rw_check" *) reg [7:0]  rq_r_store [0:G_MAX_C-1];
-            (* ramstyle = "M10K, no_rw_check" *) reg signed [31:0] rcl6_store [0:G_MAX_C-1];
-
-            // 每 lane 读地址 = 基准 + rqg（10-bit + 3-bit 常数，rqg ≤ 7 无进位 → 综合为拼接）
-            wire [9:0] rq_raddr = rq_raddr_base + rqg[2:0];
-
-            // cfg 写 8 份（同一 cfg_we 拍、同地址同数据）。
-            // 写地址截断 [9:0]：cfg_addr 为 20-bit（顶层 S_RD_SCALE 派生，
-            // 值域 ≤ p_out_c-1 ≤ 1023），超宽写地址会阻止 Quartus 推断 M10K
-            // （1024 深 → 10-bit 地址），导致数组展开成 LE/寄存器（ALM 爆）。
-            // 每个数组独立 always（写端口互不共享）：case 多分支写多数组会被
-            // Quartus 视为多写端口 RAM → 推断失败展开（实测 map.rpt 仅有
-            // lb/acc 两个 altsyncram，bias_store 等 32 个数组全展开）。
-            always @(posedge clk) begin
-                if (cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C)
-                    bias_store[cfg_addr[9:0]] <= cfg_wdata;
-            end
-            always @(posedge clk) begin
-                if (cfg_we && cfg_sel == 3'd2 && cfg_addr < G_MAX_C)
-                    rq_m_store[cfg_addr[9:0]] <= cfg_wdata;
-            end
-            always @(posedge clk) begin
-                if (cfg_we && cfg_sel == 3'd3 && cfg_addr < G_MAX_C)
-                    rq_r_store[cfg_addr[9:0]] <= cfg_wdata[7:0];
-            end
-            always @(posedge clk) begin
-                if (cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C)
-                    rcl6_store[cfg_addr[9:0]] <= cfg_wdata;
-            end
-
-            // 读：无条件同步采样（与 lb_q/acc_q 完全同构）。原条件使能
-            // （if (state == S_REQ_ADDR) 等）是 M10K 推断的最后障碍——
-            // 实测独立写 always 后 Quartus 仍只靠 RAM 恢复救回 16/32 个
-            // 数组（g_rq_param 奇数实例），读端口复杂使能即推断失败。
-            // 语义等价：rq_raddr 只随 o_group 变（S_REQ_OUT 末更新），
-            // 各 q_* 在使用拍前 1 拍采到的就是当前组的参数值。
-            reg signed [31:0] q_bias;
-            reg [31:0] q_mult;
-            reg [7:0]  q_shift;
-            reg signed [31:0] q_rcl6;
-            always @(posedge clk) begin
-                q_bias  <= bias_store[rq_raddr];
-                q_rcl6  <= rcl6_store[rq_raddr];
-                q_mult  <= rq_m_store[rq_raddr];
-                q_shift <= rq_r_store[rq_raddr];
-            end
-
-            assign rq_bias_q[rqg]  = q_bias;
-            assign rq_mult_q[rqg]  = q_mult;
-            assign rq_shift_q[rqg] = q_shift;
-            assign rq_rcl6_q[rqg]  = q_rcl6;
-        end
-    endgenerate
+    // requant 参数存储：8 lane 显式展开（移出 generate）。
+    // Quartus 对 generate 块内数组的 M10K 推断不可靠——实测（map.rpt）仅靠
+    // RAM 恢复救回 16/32 个（g_rq_param 奇数实例），偶数实例数组照旧展开成
+    // 寄存器（ALM 爆）。lb/acc 在模块顶层且全部推断成功，故此处与它们
+    // 完全同构：顶层数组 + 每数组独立写 always + 读地址打拍 + 无条件采样。
+    // 每 lane 读地址 = o_group*8 + lane（10-bit，o_group ≤ 127；写地址
+    // cfg_addr[9:0] 截断，值域 ≤1023 与 1024 深匹配）。
+    wire [9:0] rq_raddr = {o_group[6:0], 3'd0};
+    reg  [9:0] rq_raddr_r;
+    always @(posedge clk) rq_raddr_r <= rq_raddr;
+    (* ramstyle = "M10K, no_rw_check" *) reg signed [31:0] bias_store_0 [0:G_MAX_C-1];
+    (* ramstyle = "M10K, no_rw_check" *) reg [31:0] rq_m_store_0 [0:G_MAX_C-1];
+    (* ramstyle = "M10K, no_rw_check" *) reg [7:0]  rq_r_store_0 [0:G_MAX_C-1];
+    (* ramstyle = "M10K, no_rw_check" *) reg signed [31:0] rcl6_store_0 [0:G_MAX_C-1];
+    always @(posedge clk) begin
+        if (cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C)
+            bias_store_0[cfg_addr[9:0]] <= cfg_wdata;
+    end
+    always @(posedge clk) begin
+        if (cfg_we && cfg_sel == 3'd2 && cfg_addr < G_MAX_C)
+            rq_m_store_0[cfg_addr[9:0]] <= cfg_wdata;
+    end
+    always @(posedge clk) begin
+        if (cfg_we && cfg_sel == 3'd3 && cfg_addr < G_MAX_C)
+            rq_r_store_0[cfg_addr[9:0]] <= cfg_wdata[7:0];
+    end
+    always @(posedge clk) begin
+        if (cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C)
+            rcl6_store_0[cfg_addr[9:0]] <= cfg_wdata;
+    end
+    reg signed [31:0] q_bias_0;
+    reg [31:0] q_mult_0;
+    reg [7:0]  q_shift_0;
+    reg signed [31:0] q_rcl6_0;
+    always @(posedge clk) begin
+        q_bias_0  <= bias_store_0[rq_raddr_r];
+        q_rcl6_0  <= rcl6_store_0[rq_raddr_r];
+        q_mult_0  <= rq_m_store_0[rq_raddr_r];
+        q_shift_0 <= rq_r_store_0[rq_raddr_r];
+    end
+    assign rq_bias_q[0]  = q_bias_0;
+    assign rq_mult_q[0]  = q_mult_0;
+    assign rq_shift_q[0] = q_shift_0;
+    assign rq_rcl6_q[0]  = q_rcl6_0;
+    (* ramstyle = "M10K, no_rw_check" *) reg signed [31:0] bias_store_1 [0:G_MAX_C-1];
+    (* ramstyle = "M10K, no_rw_check" *) reg [31:0] rq_m_store_1 [0:G_MAX_C-1];
+    (* ramstyle = "M10K, no_rw_check" *) reg [7:0]  rq_r_store_1 [0:G_MAX_C-1];
+    (* ramstyle = "M10K, no_rw_check" *) reg signed [31:0] rcl6_store_1 [0:G_MAX_C-1];
+    always @(posedge clk) begin
+        if (cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C)
+            bias_store_1[cfg_addr[9:0]] <= cfg_wdata;
+    end
+    always @(posedge clk) begin
+        if (cfg_we && cfg_sel == 3'd2 && cfg_addr < G_MAX_C)
+            rq_m_store_1[cfg_addr[9:0]] <= cfg_wdata;
+    end
+    always @(posedge clk) begin
+        if (cfg_we && cfg_sel == 3'd3 && cfg_addr < G_MAX_C)
+            rq_r_store_1[cfg_addr[9:0]] <= cfg_wdata[7:0];
+    end
+    always @(posedge clk) begin
+        if (cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C)
+            rcl6_store_1[cfg_addr[9:0]] <= cfg_wdata;
+    end
+    reg signed [31:0] q_bias_1;
+    reg [31:0] q_mult_1;
+    reg [7:0]  q_shift_1;
+    reg signed [31:0] q_rcl6_1;
+    always @(posedge clk) begin
+        q_bias_1  <= bias_store_1[rq_raddr_r];
+        q_rcl6_1  <= rcl6_store_1[rq_raddr_r];
+        q_mult_1  <= rq_m_store_1[rq_raddr_r];
+        q_shift_1 <= rq_r_store_1[rq_raddr_r];
+    end
+    assign rq_bias_q[1]  = q_bias_1;
+    assign rq_mult_q[1]  = q_mult_1;
+    assign rq_shift_q[1] = q_shift_1;
+    assign rq_rcl6_q[1]  = q_rcl6_1;
+    (* ramstyle = "M10K, no_rw_check" *) reg signed [31:0] bias_store_2 [0:G_MAX_C-1];
+    (* ramstyle = "M10K, no_rw_check" *) reg [31:0] rq_m_store_2 [0:G_MAX_C-1];
+    (* ramstyle = "M10K, no_rw_check" *) reg [7:0]  rq_r_store_2 [0:G_MAX_C-1];
+    (* ramstyle = "M10K, no_rw_check" *) reg signed [31:0] rcl6_store_2 [0:G_MAX_C-1];
+    always @(posedge clk) begin
+        if (cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C)
+            bias_store_2[cfg_addr[9:0]] <= cfg_wdata;
+    end
+    always @(posedge clk) begin
+        if (cfg_we && cfg_sel == 3'd2 && cfg_addr < G_MAX_C)
+            rq_m_store_2[cfg_addr[9:0]] <= cfg_wdata;
+    end
+    always @(posedge clk) begin
+        if (cfg_we && cfg_sel == 3'd3 && cfg_addr < G_MAX_C)
+            rq_r_store_2[cfg_addr[9:0]] <= cfg_wdata[7:0];
+    end
+    always @(posedge clk) begin
+        if (cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C)
+            rcl6_store_2[cfg_addr[9:0]] <= cfg_wdata;
+    end
+    reg signed [31:0] q_bias_2;
+    reg [31:0] q_mult_2;
+    reg [7:0]  q_shift_2;
+    reg signed [31:0] q_rcl6_2;
+    always @(posedge clk) begin
+        q_bias_2  <= bias_store_2[rq_raddr_r];
+        q_rcl6_2  <= rcl6_store_2[rq_raddr_r];
+        q_mult_2  <= rq_m_store_2[rq_raddr_r];
+        q_shift_2 <= rq_r_store_2[rq_raddr_r];
+    end
+    assign rq_bias_q[2]  = q_bias_2;
+    assign rq_mult_q[2]  = q_mult_2;
+    assign rq_shift_q[2] = q_shift_2;
+    assign rq_rcl6_q[2]  = q_rcl6_2;
+    (* ramstyle = "M10K, no_rw_check" *) reg signed [31:0] bias_store_3 [0:G_MAX_C-1];
+    (* ramstyle = "M10K, no_rw_check" *) reg [31:0] rq_m_store_3 [0:G_MAX_C-1];
+    (* ramstyle = "M10K, no_rw_check" *) reg [7:0]  rq_r_store_3 [0:G_MAX_C-1];
+    (* ramstyle = "M10K, no_rw_check" *) reg signed [31:0] rcl6_store_3 [0:G_MAX_C-1];
+    always @(posedge clk) begin
+        if (cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C)
+            bias_store_3[cfg_addr[9:0]] <= cfg_wdata;
+    end
+    always @(posedge clk) begin
+        if (cfg_we && cfg_sel == 3'd2 && cfg_addr < G_MAX_C)
+            rq_m_store_3[cfg_addr[9:0]] <= cfg_wdata;
+    end
+    always @(posedge clk) begin
+        if (cfg_we && cfg_sel == 3'd3 && cfg_addr < G_MAX_C)
+            rq_r_store_3[cfg_addr[9:0]] <= cfg_wdata[7:0];
+    end
+    always @(posedge clk) begin
+        if (cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C)
+            rcl6_store_3[cfg_addr[9:0]] <= cfg_wdata;
+    end
+    reg signed [31:0] q_bias_3;
+    reg [31:0] q_mult_3;
+    reg [7:0]  q_shift_3;
+    reg signed [31:0] q_rcl6_3;
+    always @(posedge clk) begin
+        q_bias_3  <= bias_store_3[rq_raddr_r];
+        q_rcl6_3  <= rcl6_store_3[rq_raddr_r];
+        q_mult_3  <= rq_m_store_3[rq_raddr_r];
+        q_shift_3 <= rq_r_store_3[rq_raddr_r];
+    end
+    assign rq_bias_q[3]  = q_bias_3;
+    assign rq_mult_q[3]  = q_mult_3;
+    assign rq_shift_q[3] = q_shift_3;
+    assign rq_rcl6_q[3]  = q_rcl6_3;
+    (* ramstyle = "M10K, no_rw_check" *) reg signed [31:0] bias_store_4 [0:G_MAX_C-1];
+    (* ramstyle = "M10K, no_rw_check" *) reg [31:0] rq_m_store_4 [0:G_MAX_C-1];
+    (* ramstyle = "M10K, no_rw_check" *) reg [7:0]  rq_r_store_4 [0:G_MAX_C-1];
+    (* ramstyle = "M10K, no_rw_check" *) reg signed [31:0] rcl6_store_4 [0:G_MAX_C-1];
+    always @(posedge clk) begin
+        if (cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C)
+            bias_store_4[cfg_addr[9:0]] <= cfg_wdata;
+    end
+    always @(posedge clk) begin
+        if (cfg_we && cfg_sel == 3'd2 && cfg_addr < G_MAX_C)
+            rq_m_store_4[cfg_addr[9:0]] <= cfg_wdata;
+    end
+    always @(posedge clk) begin
+        if (cfg_we && cfg_sel == 3'd3 && cfg_addr < G_MAX_C)
+            rq_r_store_4[cfg_addr[9:0]] <= cfg_wdata[7:0];
+    end
+    always @(posedge clk) begin
+        if (cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C)
+            rcl6_store_4[cfg_addr[9:0]] <= cfg_wdata;
+    end
+    reg signed [31:0] q_bias_4;
+    reg [31:0] q_mult_4;
+    reg [7:0]  q_shift_4;
+    reg signed [31:0] q_rcl6_4;
+    always @(posedge clk) begin
+        q_bias_4  <= bias_store_4[rq_raddr_r];
+        q_rcl6_4  <= rcl6_store_4[rq_raddr_r];
+        q_mult_4  <= rq_m_store_4[rq_raddr_r];
+        q_shift_4 <= rq_r_store_4[rq_raddr_r];
+    end
+    assign rq_bias_q[4]  = q_bias_4;
+    assign rq_mult_q[4]  = q_mult_4;
+    assign rq_shift_q[4] = q_shift_4;
+    assign rq_rcl6_q[4]  = q_rcl6_4;
+    (* ramstyle = "M10K, no_rw_check" *) reg signed [31:0] bias_store_5 [0:G_MAX_C-1];
+    (* ramstyle = "M10K, no_rw_check" *) reg [31:0] rq_m_store_5 [0:G_MAX_C-1];
+    (* ramstyle = "M10K, no_rw_check" *) reg [7:0]  rq_r_store_5 [0:G_MAX_C-1];
+    (* ramstyle = "M10K, no_rw_check" *) reg signed [31:0] rcl6_store_5 [0:G_MAX_C-1];
+    always @(posedge clk) begin
+        if (cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C)
+            bias_store_5[cfg_addr[9:0]] <= cfg_wdata;
+    end
+    always @(posedge clk) begin
+        if (cfg_we && cfg_sel == 3'd2 && cfg_addr < G_MAX_C)
+            rq_m_store_5[cfg_addr[9:0]] <= cfg_wdata;
+    end
+    always @(posedge clk) begin
+        if (cfg_we && cfg_sel == 3'd3 && cfg_addr < G_MAX_C)
+            rq_r_store_5[cfg_addr[9:0]] <= cfg_wdata[7:0];
+    end
+    always @(posedge clk) begin
+        if (cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C)
+            rcl6_store_5[cfg_addr[9:0]] <= cfg_wdata;
+    end
+    reg signed [31:0] q_bias_5;
+    reg [31:0] q_mult_5;
+    reg [7:0]  q_shift_5;
+    reg signed [31:0] q_rcl6_5;
+    always @(posedge clk) begin
+        q_bias_5  <= bias_store_5[rq_raddr_r];
+        q_rcl6_5  <= rcl6_store_5[rq_raddr_r];
+        q_mult_5  <= rq_m_store_5[rq_raddr_r];
+        q_shift_5 <= rq_r_store_5[rq_raddr_r];
+    end
+    assign rq_bias_q[5]  = q_bias_5;
+    assign rq_mult_q[5]  = q_mult_5;
+    assign rq_shift_q[5] = q_shift_5;
+    assign rq_rcl6_q[5]  = q_rcl6_5;
+    (* ramstyle = "M10K, no_rw_check" *) reg signed [31:0] bias_store_6 [0:G_MAX_C-1];
+    (* ramstyle = "M10K, no_rw_check" *) reg [31:0] rq_m_store_6 [0:G_MAX_C-1];
+    (* ramstyle = "M10K, no_rw_check" *) reg [7:0]  rq_r_store_6 [0:G_MAX_C-1];
+    (* ramstyle = "M10K, no_rw_check" *) reg signed [31:0] rcl6_store_6 [0:G_MAX_C-1];
+    always @(posedge clk) begin
+        if (cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C)
+            bias_store_6[cfg_addr[9:0]] <= cfg_wdata;
+    end
+    always @(posedge clk) begin
+        if (cfg_we && cfg_sel == 3'd2 && cfg_addr < G_MAX_C)
+            rq_m_store_6[cfg_addr[9:0]] <= cfg_wdata;
+    end
+    always @(posedge clk) begin
+        if (cfg_we && cfg_sel == 3'd3 && cfg_addr < G_MAX_C)
+            rq_r_store_6[cfg_addr[9:0]] <= cfg_wdata[7:0];
+    end
+    always @(posedge clk) begin
+        if (cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C)
+            rcl6_store_6[cfg_addr[9:0]] <= cfg_wdata;
+    end
+    reg signed [31:0] q_bias_6;
+    reg [31:0] q_mult_6;
+    reg [7:0]  q_shift_6;
+    reg signed [31:0] q_rcl6_6;
+    always @(posedge clk) begin
+        q_bias_6  <= bias_store_6[rq_raddr_r];
+        q_rcl6_6  <= rcl6_store_6[rq_raddr_r];
+        q_mult_6  <= rq_m_store_6[rq_raddr_r];
+        q_shift_6 <= rq_r_store_6[rq_raddr_r];
+    end
+    assign rq_bias_q[6]  = q_bias_6;
+    assign rq_mult_q[6]  = q_mult_6;
+    assign rq_shift_q[6] = q_shift_6;
+    assign rq_rcl6_q[6]  = q_rcl6_6;
+    (* ramstyle = "M10K, no_rw_check" *) reg signed [31:0] bias_store_7 [0:G_MAX_C-1];
+    (* ramstyle = "M10K, no_rw_check" *) reg [31:0] rq_m_store_7 [0:G_MAX_C-1];
+    (* ramstyle = "M10K, no_rw_check" *) reg [7:0]  rq_r_store_7 [0:G_MAX_C-1];
+    (* ramstyle = "M10K, no_rw_check" *) reg signed [31:0] rcl6_store_7 [0:G_MAX_C-1];
+    always @(posedge clk) begin
+        if (cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C)
+            bias_store_7[cfg_addr[9:0]] <= cfg_wdata;
+    end
+    always @(posedge clk) begin
+        if (cfg_we && cfg_sel == 3'd2 && cfg_addr < G_MAX_C)
+            rq_m_store_7[cfg_addr[9:0]] <= cfg_wdata;
+    end
+    always @(posedge clk) begin
+        if (cfg_we && cfg_sel == 3'd3 && cfg_addr < G_MAX_C)
+            rq_r_store_7[cfg_addr[9:0]] <= cfg_wdata[7:0];
+    end
+    always @(posedge clk) begin
+        if (cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C)
+            rcl6_store_7[cfg_addr[9:0]] <= cfg_wdata;
+    end
+    reg signed [31:0] q_bias_7;
+    reg [31:0] q_mult_7;
+    reg [7:0]  q_shift_7;
+    reg signed [31:0] q_rcl6_7;
+    always @(posedge clk) begin
+        q_bias_7  <= bias_store_7[rq_raddr_r];
+        q_rcl6_7  <= rcl6_store_7[rq_raddr_r];
+        q_mult_7  <= rq_m_store_7[rq_raddr_r];
+        q_shift_7 <= rq_r_store_7[rq_raddr_r];
+    end
+    assign rq_bias_q[7]  = q_bias_7;
+    assign rq_mult_q[7]  = q_mult_7;
+    assign rq_shift_q[7] = q_shift_7;
+    assign rq_rcl6_q[7]  = q_rcl6_7;
 
     //-----------------------------------------------------------------------
     // 存储：行缓冲 lb（64-bit 字 = 8 lane，col 0..G_MAX_W-1）
