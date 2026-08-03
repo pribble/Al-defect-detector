@@ -8,7 +8,8 @@
 // 适配说明：
 //   - 内部例化 cnn_top_core（RTL 本体，tb_cnn_top 直接对拍它）
 //   - burstcount 固定 1（不做突发）；byteenable 全 1（32b/64b）
-//   - readdatavalid 组合 = read && !waitrequest（读完成拍有效，与 readdata 同拍）
+//   - 读完成 = read && readdatavalid（mm_bridge_sdram0 为流水读桥，数据由
+//     readdatavalid 延迟返回；waitrequest 仅表示命令是否被接受）
 //   - 41 个 HDL_PARAMETER 参数照单声明（QSys 例化传参），值忽略（RTL 常量已对齐）
 //=============================================================================
 
@@ -130,18 +131,22 @@ module cnn_top #(
         .pr_address    (pr_address),
         .pr_read       (pr_read),
         .pr_readdata   (param_avm_readdata),
+        .pr_readdatavalid(param_avm_readdatavalid),
         .pr_waitrequest(param_avm_waitrequest),
         .sr_address    (sr_address),
         .sr_read       (sr_read),
         .sr_readdata   (scale_avm_readdata),
+        .sr_readdatavalid(scale_avm_readdatavalid),
         .sr_waitrequest(scale_avm_waitrequest),
         .lr_address    (lr_address),
         .lr_read       (lr_read),
         .lr_readdata   (lr_readdata),
+        .lr_readdatavalid(load_avm_readdatavalid),
         .lr_waitrequest(lr_waitrequest),
         .wr_address    (wr_address),
         .wr_read       (wr_read),
         .wr_readdata   (wr_readdata),
+        .wr_readdatavalid(load_avm_readdatavalid),
         .wr_waitrequest(wr_waitrequest),
         .ow_address    (ow_address),
         .ow_write      (ow_write),

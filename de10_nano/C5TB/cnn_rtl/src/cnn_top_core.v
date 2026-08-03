@@ -34,24 +34,28 @@ module cnn_top_core (
     output reg  [31:0]         pr_address,
     output reg                 pr_read,
     input  wire [31:0]         pr_readdata,
+    input  wire                pr_readdatavalid,
     input  wire                pr_waitrequest,
 
     // ---- scale 读（32-bit）----
     output reg  [31:0]         sr_address,
     output reg                 sr_read,
     input  wire [31:0]         sr_readdata,
+    input  wire                sr_readdatavalid,
     input  wire                sr_waitrequest,
 
     // ---- 输入读（64-bit）----
     output reg  [31:0]         lr_address,
     output wire                lr_read,
     input  wire [63:0]         lr_readdata,
+    input  wire                lr_readdatavalid,
     input  wire                lr_waitrequest,
 
     // ---- 权重读（64-bit）----
     output reg  [31:0]         wr_address,
     output wire                wr_read,
     input  wire [63:0]         wr_readdata,
+    input  wire                wr_readdatavalid,
     input  wire                wr_waitrequest,
 
     // ---- 输出写（64-bit）----
@@ -198,11 +202,13 @@ module cnn_top_core (
     reg [15:0] dma_obeat;             // 输出：段内拍（≤out_seg_words）
     reg        input_done, weight_done, output_done;   // 本行块完成标志
 
-    // 主接口握手完成
-    wire pr_got = pr_read && !pr_waitrequest;
-    wire sr_got = sr_read && !sr_waitrequest;
-    wire lr_got = lr_read && !lr_waitrequest;
-    wire wr_got = wr_read && !wr_waitrequest;
+    // 主接口握手完成（读必须等 readdatavalid：mm_bridge_sdram0 是流水读桥，
+    // waitrequest 拉低只表示命令被接受，数据由 readdatavalid 延迟返回；
+    // 写完成 = write && !waitrequest，协议不变）
+    wire pr_got = pr_read && pr_readdatavalid;
+    wire sr_got = sr_read && sr_readdatavalid;
+    wire lr_got = lr_read && lr_readdatavalid;
+    wire wr_got = wr_read && wr_readdatavalid;
     wire ow_got = ow_write && !ow_waitrequest;
 
     // core 流映射
@@ -233,7 +239,9 @@ module cnn_top_core (
             case (state)
                 S_IDLE: begin
                     start_clear_pending <= 0;
-                    if (reg_start[0]) begin
+                    // 自清拍（start_clear_pending=1）不重启：reg_start 在本拍沿
+                    // 才被清 0，沿前判定会误触发新一轮执行
+                    if (reg_start[0] && !start_clear_pending) begin
                         rd_cnt <= 0;
                         pr_address <= reg_param;
                         sr_address <= reg_scale;

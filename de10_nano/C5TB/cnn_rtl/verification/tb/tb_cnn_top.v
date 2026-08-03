@@ -32,18 +32,22 @@ module tb_cnn_top;
     wire [31:0] pr_address;
     wire        pr_read;
     reg  [31:0] pr_readdata;
+    reg         pr_readdatavalid;
     reg         pr_waitrequest = 0;
     wire [31:0] sr_address;
     wire        sr_read;
     reg  [31:0] sr_readdata;
+    reg         sr_readdatavalid;
     reg         sr_waitrequest = 0;
     wire [31:0] lr_address;
     wire        lr_read;
     reg  [63:0] lr_readdata;
+    reg         lr_readdatavalid;
     reg         lr_waitrequest = 0;
     wire [31:0] wr_address;
     wire        wr_read;
     reg  [63:0] wr_readdata;
+    reg         wr_readdatavalid;
     reg         wr_waitrequest = 0;
     wire [31:0] ow_address;
     wire        ow_write;
@@ -56,13 +60,13 @@ module tb_cnn_top;
         .as_writedata(as_writedata), .as_readdata(as_readdata),
         .as_waitrequest(as_waitrequest),
         .pr_address(pr_address), .pr_read(pr_read), .pr_readdata(pr_readdata),
-        .pr_waitrequest(pr_waitrequest),
+        .pr_readdatavalid(pr_rdv), .pr_waitrequest(pr_waitrequest),
         .sr_address(sr_address), .sr_read(sr_read), .sr_readdata(sr_readdata),
-        .sr_waitrequest(sr_waitrequest),
+        .sr_readdatavalid(sr_rdv), .sr_waitrequest(sr_waitrequest),
         .lr_address(lr_address), .lr_read(lr_read), .lr_readdata(lr_readdata),
-        .lr_waitrequest(lr_waitrequest),
+        .lr_readdatavalid(lr_rdv), .lr_waitrequest(lr_waitrequest),
         .wr_address(wr_address), .wr_read(wr_read), .wr_readdata(wr_readdata),
-        .wr_waitrequest(wr_waitrequest),
+        .wr_readdatavalid(wr_rdv), .wr_waitrequest(wr_waitrequest),
         .ow_address(ow_address), .ow_write(ow_write), .ow_writedata(ow_writedata),
         .ow_waitrequest(ow_waitrequest)
     );
@@ -70,14 +74,156 @@ module tb_cnn_top;
     // DDR 内存
     reg [63:0] mem [0:MEM_WORDS-1];
 
-    // 组合读（32-bit 半字 / 64-bit 全字）
-    always @(*) begin
-        pr_readdata = pr_address[2] ? mem[pr_address >> 3][63:32]
-                                    : mem[pr_address >> 3][31:0];
-        sr_readdata = sr_address[2] ? mem[sr_address >> 3][63:32]
-                                    : mem[sr_address >> 3][31:0];
-        lr_readdata = mem[lr_address >> 3];
-        wr_readdata = mem[wr_address >> 3];
+    //=====================================================================
+    // 流水读模型：模拟 mm_bridge_sdram0（altera_avalon_mm_bridge，
+    // MAX_PENDING_RESPONSES=4）→ HPS DDR 的真实读行为——
+    // read 请求被接受（waitrequest=0）后，数据延迟 RD_LAT 拍由
+    // readdatavalid 返回（readdata 与 readdatavalid 同拍有效）。
+    // 单笔在途模型（请求拍锁存地址），足以暴露 read&&!waitrequest 误判。
+    //=====================================================================
+    localparam RD_LAT = 3;   // 模拟 DDR 流水读延迟（拍）
+
+    reg [31:0] pr_addr_q;  reg [7:0] pr_lat;   reg pr_rdv;
+    reg [31:0] sr_addr_q;  reg [7:0] sr_lat;   reg sr_rdv;
+    reg [31:0] lr_addr_q;  reg [7:0] lr_lat;   reg lr_rdv;
+    reg [31:0] wr_addr_q;  reg [7:0] wr_lat;   reg wr_rdv;
+
+    task read_model(reg read_sig, input [31:0] req_addr,
+                    inout [31:0] addr_q, inout [7:0] lat_cnt,
+                    inout reg rdv, input [63:0] mem_ref, ...);
+```
+不行，task 里不能方便地用 always。直接写 4 个 always 块。为了简洁，用 generate 或宏？直接展开写，清晰第一。
+
+pr/sr（32-bit）：
+```verilog
+always @(posedge clk) begin
+    if (!rst_n) begin
+        pr_addr_q <= 0; pr_lat <= 0; pr_rdv <= 0; pr_readdata <= 0;
+    end else if (pr_read && pr_lat == 0) begin
+        pr_addr_q <= pr_address;
+        pr_lat <= RD_LAT;
+        pr_rdv <= 0;
+    end else if (pr_lat != 0) begin
+        pr_lat <= pr_lat - 1;
+        if (pr_lat == 1) begin
+            pr_readdata <= pr_addr_q[2] ? mem[pr_addr_q >> 3][63:32]
+                                        : mem[pr_addr_q >> 3][31:0];
+            pr_rdv <= 1;
+        end else
+            pr_rdv <= 0;
+    end else
+        pr_rdv <= 0;
+end
+```
+注意 `pr_readdata` 是 reg 且现在是时序赋值 ✓（之前是组合 always @(*) 赋值，需删除旧的）。
+
+同样 sr、lr（64-bit）、wr（64-bit）。
+
+然后 dut 实例化加：
+```verilog
+.pr_readdata(pr_readdata), .pr_readdatavalid(pr_rdv), ...
+```
+等等——端口名。dut 的端口叫 pr_readdatavalid。tb 里我用 pr_rdv 变量接。实例化：
+```verilog
+.pr_readdatavalid(pr_rdv),
+.sr_readdatavalid(sr_rdv),
+.lr_readdatavalid(lr_rdv),
+.wr_readdatavalid(wr_rdv),
+```
+
+把旧的组合读 always 块替换成这 4 个 always。<｜end▁of▁thinking｜>
+
+<｜｜DSML｜｜tool_calls>
+<｜｜DSML｜｜invoke name="edit_file">
+<｜｜DSML｜｜parameter name="new_string" string="true">    // DDR 内存
+    reg [63:0] mem [0:MEM_WORDS-1];
+
+    //=====================================================================
+    // 流水读模型：模拟 mm_bridge_sdram0（altera_avalon_mm_bridge，
+    // MAX_PENDING_RESPONSES=4/PIPELINE_RESPONSE=1）→ HPS DDR 的真实读行为：
+    // read 请求被接受（waitrequest=0）后，数据延迟 RD_LAT 拍由
+    // readdatavalid 返回（readdata 与 readdatavalid 同拍有效）。
+    // 单笔在途模型（请求拍锁存地址）即可暴露 read&&!waitrequest 的误判。
+    //=====================================================================
+    localparam RD_LAT = 3;   // 模拟 DDR 流水读延迟（拍）
+
+    reg [31:0] pr_addr_q;  reg [7:0] pr_lat;   reg pr_rdv;
+    reg [31:0] sr_addr_q;  reg [7:0] sr_lat;   reg sr_rdv;
+    reg [31:0] lr_addr_q;  reg [7:0] lr_lat;   reg lr_rdv;
+    reg [31:0] wr_addr_q;  reg [7:0] wr_lat;   reg wr_rdv;
+
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            pr_addr_q <= 0; pr_lat <= 0; pr_rdv <= 0; pr_readdata <= 0;
+        end else if (pr_read && pr_lat == 0) begin
+            pr_addr_q <= pr_address;
+            pr_lat <= RD_LAT;
+            pr_rdv <= 0;
+        end else if (pr_lat != 0) begin
+            pr_lat <= pr_lat - 1;
+            if (pr_lat == 1) begin
+                pr_readdata <= pr_addr_q[2] ? mem[pr_addr_q >> 3][63:32]
+                                            : mem[pr_addr_q >> 3][31:0];
+                pr_rdv <= 1;
+            end else
+                pr_rdv <= 0;
+        end else
+            pr_rdv <= 0;
+    end
+
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            sr_addr_q <= 0; sr_lat <= 0; sr_rdv <= 0; sr_readdata <= 0;
+        end else if (sr_read && sr_lat == 0) begin
+            sr_addr_q <= sr_address;
+            sr_lat <= RD_LAT;
+            sr_rdv <= 0;
+        end else if (sr_lat != 0) begin
+            sr_lat <= sr_lat - 1;
+            if (sr_lat == 1) begin
+                sr_readdata <= sr_addr_q[2] ? mem[sr_addr_q >> 3][63:32]
+                                            : mem[sr_addr_q >> 3][31:0];
+                sr_rdv <= 1;
+            end else
+                sr_rdv <= 0;
+        end else
+            sr_rdv <= 0;
+    end
+
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            lr_addr_q <= 0; lr_lat <= 0; lr_rdv <= 0; lr_readdata <= 0;
+        end else if (lr_read && lr_lat == 0) begin
+            lr_addr_q <= lr_address;
+            lr_lat <= RD_LAT;
+            lr_rdv <= 0;
+        end else if (lr_lat != 0) begin
+            lr_lat <= lr_lat - 1;
+            if (lr_lat == 1) begin
+                lr_readdata <= mem[lr_addr_q >> 3];
+                lr_rdv <= 1;
+            end else
+                lr_rdv <= 0;
+        end else
+            lr_rdv <= 0;
+    end
+
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            wr_addr_q <= 0; wr_lat <= 0; wr_rdv <= 0; wr_readdata <= 0;
+        end else if (wr_read && wr_lat == 0) begin
+            wr_addr_q <= wr_address;
+            wr_lat <= RD_LAT;
+            wr_rdv <= 0;
+        end else if (wr_lat != 0) begin
+            wr_lat <= wr_lat - 1;
+            if (wr_lat == 1) begin
+                wr_readdata <= mem[wr_addr_q >> 3];
+                wr_rdv <= 1;
+            end else
+                wr_rdv <= 0;
+        end else
+            wr_rdv <= 0;
     end
 
     // 输出写
@@ -100,7 +246,7 @@ module tb_cnn_top;
     reg [31:0] sim_cycles = 0;
     always @(posedge clk) begin
         sim_cycles <= sim_cycles + 1;
-        if (sim_cycles == 32'd30000000) begin
+        if (sim_cycles == 32'd100000000) begin
             $display("TIMEOUT: state=%0d rb=%0d pr=%0d", dut.state, dut.rb,
                      dut.pr_read);
             $finish;
@@ -194,7 +340,7 @@ module tb_cnn_top;
             while (st[0]) begin
                 arm_read(8'h00, st);
                 wc = wc + 1;
-                if (wc > 200000) begin
+                if (wc > 5000000) begin
                     $display("  START poll timeout: state=%0d rb=%0d core_st=%0d",
                              dut.state, dut.rb, dut.core.state);
                     disable poll;
