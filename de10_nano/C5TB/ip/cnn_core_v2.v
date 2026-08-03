@@ -145,8 +145,8 @@ module cnn_core_v2 #(
             (* ramstyle = "M10K, no_rw_check" *) reg [7:0]  rq_r_store [0:G_MAX_C-1];
             (* ramstyle = "M10K, no_rw_check" *) reg signed [31:0] rcl6_store [0:G_MAX_C-1];
 
-            // 每 lane 读地址 = 基准 + rqg（10-bit 加常数，rqg ≤ 7 无进位 → 综合为拼接）
-            wire [9:0] rq_raddr = rq_raddr_base + rqg;
+            // 每 lane 读地址 = 基准 + rqg（10-bit + 3-bit 常数，rqg ≤ 7 无进位 → 综合为拼接）
+            wire [9:0] rq_raddr = rq_raddr_base + rqg[2:0];
 
             // cfg 写 8 份（同一 cfg_we 拍、同地址同数据）。
             // 写地址截断 [9:0]：cfg_addr 为 20-bit（顶层 S_RD_SCALE 派生，
