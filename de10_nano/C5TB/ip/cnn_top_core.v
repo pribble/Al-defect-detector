@@ -246,10 +246,11 @@ module cnn_top_core (
             lr_pending <= 0;
             wr_pending <= 0;
         end else begin
-            if (lr_readdatavalid)           lr_pending <= lr_pending - 3'd1;
-            if (lr_read && !lr_waitrequest) lr_pending <= lr_pending + 3'd1;
-            if (wr_readdatavalid)           wr_pending <= wr_pending - 3'd1;
-            if (wr_read && !wr_waitrequest) wr_pending <= wr_pending + 3'd1;
+            // 单语句合并 +/-：同拍"返回(-1)+新命令接受(+1)"净 0。
+            // 原两条 if 非阻塞后写覆盖前写，同拍时恒 +1 → pending 虚高
+            // （在途并发上限从 4 降到 3，纯性能损失，无正确性影响）
+            lr_pending <= lr_pending + (lr_read && !lr_waitrequest) - (lr_readdatavalid);
+            wr_pending <= wr_pending + (wr_read && !wr_waitrequest) - (wr_readdatavalid);
         end
     end
 
