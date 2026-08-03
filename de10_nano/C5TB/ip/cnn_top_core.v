@@ -292,8 +292,9 @@ module cnn_top_core (
                             pr_read <= 0;
                             rd_cnt <= 0;
                             state <= S_CFG;
-                        end else
+                        end else begin
                             rd_cnt <= rd_cnt + 1;
+                        end
                     end else if (!pr_pending) begin
                         // 无在途：发新请求（read 拉高，地址已稳定）
                         pr_read <= 1'b1;
@@ -333,8 +334,9 @@ module cnn_top_core (
                             sr_read <= 0;
                             rd_cnt <= 0;
                             state <= S_WR_CFG;
-                        end else
+                        end else begin
                             rd_cnt <= rd_cnt + 1;
+                        end
                     end else if (!sr_pending) begin
                         sr_read <= 1'b1;
                         sr_pending <= 1'b1;
@@ -422,8 +424,9 @@ module cnn_top_core (
                         dma_icb <= 0; dma_ibeat <= 0; dma_wbeat <= 0;
                         dma_ocb <= 0; dma_obeat <= 0;
                         state <= S_WR_BASE;
-                    end else
+                    end else begin
                         cfg_idx <= cfg_idx + 1;
+                    end
                 end
 
                 //---- 行块 base_row（每行块）----
