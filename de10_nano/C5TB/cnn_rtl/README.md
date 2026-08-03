@@ -115,6 +115,7 @@ cnn_rtl/
 
 **阶段 5 交付（Quartus 接入）**：`cnn_top.v`（QSys 适配层，端口与 `ip/cnn_top_hw.tcl` 一致）+ `cnn_top_core.v`（RTL 本体，tb 直接对拍）+ `cnn_core_v2.v` + `mac8x8_dsp.v`/`mac8x8_lut.v`（8×8 乘法器，lane 0-3 DSP / 4-7 LUT）；`ip/cnn_top_hw.tcl` 已把 `cnn_top.qxp` 黑盒引用改为 5 个 `.v`。接入步骤（Windows Quartus）：
 1. 把 `ip/` 下 5 个 `.v` 随工程提交（已复制）；Platform Designer 打开 `soc_system.qsys` → Generate HDL（顶层会例化 `cnn_top` = 新 wrapper）
+   **⚠ 编译实际引用 `soc_system/synthesis/submodules/` 下的副本**（`soc_system.qip:7110-7114` 指向 submodules 而非 `ip/`）——改了 `ip/` 的 `.v` 后**必须**重新 Generate QSys（或手动覆盖 submodules/ 同名文件），否则编译用的还是旧副本（现象：Flow Summary 数字与旧版逐位相同）
 2. 全量编译（Analysis & Synthesis → Fitter → Timing；黑盒换 RTL 不能增量）
 3. 关注 `clk_cnn`（50MHz）时序；board 验证：寄存器读写 → 单层对拍（软件侧跑一层，比对 DDR 输出）
 - 适配要点：burstcount 固定 1、byteenable 全 1；**读完成以 `readdatavalid` 为准**（2026-08 起，见调试历史；早期实现曾错误地以 `read && !waitrequest` 判完成）；lr/wr 共用 load master（黑盒无独立权重 master），多笔在途独立计数
@@ -151,6 +152,7 @@ cnn_rtl/
 | 7 | （编译警告暴露）**k=1 权重错位**：core `S_WEIGHT` 固定消费 72 拍/slice，而软件 k=1 slice 仅 64B=8 拍（`conv2d_weight_reorganize` block_size=8×k×8）→ 层 2 起权重流跨 slice 错位；`w_rb_beats_r` 固定 ×72 多算 9 倍；`dma_wbeat` 16-bit 在 `w_rb_beats>65535` 层（层 12 起）回绕 | `2eb5d8d`：`S_WEIGHT` 按 k 分支（k=1：8 拍、lane 主序跳 72B 到 t=0 组）；`w_rb_beats_r` 按 `p_k==1 ? 8 : 72`；`dma_wbeat` 加宽 20-bit；`mac_t` 末 tap 按 k（k=1 单 tap，避免读 wbuf 未初始化区 + MAC 快 9 倍）；tb 24 层均为 k=3（k=1 未覆盖） |
 | 8 | Flow Summary 异常：memory bits 仅 1.57Mbit（= lb+acc 恰好）、registers 119,480 超器件 55,856 LE、Logic utilization N/A（Fitter 无法完成）——即上次 A&S 后 ALM 超报错 | **requant 数组 M10K 推断失败**：写地址 `cfg_addr` 为 20-bit reg、读地址 `o_group*8+rqg` 为 32-bit 表达式，均超 RAM 深度位宽（1024 深 → 10-bit），Quartus 拒绝推断 → 数组展开成 LE/寄存器 | `c566453`：requant 写地址截断 `cfg_addr[9:0]`、读地址改 10-bit（`rq_raddr_base = {o_group[6:0],3'd0}` + 常数 `rqg`），值域 ≤1023 无损；修复后 memory bits 应 ≈2.7Mbit、寄存器 <25K |
 | 9 | （软硬件接口审查暴露）**param offset 被忽略**：`conv_op.cc` 每层累加分配 input/weight/output 偏移（字偏移×8 为字节），FPGA 却只用 `fpga_init` 固定的 `reg_ddrin/ddrw/ddrout` 基址——层 0 偏移恰好全 0 掩盖问题，**第 1 层起输入/权重/输出全部错位**（检测不出目标的根因之一） | `897a40f`：S_CFG 解析 `param_buf[0/1/3]`，`S_START` 与 `lr_round_reset`(conv 分支) 地址 = 基址 + `(offset<<3)` + 行块偏移；`scale_offset` 不需用（软件每层 memcpy 到同一 `cb_scale`） |
+| 10 | Flow Summary 依旧异常（memory bits 1,568,896、registers 119,711 逐位不变）——即使 `ip/` 与 `submodules/` 文件已是最新 | **写端口 case 多分支写多数组**：`case(cfg_sel)` 里 4 个 requant 数组共享一个写 always，Quartus 视为多写端口 RAM → M10K（单写端口）推断失败 → 32 个数组全展开（map.rpt 实测仅有 lb/acc 两个 altsyncram；`bias_store[1023][0]` 等逐 bit 展开） | `c5d0d6a`：写 always 拆成每数组独立（`if (cfg_we && cfg_sel==N && ...)`，去掉 case）；verilator 回归 16/16 层通过 |
 
 **遗留**：上板检测正确性待验证（897a40f 后）；性能（装载/MAC 未重叠、pr/sr 仍单笔在途）待优化；tb 覆盖仅小通道参数（见上节验证覆盖边界）。
 

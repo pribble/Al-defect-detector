@@ -151,17 +151,25 @@ module cnn_core_v2 #(
             // cfg 写 8 份（同一 cfg_we 拍、同地址同数据）。
             // 写地址截断 [9:0]：cfg_addr 为 20-bit（顶层 S_RD_SCALE 派生，
             // 值域 ≤ p_out_c-1 ≤ 1023），超宽写地址会阻止 Quartus 推断 M10K
-            // （1024 深 → 10-bit 地址），导致数组展开成 LE/寄存器（ALM 爆）
+            // （1024 深 → 10-bit 地址），导致数组展开成 LE/寄存器（ALM 爆）。
+            // 每个数组独立 always（写端口互不共享）：case 多分支写多数组会被
+            // Quartus 视为多写端口 RAM → 推断失败展开（实测 map.rpt 仅有
+            // lb/acc 两个 altsyncram，bias_store 等 32 个数组全展开）。
             always @(posedge clk) begin
-                if (cfg_we) begin
-                    case (cfg_sel)
-                        3'd1: if (cfg_addr < G_MAX_C) bias_store[cfg_addr[9:0]]  <= cfg_wdata;
-                        3'd2: if (cfg_addr < G_MAX_C) rq_m_store[cfg_addr[9:0]]  <= cfg_wdata;
-                        3'd3: if (cfg_addr < G_MAX_C) rq_r_store[cfg_addr[9:0]]  <= cfg_wdata[7:0];
-                        3'd4: if (cfg_addr < G_MAX_C) rcl6_store[cfg_addr[9:0]]  <= cfg_wdata;
-                        default: ;
-                    endcase
-                end
+                if (cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C)
+                    bias_store[cfg_addr[9:0]] <= cfg_wdata;
+            end
+            always @(posedge clk) begin
+                if (cfg_we && cfg_sel == 3'd2 && cfg_addr < G_MAX_C)
+                    rq_m_store[cfg_addr[9:0]] <= cfg_wdata;
+            end
+            always @(posedge clk) begin
+                if (cfg_we && cfg_sel == 3'd3 && cfg_addr < G_MAX_C)
+                    rq_r_store[cfg_addr[9:0]] <= cfg_wdata[7:0];
+            end
+            always @(posedge clk) begin
+                if (cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C)
+                    rcl6_store[cfg_addr[9:0]] <= cfg_wdata;
             end
 
             // 同步读（地址 = o_group*8 + rqg，10-bit 与 RAM 深度匹配）
