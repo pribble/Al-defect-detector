@@ -159,6 +159,7 @@ module cnn_top_core (
     reg signed [31:0] rb_tile_stride_r; // p_out_row_tile * p_stride（rb_base 增量）
     reg [31:0] w_cb_r;                  // p_out_cb * (type==4 ? 1 : p_in_cb)
     reg [31:0] w_rb_beats_r;            // w_cb_r * 72（每行块权重拍数）
+    reg [7:0]  lr_last_cb_r;            // lr 轮末 cb：CONV = p_in_cb-1，DW = 0（单 cb）
     reg [31:0] in_row_w8_r;             // p_in_w * 8
     reg signed [15:0] r0_in_r;          // max(rb_base_r, 0)，≤in_h
     reg signed [15:0] r1_in_r;          // min(rb_base_r + in_row_tile, in_h)
@@ -205,12 +206,14 @@ module cnn_top_core (
     // 被接受，数据由 readdatavalid 延迟返回）：
     //   每笔读 = read 拉高 → 命令接受（read && !waitrequest）→ 拉低 read
     //            → 等 readdatavalid（数据与 valid 同拍）→ 完成
-    //   pending 保证单笔在途：read 在命令被接受后必须拉低，否则流水桥每拍
-    //   重复接受同一地址的读命令，readdatavalid 与地址错位（旧实现 bug）。
-    //   阻塞式桥（waitrequest 保持到数据返回）同样兼容：read 保持，
-    //   readdatavalid 拍完成（pending 优先清 0）。
+    //   lr/wr 多笔在途（≤4，桥 MAX_PENDING_RESPONSES=4）：命令在 core 消费
+    //   节奏下提前发出（地址/计数在命令接受拍推进），数据按序返回。
+    //   流式化后每 o_group 轮重读输入，单笔在途每 8B 等一轮 DDR 延迟会
+    //   把 fpga_time 拖到秒级，必须多笔在途隐藏延迟。
+    //   pr/sr（param/scale 块读）保持单笔：pr 27 字开销可忽略，sr 后续优化。
     // 写完成 = write && !waitrequest，协议不变。
-    reg pr_pending, sr_pending, lr_pending, wr_pending;
+    reg pr_pending, sr_pending;
+    reg [2:0] lr_pending, wr_pending;   // 在途笔数 0..4
 
     wire pr_got = pr_pending && pr_readdatavalid;
     wire sr_got = sr_pending && sr_readdatavalid;
@@ -223,28 +226,30 @@ module cnn_top_core (
     assign core_i_data   = lr_readdata;
     assign core_iw_valid = wr_got;
     assign core_iw_data  = wr_readdata;
-    assign lr_read       = core_i_ready && !lr_pending;
-    assign wr_read       = core_ow_ready && !wr_pending;
+    // lr 轮边界（每 o_group 一轮：CONV = 全部 in_cb 个 cb；DW = 单 cb）
+    wire lr_round_end   = (dma_icb == lr_last_cb_r && dma_ibeat == in_seg_words_r - 1);
+    wire lr_round_reset = (lr_pending == 0 && lr_round_end && core_i_ready);
+    assign lr_read = core_i_ready && (lr_pending < 3'd4) && !lr_round_end && !lr_round_reset;
+    assign wr_read = core_ow_ready && (wr_pending < 3'd4) && (dma_wbeat < w_rb_beats_r);
     assign core_o_ready  = !output_done;   // core 输出不阻塞（与 v2 tb 的 o_ready=1 一致）
     assign ow_writedata  = core_o_data;
     assign ow_write      = core_o_valid;
 
-    // lr/wr 单笔在途控制：数据返回优先清 pending（阻塞桥下接受拍=数据拍，
-    // 必须由 readdatavalid 胜出）；命令接受拍置 pending（read 随之拉低）；
-    // core_start 拍（S_START 后仅 1 拍）做行块级重置——避免与主状态机
-    // 多 always 驱动同一 reg（Quartus 10028）
+    // lr/wr 多笔在途计数：数据返回 -1、命令接受 +1（同拍净 0）；
+    // core_done 拍清零（行块末丢弃在途残留，下个行块从头重读）——
+    // 清零并入本自动机，避免与主状态机多 always 驱动（Quartus 10028）
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             lr_pending <= 0;
             wr_pending <= 0;
-        end else if (core_start) begin
+        end else if (core_done) begin
             lr_pending <= 0;
             wr_pending <= 0;
         end else begin
-            if (lr_readdatavalid)      lr_pending <= 0;
-            else if (lr_read && !lr_waitrequest) lr_pending <= 1;
-            if (wr_readdatavalid)      wr_pending <= 0;
-            else if (wr_read && !wr_waitrequest) wr_pending <= 1;
+            if (lr_readdatavalid)           lr_pending <= lr_pending - 1;
+            if (lr_read && !lr_waitrequest) lr_pending <= lr_pending + 1;
+            if (wr_readdatavalid)           wr_pending <= wr_pending - 1;
+            if (wr_read && !wr_waitrequest) wr_pending <= wr_pending + 1;
         end
     end
 
@@ -370,6 +375,7 @@ module cnn_top_core (
                         rb_tile_stride_r <= p_out_row_tile * p_stride;
                         w_cb_r   <= p_out_cb * (p_type == 4 ? 1 : p_in_cb);
                         in_row_w8_r <= p_in_w << 3;
+                        lr_last_cb_r <= (p_type == 4) ? 8'd0 : (p_in_cb - 1);
                     end else begin
                         rd_cnt <= 0;
                         in_cb_stride_r  <= in_hw_r << 3;
@@ -460,12 +466,18 @@ module cnn_top_core (
                     state <= S_RUN;
                 end
 
-                //---- 运行：DMA 跟随 core 流（地址增量推进，无每拍乘法）----
+                //---- 运行：DMA 跟随 core 流（lr/wr 多笔在途，地址按命令接受拍推进）----
                 S_RUN: begin
                     core_start <= 0;
 
-                    if (lr_got &&
-                        !(dma_icb == p_in_cb - 1 && dma_ibeat == in_seg_words_r - 1)) begin
+                    // lr：命令接受拍推进地址/计数（cb 段尾跳转）；每 o_group 轮末
+                    // （数据全返回后 core 重新拉 i_ready）重置：CONV 回行块首重读
+                    // 全部 cb，DW 地址 +1 cb（每 o_group 只读自己的 cb）
+                    if (lr_round_reset) begin
+                        dma_icb <= 0; dma_ibeat <= 0;
+                        lr_address <= (p_type == 4) ? (lr_address + in_cb_stride_r)
+                                                    : (reg_ddrin + in_rb_base_r);
+                    end else if (lr_read && !lr_waitrequest) begin
                         if (dma_ibeat == in_seg_words_r - 1) begin
                             lr_address <= lr_address + in_cb_stride_r - in_seg_tail_r;
                             dma_ibeat <= 0;
@@ -475,9 +487,12 @@ module cnn_top_core (
                             dma_ibeat <= dma_ibeat + 1;
                         end
                     end
-                    if (wr_got && dma_wbeat < w_rb_beats_r - 1) begin
-                        dma_wbeat <= dma_wbeat + 1;
-                        wr_address <= wr_address + 8;
+                    // wr：命令接受拍推进（连续，无跳转；行块末 core_done 清 pending）
+                    if (wr_read && !wr_waitrequest) begin
+                        if (dma_wbeat < w_rb_beats_r - 1) begin
+                            dma_wbeat <= dma_wbeat + 1;
+                            wr_address <= wr_address + 8;
+                        end
                     end
                     if (ow_got &&
                         !(dma_ocb == p_out_cb - 1 && dma_obeat == out_seg_words_r - 1)) begin

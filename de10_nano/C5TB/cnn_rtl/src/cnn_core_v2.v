@@ -30,7 +30,7 @@
 //=============================================================================
 
 module cnn_core_v2 #(
-    parameter G_MAX_IN_CB  = 4,    // 最大输入通道块（模型 in_c<=32）
+    parameter G_MAX_IN_CB  = 1,    // 输入通道块流式驻留（每 o_group 轮重读 1 cb）
     parameter G_MAX_OUT_CB = 4,    // 最大输出通道块（模型 out_c<=32）
     parameter G_MAX_IN_ROWS= 41,   // 最大输入行块高度（模型 max in_tile=39）
     parameter G_MAX_OROWS  = 20,   // 最大输出行块高度（模型 max tile=19）
@@ -187,12 +187,12 @@ module cnn_core_v2 #(
     // 寄存器堆 + 读端口 mux，A&S 内存爆到 40GB+；单维数组 + 常量乘法拼接
     // 地址是官方推荐的可靠推断写法，功能/时序完全不变）。
     //-----------------------------------------------------------------------
-    (* ramstyle = "M10K, no_rw_check" *) reg [63:0] lb [0:G_MAX_IN_CB*G_MAX_IN_ROWS*G_MAX_W-1];
+    (* ramstyle = "M10K, no_rw_check" *) reg [63:0] lb [0:G_MAX_IN_ROWS*G_MAX_W-1];
     (* ramstyle = "M10K, no_rw_check" *) reg signed [255:0] acc [0:G_MAX_OROWS*G_MAX_OW-1];
 
     // 单维索引拼接（常量乘法综合时折叠成移位/加法，不产生逻辑）
-    wire [31:0] lb_waddr = load_cb*G_MAX_IN_ROWS*G_MAX_W + load_row*G_MAX_W + load_col;
-    wire [31:0] lb_raddr = mac_cb*G_MAX_IN_ROWS*G_MAX_W + mac_r*G_MAX_W + mac_c_cl;
+    wire [31:0] lb_waddr = load_row*G_MAX_W + load_col;
+    wire [31:0] lb_raddr = mac_r*G_MAX_W + mac_c_cl;
     wire [31:0] acc_waddr_clr = rq_row*G_MAX_OW + rq_col;
     wire [31:0] acc_waddr_mac = mac_row*G_MAX_OW + mac_col;
     wire [31:0] acc_raddr_clr = rq_row*G_MAX_OW + rq_col;
@@ -265,7 +265,8 @@ module cnn_core_v2 #(
     localparam S_DONE     = 4'd10;
 
     reg [3:0] state;
-    reg [31:0] load_cb, load_row, load_col;
+    reg [31:0] load_row, load_col;
+    reg        load_first;        // 本轮装载是 o_group 首 cb（完成后需清 acc）
     reg [31:0] wf_cnt;
     reg [31:0] o_group, i_group;
     reg [31:0] mac_row, mac_col, mac_t;
@@ -283,7 +284,8 @@ module cnn_core_v2 #(
             state <= S_IDLE;
             o_done <= 1'b0;
             o_valid <= 1'b0;
-            load_cb <= 0; load_row <= 0; load_col <= 0;
+            load_row <= 0; load_col <= 0;
+            load_first <= 1'b1;
             wf_cnt <= 0; o_group <= 0; i_group <= 0;
             mac_row <= 0; mac_col <= 0; mac_t <= 0;
             rq_row <= 0; rq_col <= 0;
@@ -298,13 +300,14 @@ module cnn_core_v2 #(
                 S_IDLE: begin
                     o_done <= 1'b0;
                     if (start) begin
-                        load_cb <= 0; load_row <= 0; load_col <= 0;
+                        load_row <= 0; load_col <= 0;
+            load_first <= 1'b1;
                         o_group <= 0; i_group <= 0;
                         state <= S_LOAD;
                     end
                 end
 
-                //---- 装载输入行块（NHWC8 块序：cb 外层，行、列内层）----
+                //---- 装载输入行块（流式：每轮 1 个通道块，cb 选择由顶层 DMA 轮控制）----
                 S_LOAD: begin
                     if (load_row_valid) begin
                         if (i_valid) begin
@@ -313,13 +316,14 @@ module cnn_core_v2 #(
                                 load_col <= 0;
                                 if (load_row == in_row_tile_reg - 1) begin
                                     load_row <= 0;
-                                    if (load_cb == in_cb_reg - 1) begin
-                                        load_cb <= 0;
-                                        o_group <= 0;
+                                    // 1 cb 完成：o_group 首 cb（load_first）→ 清 acc 开新组；
+                                    // i_group 循环 → 直接装权重 slice（acc 保留部分和）
+                                    if (load_first) begin
+                                        load_first <= 0;
                                         rq_row <= 0; rq_col <= 0;
                                         state <= S_ACC_CLR;
                                     end else
-                                        load_cb <= load_cb + 1;
+                                        state <= S_WEIGHT;
                                 end else
                                     load_row <= load_row + 1;
                             end else
@@ -332,13 +336,12 @@ module cnn_core_v2 #(
                             load_col <= 0;
                             if (load_row == in_row_tile_reg - 1) begin
                                 load_row <= 0;
-                                if (load_cb == in_cb_reg - 1) begin
-                                    load_cb <= 0;
-                                    o_group <= 0;
+                                if (load_first) begin
+                                    load_first <= 0;
                                     rq_row <= 0; rq_col <= 0;
                                     state <= S_ACC_CLR;
                                 end else
-                                    load_cb <= load_cb + 1;
+                                    state <= S_WEIGHT;
                             end else
                                 load_row <= load_row + 1;
                         end else
@@ -445,7 +448,7 @@ module cnn_core_v2 #(
                                     state <= S_REQ_ADDR;
                                 end else begin
                                     i_group <= i_group + 1;
-                                    state <= S_WEIGHT;
+                                    state <= S_LOAD;   // 流式：重装下一输入 cb（lb 单块驻留）
                                 end
                             end else begin
                                 mac_row <= mac_row + 1;
@@ -492,7 +495,8 @@ module cnn_core_v2 #(
                                 end else begin
                                     o_group <= o_group + 1;
                                     rq_row <= 0; rq_col <= 0;
-                                    state <= S_ACC_CLR;
+                                    load_first <= 1'b1;
+                                    state <= S_LOAD;   // 流式：重装新 o_group 的输入 cb
                                 end
                             end else begin
                                 rq_row <= rq_row + 1;
@@ -526,7 +530,7 @@ module cnn_core_v2 #(
     //-----------------------------------------------------------------------
     // 窗口 tap 位置：k_reg ∈ {1,3}（model_profile 实测）、mac_t ∈ [0,8]，
     // 查表替代 32-bit 除法器（lpm_divide，组合链超长导致 setup 违例 -82ns）
-    wire [31:0] mac_cb   = (type_reg == 4) ? o_group : i_group;
+    // （lb 已流式单 cb 驻留，不再有 mac_cb 通道块维度）
     reg [3:0] mac_kh, mac_kw;
     always @(*) begin
         if (k_reg == 3) begin
