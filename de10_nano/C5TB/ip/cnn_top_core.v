@@ -202,13 +202,21 @@ module cnn_top_core (
     reg [15:0] dma_obeat;             // 输出：段内拍（≤out_seg_words）
     reg        input_done, weight_done, output_done;   // 本行块完成标志
 
-    // 主接口握手完成（读必须等 readdatavalid：mm_bridge_sdram0 是流水读桥，
-    // waitrequest 拉低只表示命令被接受，数据由 readdatavalid 延迟返回；
-    // 写完成 = write && !waitrequest，协议不变）
-    wire pr_got = pr_read && pr_readdatavalid;
-    wire sr_got = sr_read && sr_readdatavalid;
-    wire lr_got = lr_read && lr_readdatavalid;
-    wire wr_got = wr_read && wr_readdatavalid;
+    // 主接口读握手（mm_bridge_sdram0 为流水读桥：waitrequest 拉低仅表示命令
+    // 被接受，数据由 readdatavalid 延迟返回）：
+    //   每笔读 = read 拉高 → 命令接受（read && !waitrequest）→ 拉低 read
+    //            → 等 readdatavalid（数据与 valid 同拍）→ 完成
+    //   pending 保证单笔在途：read 在命令被接受后必须拉低，否则流水桥每拍
+    //   重复接受同一地址的读命令，readdatavalid 与地址错位（旧实现 bug）。
+    //   阻塞式桥（waitrequest 保持到数据返回）同样兼容：read 保持，
+    //   readdatavalid 拍完成（pending 优先清 0）。
+    // 写完成 = write && !waitrequest，协议不变。
+    reg pr_pending, sr_pending, lr_pending, wr_pending;
+
+    wire pr_got = pr_pending && pr_readdatavalid;
+    wire sr_got = sr_pending && sr_readdatavalid;
+    wire lr_got = lr_readdatavalid;
+    wire wr_got = wr_readdatavalid;
     wire ow_got = ow_write && !ow_waitrequest;
 
     // core 流映射
@@ -216,11 +224,25 @@ module cnn_top_core (
     assign core_i_data   = lr_readdata;
     assign core_iw_valid = wr_got;
     assign core_iw_data  = wr_readdata;
-    assign lr_read       = core_i_ready;   // 组合：无 1 拍残留（边界精确）
-    assign wr_read       = core_ow_ready;
+    assign lr_read       = core_i_ready && !lr_pending;
+    assign wr_read       = core_ow_ready && !wr_pending;
     assign core_o_ready  = !output_done;   // core 输出不阻塞（与 v2 tb 的 o_ready=1 一致）
     assign ow_writedata  = core_o_data;
     assign ow_write      = core_o_valid;
+
+    // lr/wr 单笔在途控制：数据返回优先清 pending（阻塞桥下接受拍=数据拍，
+    // 必须由 readdatavalid 胜出）；命令接受拍置 pending（read 随之拉低）
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            lr_pending <= 0;
+            wr_pending <= 0;
+        end else begin
+            if (lr_readdatavalid)      lr_pending <= 0;
+            else if (lr_read && !lr_waitrequest) lr_pending <= 1;
+            if (wr_readdatavalid)      wr_pending <= 0;
+            else if (wr_read && !wr_waitrequest) wr_pending <= 1;
+        end
+    end
 
     //-----------------------------------------------------------------------
     // 主状态机
@@ -230,6 +252,7 @@ module cnn_top_core (
             state <= S_IDLE;
             rb <= 0; rd_cnt <= 0; cfg_idx <= 0;
             pr_read <= 0; sr_read <= 0;
+            pr_pending <= 0; sr_pending <= 0;
             core_cfg_we <= 0; core_start <= 0;
             start_clear_pending <= 0;
             dma_icb <= 0; dma_ibeat <= 0; dma_wbeat <= 0;
@@ -245,37 +268,50 @@ module cnn_top_core (
                         rd_cnt <= 0;
                         pr_address <= reg_param;
                         sr_address <= reg_scale;
+                        pr_pending <= 0; sr_pending <= 0;
                         state <= S_RD_PARAM;
                     end
                 end
 
-                //---- 读 param 块（27 字）----
+                //---- 读 param 块（27 字）：每笔 read 拉高 → 接受后拉低 → 等 readdatavalid ----
                 S_RD_PARAM: begin
-                    pr_read <= 1'b1;
                     if (pr_got) begin
                         param_buf[rd_cnt] <= pr_readdata;
                         pr_address <= pr_address + 4;
+                        pr_pending <= 0;
                         if (rd_cnt == 26) begin
                             pr_read <= 0;
                             rd_cnt <= 0;
                             state <= S_CFG;
                         end else
                             rd_cnt <= rd_cnt + 1;
+                    end else if (!pr_pending) begin
+                        // 无在途：发新请求（read 拉高，地址已稳定）
+                        pr_read <= 1'b1;
+                        pr_pending <= 1'b1;
+                    end else if (pr_read && !pr_waitrequest) begin
+                        // 命令被桥接受：拉低 read，只发这一笔，等 readdatavalid
+                        pr_read <= 1'b0;
                     end
                 end
 
                 //---- 读 scale（4×out_c 字）----
                 S_RD_SCALE: begin
-                    sr_read <= 1'b1;
                     if (sr_got) begin
                         req_buf[rd_cnt] <= sr_readdata;
                         sr_address <= sr_address + 4;
+                        sr_pending <= 0;
                         if (rd_cnt == 4 * p_out_c - 1) begin
                             sr_read <= 0;
                             rd_cnt <= 0;
                             state <= S_WR_CFG;
                         end else
                             rd_cnt <= rd_cnt + 1;
+                    end else if (!sr_pending) begin
+                        sr_read <= 1'b1;
+                        sr_pending <= 1'b1;
+                    end else if (sr_read && !sr_waitrequest) begin
+                        sr_read <= 1'b0;
                     end
                 end
 
@@ -415,6 +451,7 @@ module cnn_top_core (
                     lr_address <= reg_ddrin + in_rb_base_r;
                     wr_address <= reg_ddrw;
                     ow_address <= reg_ddrout + out_rb_base_r;
+                    lr_pending <= 0; wr_pending <= 0;   // 行块级在途重置
                     core_start <= 1'b1;
                     state <= S_RUN;
                 end
