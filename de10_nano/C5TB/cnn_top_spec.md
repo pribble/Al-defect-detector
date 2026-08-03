@@ -20,7 +20,7 @@
 - 软件侧协议完整可读：`ssd_detection/intelfpga.cc`（寄存器读写、DMA、重排）、
   `ssd_detection/include/intelfpga.h`（指令结构）、
   `ssd_detection/paddle_lite/lite/kernels/intel_fpga/bridges/conv_op.cc`（参数/scale 填充）。
-- 现状：复现 RTL 已上板运行（`test.sh` 全链路）；检测正确性于 2026-08 流式化改造后待最终验证。
+- 现状：复现 RTL 已上板运行（`test.sh` 全链路）；检测正确性于 2026-08 流式化 + param 偏移 + M10K 容量系列修复后待最终验证（调试历史见 `cnn_rtl/README.md`）。
 
 ## 2. 顶层接口
 
@@ -51,7 +51,9 @@
 ### 2.3 四个 Avalon 主接口（自带头 DMA，直读 DDR）
 
 全部连到 `mm_bridge_sdram0.s0`（→ `hps_0.f2h_sdram0_data` → DDR），
-`burstcount` 5-bit（最大 32 拍），`readWaitTime=1`。
+`burstcount` 5-bit **恒 1**（单拍读写，无 burst 传输），`readWaitTime=1`。
+**load master 由输入/权重读分时复用**（`lr_read`/`wr_read` 不同时拉高，
+`load_avm_readdata` 同时回灌两路；黑盒无独立权重 master）。
 
 | 接口 | 数据宽度 | 方向 | 用途 |
 |---|---|---|---|
@@ -198,17 +200,21 @@ scale[3·out_c..4·out_c)  = rcl6      = round_half_away(6·os/(ws·is))     // 
 
 ## 7. 量化/数值语义
 
-推导出的单层计算（int8 输入×int8 权重 → int8 输出）：
+**2026 定点化后**（软件预转，RTL 无浮点），单层计算（int8 输入×int8 权重 → int8 输出）：
 
 ```
-acc_int32 = Σ (input_int8 × weight_int8)          // 64 MAC/周期，kernel=3×3
-out_fp    = acc_int32 · weight_scale · input_scale / output_scale + bias / output_scale
-out_int8  = saturate(round(out_fp))               // 可选 relu/relu6/leakyrelu 后
+acc_int32 = Σ (input_int8 × weight_int8)            // 64 MAC/周期，kernel=3×3
+v_biased  = acc_int32 + bias_int                     // bias_int = round(b/(ws·is))，raw 域
+v_rq64    = v_biased × mult                          // mult = round((ws·is/os)·2^30)
+out_int8  = saturate((v_rq64 + 2^(shift-1)) >> shift)  // shift=30，round-half-up + 算术右移
+           （可选 relu / relu6（上限 rcl6）/ leakyrelu 在乘加后施加）
 ```
 
-- `input_scale`/`output_scale` 来自模型（`param.input_scale` / `param.output_scale`）。
-- relu6 上限 6.0 由参数 `SCALE_6`（位模式 0x40C00000）提供。
-- 舍入/饱和的具体实现细节（round 模式、乘除采用浮点还是定点）未公开，见 §11。
+- `ws`/`b` 为模型 per-channel weight_scale/bias，`is`/`os` 为 input/output scale；
+  mult/bias_int/shift/rcl6 由 `conv_op.cc` 预转（§6.5），公式与舍入
+  （away-from-zero）对齐 `cnn_rtl/tools/ref_int8.py`（500 轮随机验证一致）。
+- RTL 实现：`S_REQ_MUL` 加 bias+act → `S_REQ_MUL2` 32×32 乘 → `S_REQ_OUT`
+  round+算术右移+饱和 [-128,127]。
 
 ## 8. 执行时序与分块
 
@@ -288,7 +294,7 @@ out_int8  = saturate(round(out_fp))               // 可选 relu/relu6/leakyrelu
 |---|---|---|---|
 | 1 | ~~int32 累加的舍入/饱和方式、relu6 对 `SCALE_6` 的具体用法~~ | **已解决**：软件定点预转（§6.5），舍入 away-from-zero 与 `ref_int8.quantize_params` 500 轮随机验证一致；RTL 无浮点 | `ref_int8.py` + 上板对拍 |
 | 2 | 内部流水级数/频率未知 | 仅性能差异，不影响功能 | 复现后调 `clk_cnn` 与阵列规模 |
-| 3 | `param` 结构体尾部字段（`weight_size` 等）硬件是否读取 | 指令块布局一致性 | 按结构体全量搬运即可保守兼容 |
+| 3 | ~~`param` 结构体 offset 字段（input/weight/output）硬件是否读取~~ | **已解决**：2026-08 起 FPGA 解析 `param[0/1/3]` 并加入 DDR 基址（`897a40f`，此前忽略导致第 1 层起读写错位）；尾部 `weight_size` 等仍不读，无影响 | `conv_op.cc` + 上板对拍 |
 | 4 | dilation>1、stride=3 等边界参数是否被硬件支持 | SSD 模型只用 dilation=1/stride∈{1,2}，首版可裁剪 | 对拍时覆盖全部 47 层参数组合 |
 | 5 | ~~`output_row_tile` 由软件按缓冲容量计算，硬件假定与参数一致~~ | **已解决**：§8.1 对 47 层实测逐层复算一致 | 设备 `[FPGA-DUMP]` 实测 |
 

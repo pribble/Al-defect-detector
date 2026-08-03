@@ -22,8 +22,8 @@ SDMMC、USB、UART）接到 QSys 生成的 `soc_system` 系统上，并在其中
 | `cnn_top_spec.md` | **cnn_top 黑盒规格书**：接口/寄存器/指令格式/数据布局/数值语义，纯 RTL 复现 `cnn_top` 的依据 |
 | `cnn_rtl/` | **cnn_top 开源复现工作区**：上游卷积数据通路（MIT）+ 差距矩阵与分阶段改造路线图 |
 | `soc_system_board_info.xml` / `hps_common_board_info.xml` | 生成设备树时使用的板级信息（供 sopc2dts） |
-| `ip/cnn_top_hw.tcl` | 自定义 CNN 加速器 IP 硬件描述（引用 `cnn_top.v`/`cnn_top_core.v`/`cnn_core_v2.v` 三个 RTL 文件，已替换旧黑盒归档） |
-| `ip/cnn_top.v` 等三个 `.v` | cnn_top 的 RTL 实现（QSys 适配层 + 核心 + 卷积执行器，见 `cnn_rtl/README.md`） |
+| `ip/cnn_top_hw.tcl` | 自定义 CNN 加速器 IP 硬件描述（引用 `cnn_top.v`/`cnn_top_core.v`/`cnn_core_v2.v`/`mac8x8_dsp.v`/`mac8x8_lut.v` 五个 RTL 文件，已替换旧黑盒归档） |
+| `ip/cnn_top.v` 等五个 `.v` | cnn_top 的 RTL 实现（QSys 适配层 + 核心 + 卷积执行器 + 8×8 乘法器，见 `cnn_rtl/README.md`） |
 | `ip/pll/` | PLL IP：`FPGA_CLK1_50`（50 MHz）分出 `fpga_clk_50` / `fpga_clk_cnn` / `fpga_clk_stp` 三路时钟 |
 | `tools/` | 构建辅助脚本与**已提交的生成产物**（见下） |
 
@@ -60,7 +60,7 @@ QSys 系统中 `cnn_top_0` 的关键参数（`soc_system.qsys`）：`IMAGE_MAX_W
 1. Quartus Prime（23.1 Lite Edition；工程创建于 18.1 Standard，SDC 为 18.1 生成，兼容正常）打开 C5TB_top.qpf
 2. 全编译（Analysis & Synthesis → Fitter → Assembler）
    —— 顶层 = C5TB_top.v + soc_system/synthesis/soc_system.qip（QSys 生成，目录被 gitignore）
-        + ip/pll/pll_inst.qip + ip/cnn_top（cnn_top_hw.tcl + 3 个 .v）
+        + ip/pll/pll_inst.qip + ip/cnn_top（cnn_top_hw.tcl + 5 个 .v）
    —— 产物：output_files/C5TB_top.sof
 3. 运行 tools/sof_to_rbf.bat   → tools/soc_system.rbf（FPGA 配置比特流）
 4. 运行 tools/gen_dtb.bat      → tools/soc_system.dts / soc_system.dtb（设备树）
