@@ -97,9 +97,9 @@ cnn_rtl/
 
 | 阶段 | 交付 | 验证 |
 |---|---|---|
-| 1 ✅ | `src/conv_layer_s8.v`（定点卷积数据通路，Verilog，阶段 1 中间产物） | `verification/sim/run_conv_s8.sh`（iverilog/verilator）全绿 |
+| 1 ✅ | `src/conv_layer_s8.v`（定点卷积数据通路，Verilog，阶段 1 中间产物）——**2026-08 清理删除**（历史见 git） | `verification/sim/run_conv_s8.sh`（iverilog/verilator）全绿 |
 | 2 ✅ | `tools/ref_cnn_top.py`（numpy 行为模型，裁判） | 80 随机层 + 真实 47 层 ALL PASS |
-| 3 ✅ | `src/cnn_core.v`（参数驱动单层执行器，k=3 子集） | `verification/sim/run_cnn_core.sh` 24 层 bit-exact |
+| 3 ✅ | `src/cnn_core.v`（参数驱动单层执行器，k=3 子集）——**2026-08 清理删除**（历史见 git） | `verification/sim/run_cnn_core.sh` 24 层 bit-exact |
 | 4 ✅ | `src/cnn_core_v2.v`（**NHWC8 块序流**：slice 权重、行块 acc 缓冲、单行块执行供 DMA 调度） | `verification/sim/run_cnn_core_v2.sh` 24 层 bit-exact（conv/dw × s1/s2 × act0/1/2 × row_block≥1） |
 | 5 ✅ | `cnn_top.v` Avalon 顶层（从接口 + 6 寄存器 + param/scale 解析 + DMA + 行块调度）；requant 定点参数**软件侧预转**（`conv_op.cc` scale 区每通道 4 字：mult/bias_int/shift/rcl6，RTL 无浮点） | 端到端 tb：**6/6 层 bit-exact**（单块/多块/多组、38 高长层） |
 | 6 ✅ | depthwise（type=4）：权重对角化 + MAC 复用 | v2 回归覆盖 dw 层 |
@@ -108,6 +108,10 @@ cnn_rtl/
 > **验证覆盖边界（重要）**：tb 各层向量均为**小通道参数**（`in_c`/`out_c` ≤ 32，见
 > `verification/v2/layer_*/cfg.hex`），**大通道（in_c/out_c 最大 1024）未经仿真覆盖**，
 > 其正确性依赖上板验证与下述 2026-08 容量修复。
+>
+> **2026-08 清理**：阶段 1/3 的中间产物（`conv_layer_s8.v`/`cnn_core.v` 及其 tb、
+> run 脚本、向量生成器）已被 v2/top 取代，随 `STAGE1_plan.md` 一并删除，历史见 git；
+> `tools/ref_int8.py` 保留（`conv_op.cc` 定点公式的对齐依据）。
 
 **阶段 5 交付（Quartus 接入）**：`cnn_top.v`（QSys 适配层，端口与 `ip/cnn_top_hw.tcl` 一致）+ `cnn_top_core.v`（RTL 本体，tb 直接对拍）+ `cnn_core_v2.v`；`ip/cnn_top_hw.tcl` 已把 `cnn_top.qxp` 黑盒引用改为 3 个 `.v`。接入步骤（Windows Quartus）：
 1. 把 `ip/` 下 3 个 `.v` 随工程提交（已复制）；Platform Designer 打开 `soc_system.qsys` → Generate HDL（顶层会例化 `cnn_top` = 新 wrapper）
