@@ -133,6 +133,9 @@ module cnn_core_v2 #(
     wire [31:0]        rq_mult_q  [0:7];
     wire [7:0]         rq_shift_q [0:7];
     wire signed [31:0] rq_rcl6_q  [0:7];
+    // requant 读地址基准 = o_group*8（10-bit，o_group ≤ 127；位宽必须与
+    // RAM 深度匹配，超宽地址表达式会阻止 M10K 推断——见 g_rq_param）
+    wire [9:0] rq_raddr_base = {o_group[6:0], 3'd0};
 
     genvar rqg;
     generate
@@ -142,33 +145,39 @@ module cnn_core_v2 #(
             (* ramstyle = "M10K, no_rw_check" *) reg [7:0]  rq_r_store [0:G_MAX_C-1];
             (* ramstyle = "M10K, no_rw_check" *) reg signed [31:0] rcl6_store [0:G_MAX_C-1];
 
-            // cfg 写 8 份（同一 cfg_we 拍、同地址同数据）
+            // 每 lane 读地址 = 基准 + rqg（10-bit 加常数，rqg ≤ 7 无进位 → 综合为拼接）
+            wire [9:0] rq_raddr = rq_raddr_base + rqg;
+
+            // cfg 写 8 份（同一 cfg_we 拍、同地址同数据）。
+            // 写地址截断 [9:0]：cfg_addr 为 20-bit（顶层 S_RD_SCALE 派生，
+            // 值域 ≤ p_out_c-1 ≤ 1023），超宽写地址会阻止 Quartus 推断 M10K
+            // （1024 深 → 10-bit 地址），导致数组展开成 LE/寄存器（ALM 爆）
             always @(posedge clk) begin
                 if (cfg_we) begin
                     case (cfg_sel)
-                        3'd1: if (cfg_addr < G_MAX_C) bias_store[cfg_addr]  <= cfg_wdata;
-                        3'd2: if (cfg_addr < G_MAX_C) rq_m_store[cfg_addr]  <= cfg_wdata;
-                        3'd3: if (cfg_addr < G_MAX_C) rq_r_store[cfg_addr]  <= cfg_wdata[7:0];
-                        3'd4: if (cfg_addr < G_MAX_C) rcl6_store[cfg_addr]  <= cfg_wdata;
+                        3'd1: if (cfg_addr < G_MAX_C) bias_store[cfg_addr[9:0]]  <= cfg_wdata;
+                        3'd2: if (cfg_addr < G_MAX_C) rq_m_store[cfg_addr[9:0]]  <= cfg_wdata;
+                        3'd3: if (cfg_addr < G_MAX_C) rq_r_store[cfg_addr[9:0]]  <= cfg_wdata[7:0];
+                        3'd4: if (cfg_addr < G_MAX_C) rcl6_store[cfg_addr[9:0]]  <= cfg_wdata;
                         default: ;
                     endcase
                 end
             end
 
-            // 同步读（地址 = o_group*8 + rqg，o_group ≤ 127 → [6:0]，乘 8 综合折叠成移位）
+            // 同步读（地址 = o_group*8 + rqg，10-bit 与 RAM 深度匹配）
             reg signed [31:0] q_bias;
             reg [31:0] q_mult;
             reg [7:0]  q_shift;
             reg signed [31:0] q_rcl6;
             always @(posedge clk) begin
                 if (state == S_REQ_ADDR) begin
-                    q_bias <= bias_store[o_group[6:0]*8 + rqg];
-                    q_rcl6 <= rcl6_store[o_group[6:0]*8 + rqg];
+                    q_bias <= bias_store[rq_raddr];
+                    q_rcl6 <= rcl6_store[rq_raddr];
                 end
                 if (state == S_REQ_MUL)
-                    q_mult <= rq_m_store[o_group[6:0]*8 + rqg];
+                    q_mult <= rq_m_store[rq_raddr];
                 if (state == S_REQ_MUL2)
-                    q_shift <= rq_r_store[o_group[6:0]*8 + rqg];
+                    q_shift <= rq_r_store[rq_raddr];
             end
 
             assign rq_bias_q[rqg]  = q_bias;
