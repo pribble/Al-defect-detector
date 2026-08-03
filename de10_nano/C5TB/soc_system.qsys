@@ -458,45 +458,12 @@
  <module name="cnn_top_0" kind="cnn_top" version="2.0" enabled="1">
   <parameter name="CFG_M_AXI_ADDR_WIDTH" value="32" />
   <parameter name="CFG_M_AXI_DATA_WIDTH" value="32" />
-  <parameter name="CFG_PARAM_WIDTH" value="32" />
-  <parameter name="CNN_RELU_WIDTH" value="3" />
-  <parameter name="CNN_STRIDE_WIDTH" value="2" />
-  <parameter name="CNN_TYPE_WIDTH" value="3" />
-  <parameter name="IMAGE_MAX_W" value="302" />
-  <parameter name="INPUT_CHANNEL_TILE" value="8" />
-  <parameter name="INPUT_PAD_WIDTH" value="2" />
-  <parameter name="INPUT_RAM_DATA_WIDTH" value="64" />
-  <parameter name="INPUT_ROW_TILE" value="11" />
-  <parameter name="INPUT_WIDTH" value="8" />
-  <parameter name="IN_C_WIDTH" value="11" />
-  <parameter name="IN_H_WIDTH" value="9" />
-  <parameter name="IN_W_WIDTH" value="9" />
-  <parameter name="KERNAL_SIZE" value="9" />
-  <parameter name="KERNEL_SIZE_WIDTH" value="4" />
-  <parameter name="KERNEL_WIDTH" value="2" />
   <parameter name="LOAD_M_AXI_ADDR_WIDTH" value="32" />
   <parameter name="LOAD_M_AXI_DATA_WIDTH" value="64" />
-  <parameter name="OUTPUT_ADDR_WIDTH" value="10" />
-  <parameter name="OUTPUT_CHANNEL_TILE" value="8" />
-  <parameter name="OUTPUT_C_WIDTH" value="11" />
-  <parameter name="OUTPUT_H_WIDTH" value="9" />
-  <parameter name="OUTPUT_MAX_W" value="150" />
   <parameter name="OUTPUT_M_AXI_ADDR_WIDTH" value="32" />
   <parameter name="OUTPUT_M_AXI_DATA_WIDTH" value="64" />
-  <parameter name="OUTPUT_PAD_WIDTH" value="2" />
-  <parameter name="OUTPUT_ROW_TILE" value="5" />
-  <parameter name="OUTPUT_WIDTH" value="32" />
-  <parameter name="OUTPUT_W_WIDTH" value="9" />
-  <parameter name="REORGANIZE_BUFF_DEEP" value="2048" />
-  <parameter name="REORG_M_AXI_ADDR_WIDTH" value="32" />
-  <parameter name="REORG_M_AXI_DATA_WIDTH" value="8" />
-  <parameter name="REORG_RAM_ADDR_WIDTH" value="7" />
-  <parameter name="REORG_RAM_DATA_WIDTH" value="128" />
-  <parameter name="REORG_RAM_SEL_WIDTH" value="16" />
-  <parameter name="SCALE_6" value="1086324736" />
   <parameter name="SCALE_M_AXI_ADDR_WIDTH" value="32" />
   <parameter name="SCALE_M_AXI_DATA_WIDTH" value="32" />
-  <parameter name="WEIGHT_WIDTH" value="8" />
  </module>
  <module name="hps_0" kind="altera_hps" version="23.1" enabled="1">
   <parameter name="ABSTRACT_REAL_COMPARE_TEST" value="false" />
