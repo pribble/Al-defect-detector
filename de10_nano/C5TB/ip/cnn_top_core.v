@@ -231,9 +231,14 @@ module cnn_top_core (
     assign ow_write      = core_o_valid;
 
     // lr/wr 单笔在途控制：数据返回优先清 pending（阻塞桥下接受拍=数据拍，
-    // 必须由 readdatavalid 胜出）；命令接受拍置 pending（read 随之拉低）
+    // 必须由 readdatavalid 胜出）；命令接受拍置 pending（read 随之拉低）；
+    // core_start 拍（S_START 后仅 1 拍）做行块级重置——避免与主状态机
+    // 多 always 驱动同一 reg（Quartus 10028）
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
+            lr_pending <= 0;
+            wr_pending <= 0;
+        end else if (core_start) begin
             lr_pending <= 0;
             wr_pending <= 0;
         end else begin
@@ -451,7 +456,6 @@ module cnn_top_core (
                     lr_address <= reg_ddrin + in_rb_base_r;
                     wr_address <= reg_ddrw;
                     ow_address <= reg_ddrout + out_rb_base_r;
-                    lr_pending <= 0; wr_pending <= 0;   // 行块级在途重置
                     core_start <= 1'b1;
                     state <= S_RUN;
                 end
