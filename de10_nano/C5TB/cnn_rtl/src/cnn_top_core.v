@@ -138,6 +138,7 @@ module cnn_top_core (
     reg [31:0] param_buf [0:26];
 
     reg [15:0] p_in_c, p_in_h, p_in_w, p_out_c, p_out_h, p_out_w;   // ≤302
+    reg [31:0] p_input_offset, p_weight_offset, p_output_offset;   // param[0/1/3]，字偏移（×8 = 字节）
     reg [7:0]  p_k, p_pad, p_stride, p_act, p_type;
     reg [7:0]  p_out_row_tile, p_in_row_tile, p_in_cb, p_out_cb, p_row_block;   // ≤19/4
 
@@ -344,7 +345,14 @@ module cnn_top_core (
                 end
 
                 //---- 解析（param_buf → p_*）----
+                // param[0..3] 为 input/weight/scale/output 四区字偏移（软件
+                // conv_op.cc 每层分配并写入；FPGA 必须把 input/weight/output
+                // 偏移加进 DDR 基址，否则第 1 层起读写错位（层 0 偏移恰好全 0
+                // 掩盖了问题）。scale 区每层 memcpy 到同一 cb_scale，偏移恒 0。
                 S_CFG: begin
+                    p_input_offset  <= param_buf[0];
+                    p_weight_offset <= param_buf[1];
+                    p_output_offset <= param_buf[3];
                     p_in_c  <= param_buf[4];
                     p_in_h  <= param_buf[5];
                     p_in_w  <= param_buf[6];
@@ -459,9 +467,9 @@ module cnn_top_core (
 
                 S_START: begin
                     core_cfg_we <= 0;
-                    lr_address <= reg_ddrin + in_rb_base_r;
-                    wr_address <= reg_ddrw;
-                    ow_address <= reg_ddrout + out_rb_base_r;
+                    lr_address <= reg_ddrin + (p_input_offset << 3) + in_rb_base_r;
+                    wr_address <= reg_ddrw + (p_weight_offset << 3);
+                    ow_address <= reg_ddrout + (p_output_offset << 3) + out_rb_base_r;
                     core_start <= 1'b1;
                     state <= S_RUN;
                 end
@@ -476,7 +484,7 @@ module cnn_top_core (
                     if (lr_round_reset) begin
                         dma_icb <= 0; dma_ibeat <= 0;
                         lr_address <= (p_type == 4) ? (lr_address + in_cb_stride_r)
-                                                    : (reg_ddrin + in_rb_base_r);
+                                                    : (reg_ddrin + (p_input_offset << 3) + in_rb_base_r);
                     end else if (lr_read && !lr_waitrequest) begin
                         if (dma_ibeat == in_seg_words_r - 1) begin
                             lr_address <= lr_address + in_cb_stride_r - in_seg_tail_r;
