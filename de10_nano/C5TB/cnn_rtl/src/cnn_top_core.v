@@ -246,11 +246,16 @@ module cnn_top_core (
             lr_pending <= 0;
             wr_pending <= 0;
         end else begin
-            // 单语句合并 +/-：同拍"返回(-1)+新命令接受(+1)"净 0。
-            // 原两条 if 非阻塞后写覆盖前写，同拍时恒 +1 → pending 虚高
-            // （在途并发上限从 4 降到 3，纯性能损失，无正确性影响）
-            lr_pending <= lr_pending + (lr_read && !lr_waitrequest) - (lr_readdatavalid);
-            wr_pending <= wr_pending + (wr_read && !wr_waitrequest) - (wr_readdatavalid);
+            // lr/wr 共享 load master：任一方的 readdatavalid 都会触发两路 -1，
+            // 不在途的一侧必然下溢（0-1 = 7）。两条 if 的"后写覆盖"使同拍
+            // 接受时 7+1=0 回绕自愈——不可改成单语句（7+1-1=7 不回绕，
+            // pending 卡死 → lr_read/wr_read 永久关闭 → wait ip fail）。
+            // 代价：同拍"返回+接受"恒 +1，pending 虚高（在途并发 3/4），
+            // 纯性能损失，正确性无影响。
+            if (lr_readdatavalid)           lr_pending <= lr_pending - 3'd1;
+            if (lr_read && !lr_waitrequest) lr_pending <= lr_pending + 3'd1;
+            if (wr_readdatavalid)           wr_pending <= wr_pending - 3'd1;
+            if (wr_read && !wr_waitrequest) wr_pending <= wr_pending + 3'd1;
         end
     end
 
