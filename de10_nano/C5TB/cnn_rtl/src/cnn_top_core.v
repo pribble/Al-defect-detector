@@ -116,6 +116,8 @@ module cnn_top_core (
             8'h12: as_readdata = {dma_wbeat, dma_ibeat[15:8],
                                   lr_round_end, lr_round_reset,
                                   core_i_ready, core_ow_ready};
+            8'h13: as_readdata = {lr_cmd_cnt, lr_rdv_cnt};   // 0x4C：lr 命令/返回计数
+            8'h14: as_readdata = {wr_cmd_cnt, wr_rdv_cnt};   // 0x50：wr 命令/返回计数
             default: as_readdata = 32'h0;
         endcase
     end
@@ -269,6 +271,21 @@ module cnn_top_core (
             if (lr_read && !lr_waitrequest)             lr_pending <= lr_pending + 3'd1;
             if (wr_readdatavalid && wr_pending != 3'd0) wr_pending <= wr_pending - 3'd1;
             if (wr_read && !wr_waitrequest)             wr_pending <= wr_pending + 3'd1;
+        end
+    end
+
+    // 调试计数器（0x4C/0x50 只读）：命令接受数 vs 数据返回数，
+    // 定位 readdatavalid 不返回是桥的问题还是计数的问题
+    reg [15:0] lr_cmd_cnt, lr_rdv_cnt, wr_cmd_cnt, wr_rdv_cnt;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            lr_cmd_cnt <= 0; lr_rdv_cnt <= 0;
+            wr_cmd_cnt <= 0; wr_rdv_cnt <= 0;
+        end else begin
+            if (lr_read && !lr_waitrequest) lr_cmd_cnt <= lr_cmd_cnt + 16'd1;
+            if (lr_readdatavalid)           lr_rdv_cnt <= lr_rdv_cnt + 16'd1;
+            if (wr_read && !wr_waitrequest) wr_cmd_cnt <= wr_cmd_cnt + 16'd1;
+            if (wr_readdatavalid && wr_cmd_cnt != 0) wr_rdv_cnt <= wr_rdv_cnt + 16'd1;
         end
     end
 
