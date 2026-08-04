@@ -895,10 +895,10 @@ module cnn_core_v2 #(
     //   级 1 = 4 个 16×16 DSP 乘法（v_act_l = a_hi<<16 + a_lo，rq_mult_q = m_hi<<16 + m_lo）
     //   级 2 = 两组 64-bit 并行加法（v_sum_lo/v_sum_hi），每级仅 1 个加法器
     //   级 3 = 中间和相加 → v_rq64_l
-    reg [31:0] v_p_lolo [0:7];   // a_lo × m_lo（无符号 16×16）
-    reg [31:0] v_p_lohi [0:7];   // a_lo × m_hi（无符号 16×16）
-    reg signed [31:0] v_p_hilo [0:7];  // a_hi × m_lo（signed 16 × unsigned 16）
-    reg signed [31:0] v_p_hihi [0:7];  // a_hi × m_hi（signed 16 × unsigned 16）
+    (* multstyle = "dsp" *) reg [31:0] v_p_lolo [0:7];   // a_lo × m_lo（无符号 16×16，DSP 18×18）
+    (* multstyle = "dsp" *) reg [31:0] v_p_lohi [0:7];   // a_lo × m_hi（无符号 16×16）
+    (* multstyle = "dsp" *) reg signed [31:0] v_p_hilo [0:7];  // a_hi × m_lo（signed 16 × unsigned 16）
+    (* multstyle = "dsp" *) reg signed [31:0] v_p_hihi [0:7];  // a_hi × m_hi（signed 16 × unsigned 16）
     reg signed [63:0] v_sum_lo [0:7];  // lolo + lohi<<16（无符号两项）
     reg signed [63:0] v_sum_hi [0:7];  // hilo<<16 + hihi<<32（符号扩展两项）
     reg signed [63:0] v_rnd_delta [0:7];  // round 桶形移位结果（1<<(shift-1)）
