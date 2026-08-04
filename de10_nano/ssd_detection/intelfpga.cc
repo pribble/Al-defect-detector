@@ -1,17 +1,3 @@
-/* Copyright (c) 2020 AWCloud. All Rights Reserved.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License. */
-
 #include "intelfpga.h"
 
 #include <fcntl.h>
@@ -127,10 +113,6 @@ uint32_t foo_get(uint32_t *addr, int offset) {
   return addr[offset >> 2];
 }
 
-int min(int a, int b) {
-  return a > b ? b : a;
-}
-
 void fpga_data_address_cmamap(int fd, struct cma_blk_s *cb, uint32_t **data_addr) {
   if (cma_alloc(fd, cb)) {
     close(fd);
@@ -145,10 +127,8 @@ void fpga_reg_address_map(int fd) {
 }
 
 int devmem_fd = 0;
-#ifdef ARCH_ABI_ARM32
-int devcma_fd = 0;
+int devcma_fd = 0;   // ARM32 平台（DE10-Nano）：CMA 设备与 5 块共享内存
 cma_blk_s cb_data, cb_weight, cb_scale, cb_param, cb_org;
-#endif
 
 void fpga_release(void) {
   if (fpga_init_status) {
@@ -254,25 +234,6 @@ int start_fpga(uint32_t *ip, uint32_t start_reg_addr) {
   }
 }
 
-#if (REOGANIZE_TYPE == REOGANIZE_FPGA)
-void data_reorganize(int mode, int in_c, int feature_map,
-                     int input_offset, int output_offset) {
-  foo_set(data_reorganize_ip, FPGAREG_REORG_MODE, mode);
-  foo_set(data_reorganize_ip, FPGAREG_REORG_IN_C, in_c);
-  foo_set(data_reorganize_ip, FPGAREG_REORG_FEATURE_MAP_SIZE, feature_map);
-  foo_set(data_reorganize_ip, FPGAREG_REORG_DDR_INPUT_OFFSET, input_offset);
-  foo_set(data_reorganize_ip, FPGAREG_REORG_DDR_OUTPUT_OFFSET, output_offset);
-  int32_t status;
-  status = foo_get(data_reorganize_ip, FPGAREG_REORG_START);
-  status |= 0x1;
-  foo_set(data_reorganize_ip, FPGAREG_REORG_START, status);
-  status = foo_get(data_reorganize_ip, FPGAREG_REORG_START);
-  while (status & 1)
-    status = foo_get(data_reorganize_ip, FPGAREG_REORG_START);
-}
-
-#elif (REOGANIZE_TYPE == REOGANIZE_ARM)
-#if (ARMREOG_TYPE == ARMREOG_NEON)
 void tran_8(uint8_t *gbild_, uint8_t *gbild_t_, size_t gx, size_t gy) {
   uint8_t **gbild = (uint8_t **)malloc(sizeof(char *) * gy);
   uint8_t **gbild_t = (uint8_t **)malloc(sizeof(char *) * gx);
@@ -357,27 +318,9 @@ void tran_8(uint8_t *gbild_, uint8_t *gbild_t_, size_t gx, size_t gy) {
   free(gbild);
   free(gbild_t);
 }
-#endif
 
 void InputRearrange(int8_t *din, int8_t *dout,
                     const int c, const int h, const int w, const int pad) {
-#if (ARMREOG_TYPE == ARMREOG_POLL)
-  int8_t *dout_array[INPUT_EXTEND_SCALE];
-  int idx_fpga_idata = 0;
-  for (int i = 0; i < up_round(c, INPUT_EXTEND_SCALE); i++) {
-    dout_array[0] = din + i * ((h + 2 * pad) * (w + 2 * pad) * INPUT_EXTEND_SCALE);
-    for (int n = 1; n < INPUT_EXTEND_SCALE; n++)
-      dout_array[n] = dout_array[n - 1] + (h + 2 * pad) * (w + 2 * pad);
-    for (int r = 0; r < (h + 2 * pad); r++)
-      for (int cc = 0; cc < (w + 2 * pad); cc++)
-        for (int k = 0; k < INPUT_EXTEND_SCALE; k++) {
-          if (k < c)
-            dout[idx_fpga_idata++] = *(dout_array[k]++);
-          else
-            dout[idx_fpga_idata++] = 0;
-        }
-  }
-#elif (ARMREOG_TYPE == ARMREOG_NEON)
   int high = h + 2 * pad;
   int width = w + 2 * pad;
   int area = high * width;
@@ -385,32 +328,16 @@ void InputRearrange(int8_t *din, int8_t *dout,
          up_round(c, INPUT_EXTEND_SCALE) * INPUT_EXTEND_SCALE);
   for (int cc = 0; cc < area; cc++)
     memset(dout + cc * INPUT_EXTEND_SCALE + c, 0, INPUT_EXTEND_SCALE - c);
-#endif
 }
 
 void OutputRearrange(int8_t *din, int8_t *dout,
                      const int c, const int h, const int w) {
-#if (ARMREOG_TYPE == ARMREOG_POLL)
-  int8_t *dout_array[INPUT_EXTEND_SCALE];
-  int idx_fpga_idata = 0;
-  for (int i = 0; i < up_round(c, INPUT_EXTEND_SCALE); i++) {
-    dout_array[0] = dout + i * h * w * INPUT_EXTEND_SCALE;
-    for (int n = 1; n < INPUT_EXTEND_SCALE; n++)
-      dout_array[n] = dout_array[n - 1] + h * w;
-    for (int r = 0; r < h; r++)
-      for (int cc = 0; cc < w; cc++)
-        for (int k = 0; k < INPUT_EXTEND_SCALE; k++)
-          *(dout_array[k]++) = din[idx_fpga_idata++];
-  }
-#elif (ARMREOG_TYPE == ARMREOG_NEON)
   int area = h * w;
   for (int i = 0; i < up_round(c, INPUT_EXTEND_SCALE); i++)
     tran_8((uint8_t *)din + i * area * INPUT_EXTEND_SCALE,
            (uint8_t *)dout + i * area * INPUT_EXTEND_SCALE,
            INPUT_EXTEND_SCALE, area);
-#endif
 }
-#endif
 
 struct device_output_config intelfpga_output_malloc(int8_t **dst,
                                                     int out_c,
@@ -477,20 +404,11 @@ void FpgaReorganizeInput(DeviceGraphNode *node, int input_id, int layer) {
   if (node->op_type_ == INTELFPGA_Conv2D ||
       node->op_type_ == INTELFPGA_DW_Conv2D) {
     auto argp = dynamic_cast<FpgaConvParam *>(node->node_param_);
-#if (REOGANIZE_TYPE == REOGANIZE_FPGA)
-    memcpy((int8_t *)uorganize, (int8_t *)argp->ia,
-           argp->param.in_c * argp->param.in_h * argp->param.in_w);
-    data_reorganize(2, argp->param.in_c,
-                    argp->param.in_h * argp->param.in_w,
-                    cb_org.phys,
-                    cb_data.phys + FpgaWord2ByteOffset(
-                        node->op_type_, argp->param.input_offset));
-#elif (REOGANIZE_TYPE == REOGANIZE_ARM)
+    // 输入重排（NEON 转置 → NHWC8）：写到 DDR 输入区（udata + input_offset×8）
     InputRearrange((int8_t *)argp->ia,
         (int8_t *)((int8_t *)udata + FpgaWord2ByteOffset(
             node->op_type_, argp->param.input_offset)),
         argp->param.in_c, argp->param.in_h, argp->param.in_w, 0);
-#endif
   } else {
     std::cout << "[FpgaReorganizeInput] Unsupported op: "
               << node->op_type_ << "\n";
@@ -503,13 +421,7 @@ void FpgaOutputReorganize(DeviceGraphNode *node, int layer) {
   if (node->op_type_ == INTELFPGA_Conv2D ||
       node->op_type_ == INTELFPGA_DW_Conv2D) {
     auto argp = dynamic_cast<FpgaConvParam *>(node->node_param_);
-#if (REOGANIZE_TYPE == REOGANIZE_FPGA)
-    data_reorganize(3, argp->param.output_c,
-                    argp->param.output_h * argp->param.output_w,
-                    cb_data.phys + FpgaWord2ByteOffset(
-                        node->op_type_, argp->param.output_offset),
-                    cb_org.phys);
-#elif (REOGANIZE_TYPE == REOGANIZE_ARM)
+    // 输出重排（NHWC8 → NCHW）：从 DDR 输出区读回，经 uorganize 中转拷回张量
     OutputRearrange(
         (int8_t *)((int8_t *)udata + FpgaWord2ByteOffset(
             node->op_type_, argp->param.output_offset)),
@@ -517,7 +429,6 @@ void FpgaOutputReorganize(DeviceGraphNode *node, int layer) {
         argp->param.output_c,
         argp->param.output_h,
         argp->param.output_w);
-#endif
     global_mem_cfg.src = (int8_t *)uorganize;
     global_mem_cfg.dst = (int8_t *)argp->oa;
     global_mem_cfg.size =

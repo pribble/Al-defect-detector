@@ -87,51 +87,6 @@ typedef int8_t Wtype;//weights data type
 #endif
 
 
-//reg reg reorgnaize
-#if (REOGANIZE_TYPE == REOGANIZE_FPGA)
-#if defined(ARCH_ABI_ARM64)
-#define FPGAREG_REORG_BASE_ADDR			0x80010000
-	#define FPGAREG_REORG_START				(0x00<<2)
-	#if (FPGA_SOURCE == FPGA_SOURCE_NK)//海云重排直接给绝对地址就不需要这几个参数了
-		#define FPGAREG_REORG_HD				(0x04<<2)
-		#define FPGAREG_REORG_LD				(0x07<<2)
-		#define FPGAREG_REORG_DATA			(0x13<<2)
-	#endif
-	#define FPGAREG_REORG_MODE				(0x0A<<2)
-	#define FPGAREG_REORG_IN_C				(0x0C<<2)
-	#define FPGAREG_REORG_FEATURE_MAP_SIZE		(0x0E<<2)
-	#define FPGAREG_REORG_DDR_INPUT_OFFSET		(0x10<<2)
-	#define FPGAREG_REORG_DDR_OUTPUT_OFFSET		(0x12<<2)
-#elif defined(ARCH_ABI_ARM32)
-#define FPGAREG_REORG_BASE_ADDR			0xFF208000
-	#define FPGAREG_REORG_START				(0x00<<4)
-	#if (FPGA_SOURCE == FPGA_SOURCE_NK)//海云重排直接给绝对地址就不需要这几个参数了
-		#define FPGAREG_REORG_HD				(0x04<<4)
-		#define FPGAREG_REORG_LD				(0x07<<4)
-		#define FPGAREG_REORG_DATA			(0x13<<4)
-	#endif
-	#define FPGAREG_REORG_MODE				(0x0A<<4)
-	#define FPGAREG_REORG_IN_C				(0x0C<<4)
-	#define FPGAREG_REORG_FEATURE_MAP_SIZE		(0x0E<<4)
-	#define FPGAREG_REORG_DDR_INPUT_OFFSET		(0x10<<4)
-	#define FPGAREG_REORG_DDR_OUTPUT_OFFSET		(0x12<<4)
-#else
-#define FPGAREG_REORG_BASE_ADDR			0xFF208000
-	#define FPGAREG_REORG_START				(0x00<<4)
-	#if (FPGA_SOURCE == FPGA_SOURCE_NK)//海云重排直接给绝对地址就不需要这几个参数了
-		#define FPGAREG_REORG_HD				(0x04<<4)
-		#define FPGAREG_REORG_LD				(0x07<<4)
-		#define FPGAREG_REORG_DATA			(0x13<<4)
-	#endif
-	#define FPGAREG_REORG_MODE				(0x0A<<4)
-	#define FPGAREG_REORG_IN_C				(0x0C<<4)
-	#define FPGAREG_REORG_FEATURE_MAP_SIZE		(0x0E<<4)
-	#define FPGAREG_REORG_DDR_INPUT_OFFSET		(0x10<<4)
-	#define FPGAREG_REORG_DDR_OUTPUT_OFFSET		(0x12<<4)
-#endif
-
-#endif
-
 //fpga reg elementwise_add
 #ifdef ARCH_ABI_ARM64
 #define FPGAREG_ELEMENT_BASE_ADDR		0x80020000
@@ -217,9 +172,6 @@ uint32_t* uweight;
 uint32_t* uparam;
 uint32_t* uscale;
 uint32_t* foo;
-#if (REOGANIZE_TYPE == REOGANIZE_FPGA)
-uint32_t* data_reorganize_ip;
-#endif
 uint32_t* add_ip;
 
 
