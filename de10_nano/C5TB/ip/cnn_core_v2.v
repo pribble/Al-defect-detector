@@ -497,8 +497,10 @@ module cnn_core_v2 #(
     localparam S_REQ_MUL2 = 4'd8;   // requant 乘法拍级 1（4×16×16 DSP 部分积，寄存 v_p_*/v_shift_l）
     localparam S_REQ_MUL3 = 4'd15;  // requant 乘法拍级 2（两组中间和 → v_sum_lo/v_sum_hi）
     localparam S_REQ_MUL4 = 5'd16;  // requant 乘法拍级 3（中间和相加 → v_rq64_l，每级仅 1 个 64-bit 加法）
-    localparam S_REQ_OUT  = 4'd9;   // requant round 拍（round 加法 → v_round_l）
-    localparam S_REQ_OUT2 = 4'd14;  // requant 输出拍（>>shift+饱和 → o_data）
+    localparam S_REQ_OUT  = 4'd9;   // requant round 拍级 1（round 桶形移位 → v_rnd_delta）
+    localparam S_REQ_ROUND2 = 5'd17; // requant round 拍级 2（v_rq64_l + v_rnd_delta → v_round_l）
+    localparam S_REQ_OUT2 = 4'd14;  // requant 输出移位拍（v_round_l >>> shift → v_shifted）
+    localparam S_REQ_OUT3 = 5'd18;  // requant 输出拍（饱和 → o_data，o_valid 拉高）
     localparam S_DONE     = 4'd10;
 
     reg [4:0] state;
@@ -735,13 +737,23 @@ module cnn_core_v2 #(
                     state <= S_REQ_OUT;
                 end
 
-                //---- requant round 拍：round 加法（结果 v_round_l，见独立 always）----
+                //---- requant round 拍级 1：round 桶形移位（1<<(shift-1)，单独一拍）----
                 S_REQ_OUT: begin
+                    state <= S_REQ_ROUND2;
+                end
+
+                //---- requant round 拍级 2：v_rq64_l + v_rnd_delta（64-bit 加法单独一拍）----
+                S_REQ_ROUND2: begin
                     state <= S_REQ_OUT2;
                 end
 
-                //---- requant 输出拍（>>shift+饱和 → o_data；行→列→8 通道，块序）----
+                //---- requant 输出移位拍：v_round_l >>> shift（桶形移位单独一拍）----
                 S_REQ_OUT2: begin
+                    state <= S_REQ_OUT3;
+                end
+
+                //---- requant 输出拍（饱和 → o_data；行→列→8 通道，块序）----
+                S_REQ_OUT3: begin
                     o_valid <= 1'b1;
                     if (o_ready) begin
                         if (rq_col == out_w_reg - 1) begin
@@ -872,6 +884,8 @@ module cnn_core_v2 #(
     reg signed [31:0] v_p_hihi [0:7];  // a_hi × m_hi（signed 16 × unsigned 16）
     reg signed [63:0] v_sum_lo [0:7];  // lolo + lohi<<16（无符号两项）
     reg signed [63:0] v_sum_hi [0:7];  // hilo<<16 + hihi<<32（符号扩展两项）
+    reg signed [63:0] v_rnd_delta [0:7];  // round 桶形移位结果（1<<(shift-1)）
+    reg signed [63:0] v_shifted [0:7];    // 算术右移结果（>>> shift）
     (* multstyle = "dsp" *) reg signed [63:0] v_rq64_l [0:7];  // 每 lane 的 64-bit 积（流水级 2，保 DSP）
     reg [7:0] v_shift_l [0:7];         // 每 lane 的 shift 值（S_REQ_MUL2 拍寄存 RAM 读，断 M10K q 路径）
     reg signed [63:0] v_round_l [0:7]; // 每 lane 的 round 后值（流水级 3）
@@ -958,30 +972,56 @@ module cnn_core_v2 #(
         end
     end
 
-    // round 拍（S_REQ_OUT）：round 加法 → v_round_l（输入 v_rq64_l/v_shift_l 均寄存，链短）
+    // round 拍级 1（S_REQ_OUT）：round 桶形移位单独一拍（1<<(shift-1)，~5ns）
     always @(posedge clk) begin
         if (state == S_REQ_OUT) begin
             for (ln = 0; ln < 8; ln = ln + 1) begin
                 v_out_ch = o_group * 8 + ln;
                 if (v_out_ch >= out_c_reg)
-                    v_round_l[ln] <= 64'sd0;
+                    v_rnd_delta[ln] <= 64'sd0;
                 else if (v_shift_l[ln] > 8'd0)
-                    v_round_l[ln] <= v_rq64_l[ln] + (64'sd1 << (v_shift_l[ln] - 8'd1));
+                    v_rnd_delta[ln] <= 64'sd1 << (v_shift_l[ln] - 8'd1);
                 else
-                    v_round_l[ln] <= v_rq64_l[ln];
+                    v_rnd_delta[ln] <= 64'sd0;
             end
         end
     end
 
-    // 输出拍（S_REQ_OUT2）：round 值算术右移 + 饱和 → o_data
+    // round 拍级 2（S_REQ_ROUND2）：v_rq64_l + v_rnd_delta → v_round_l（64-bit 加法单独一拍，~3ns）
+    always @(posedge clk) begin
+        if (state == S_REQ_ROUND2) begin
+            for (ln = 0; ln < 8; ln = ln + 1) begin
+                v_out_ch = o_group * 8 + ln;
+                if (v_out_ch >= out_c_reg)
+                    v_round_l[ln] <= 64'sd0;
+                else
+                    v_round_l[ln] <= v_rq64_l[ln] + v_rnd_delta[ln];
+            end
+        end
+    end
+
+    // 输出移位拍（S_REQ_OUT2）：v_round_l >>> shift（64-bit 桶形移位单独一拍，~5ns）
     always @(posedge clk) begin
         if (state == S_REQ_OUT2) begin
+            for (ln = 0; ln < 8; ln = ln + 1) begin
+                v_out_ch = o_group * 8 + ln;
+                if (v_out_ch >= out_c_reg)
+                    v_shifted[ln] <= 64'sd0;
+                else
+                    v_shifted[ln] <= v_round_l[ln] >>> v_shift_l[ln];
+            end
+        end
+    end
+
+    // 输出拍（S_REQ_OUT3）：移位值饱和 → o_data（64-bit 比较 + mux，~3ns）
+    always @(posedge clk) begin
+        if (state == S_REQ_OUT3) begin
             for (ln = 0; ln < 8; ln = ln + 1) begin
                 v_out_ch = o_group * 8 + ln;
                 if (v_out_ch >= out_c_reg) begin
                     v_q[ln] = 8'd0;
                 end else begin
-                v_rq64 = v_round_l[ln] >>> v_shift_l[ln];
+                v_rq64 = v_shifted[ln];
                 if (v_rq64 > 64'sd127)      v_q[ln] = 8'sd127;
                 else if (v_rq64 < -64'sd128) v_q[ln] = 8'h80;   // -128（8'sd128 字面量溢出）
                 else                         v_q[ln] = v_rq64[7:0];
