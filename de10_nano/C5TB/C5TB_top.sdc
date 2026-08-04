@@ -48,7 +48,7 @@ create_clock -name {FPGA_CLK1_50} -period 20.000 -waveform { 10.000 20.000 } [ge
 # PLL 输出时钟由 Quartus 自动推导（23.1 重新生成的 PLL 层次为
 # pll_inst:pll_inst0|pll_inst_0002:pll_inst_inst|altera_pll:altera_pll_i|...，
 # 18.1 时代手写的 create_generated_clock pin 名已失效，全部被 STA 忽略）。
-# derive_pll_clocks 依据 PLL 实际配置创建 50/50/100 MHz 三路输出时钟。
+# derive_pll_clocks 依据 PLL 实际配置创建 50/150/100 MHz 三路输出时钟。
 derive_pll_clocks
 
 
