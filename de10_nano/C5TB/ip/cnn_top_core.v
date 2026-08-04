@@ -116,26 +116,26 @@ module cnn_top_core (
             8'h14: as_readdata = {wr_cmd_cnt, wr_rdv_cnt};   // 0x50：wr 命令/返回计数
             // ---- 观测寄存器（复现核专用，非黑盒协议）----
             // 0x54 = {core_state[4:0], o_group[10:0], i_group[10:0], cmd_head, cmd_cnt}
-            8'h15: as_readdata = {dbg_core_state, dbg_o_group, dbg_i_group,
-                                  cmd_head, cmd_cnt};
+            8'h15: as_readdata = {core_dbg_ptr0[31:27], core_dbg_ptr0[26:16],
+                                  core_dbg_ptr0[15:5], cmd_head, cmd_cnt};
             // 0x58 = {rq_row, rq_col}（requant 指针）
-            8'h16: as_readdata = {dbg_rq_row, dbg_rq_col};
+            8'h16: as_readdata = core_dbg_ptr1;
             // 0x5C = {mac_row, mac_col}（MAC 窗口指针）
-            8'h17: as_readdata = {dbg_mac_row, dbg_mac_col};
+            8'h17: as_readdata = core_dbg_ptr2;
             // 0x60 = {mac_t, load_row, load_col, wf_cnt}（DMA/权重进度）
-            8'h18: as_readdata = {dbg_mac_t, dbg_load_row, dbg_load_col, dbg_wf_cnt};
-            // 快照（core_done 或写 0x64 冻结；lane0）：
-            8'h1A: as_readdata = dbg_snap_acc;     // 0x68 acc_q lane0（int32 累加）
-            8'h1B: as_readdata = dbg_snap_vact;    // 0x6C v_act_l[0]（relu/rcl6 后）
-            8'h1C: as_readdata = dbg_snap_vrq;     // 0x70 v_rq64_l[0] 低 32（64-bit 积）
-            8'h1D: as_readdata = dbg_snap_vrnd;    // 0x74 v_round_l[0] 低 32（round 后）
-            8'h1E: as_readdata = dbg_snap_vshf;    // 0x78 v_shifted[0] 低 32（右移后）
-            8'h1F: as_readdata = dbg_snap_lb;      // 0x7C lb_q 低 32（输入采样）
-            8'h20: as_readdata = dbg_snap_wq;      // 0x80 w_q[0][0..3]（权重采样）
-            8'h21: as_readdata = dbg_snap_vbias;   // 0x84 v_biased_l[0]（bias 后）
-            8'h22: as_readdata = dbg_snap_vdelta;  // 0x88 v_rnd_delta[0] 低 32（round 移位）
-            // 0x8C = {done_cnt, o_evt_cnt}（层完成/输出事件累计）
-            8'h23: as_readdata = {dbg_done_cnt, dbg_o_evt_cnt};
+            8'h18: as_readdata = core_dbg_ptr3;
+            // 快照（core_done 或写 0x64 冻结；lane0）——0x90~0xB8：
+            8'h24: as_readdata = dbg_snap_acc;     // 0x90 acc_q lane0（int32 累加）
+            8'h25: as_readdata = dbg_snap_vact;    // 0x94 v_act_l[0]（relu/rcl6 后）
+            8'h26: as_readdata = dbg_snap_vrq;     // 0x98 v_rq64_l[0] 低 32（64-bit 积）
+            8'h27: as_readdata = dbg_snap_vrnd;    // 0x9C v_round_l[0] 低 32（round 后）
+            8'h29: as_readdata = dbg_snap_vshf;    // 0xA4 v_shifted[0] 低 32（右移后）
+            8'h2A: as_readdata = dbg_snap_lb;      // 0xA8 lb_q 低 32（输入采样）
+            8'h2B: as_readdata = dbg_snap_wq;      // 0xAC w_q[0][0..3]（权重采样）
+            8'h2C: as_readdata = dbg_snap_vbias;   // 0xB0 v_biased_l[0]（bias 后）
+            8'h2D: as_readdata = dbg_snap_vdelta;  // 0xB4 v_rnd_delta[0] 低 32（round 移位）
+            // 0xB8 = {done_cnt, o_evt_cnt}（层完成/输出事件累计）
+            8'h2E: as_readdata = {dbg_done_cnt, dbg_o_evt_cnt};
             default: as_readdata = 32'h0;
         endcase
     end
@@ -162,25 +162,21 @@ module cnn_top_core (
         .start(core_start), .o_done(core_done),
         .i_valid(core_i_valid), .i_ready(core_i_ready), .i_data(core_i_data),
         .iw_valid(core_iw_valid), .ow_ready(core_ow_ready), .iw_data(core_iw_data),
-        .o_valid(core_o_valid), .o_ready(core_o_ready), .o_data(core_o_data)
+        .o_valid(core_o_valid), .o_ready(core_o_ready), .o_data(core_o_data),
+        .dbg_ptr0(core_dbg_ptr0), .dbg_ptr1(core_dbg_ptr1),
+        .dbg_ptr2(core_dbg_ptr2), .dbg_ptr3(core_dbg_ptr3),
+        .dbg_data0(core_dbg_data0), .dbg_data1(core_dbg_data1),
+        .dbg_lb(core_dbg_lb)
     );
 
     //-----------------------------------------------------------------------
-    // 观测探针（层次引用 cnn_core_v2 内部信号，只读；仅供调试寄存器）
+    // 观测探针（cnn_core_v2 输出端口引出；Quartus 不支持跨模块层次引用）
     // 指针类：组合直读（busy 时抓状态机现场）；数据类：快照锁存
     //（core_done 自动锁存层末值 + 写 0x64 手动冻结 busy 现场）
     //-----------------------------------------------------------------------
-    wire [4:0]  dbg_core_state = core.state;
-    wire [10:0] dbg_o_group    = core.o_group[10:0];
-    wire [10:0] dbg_i_group    = core.i_group[10:0];
-    wire [15:0] dbg_rq_row     = core.rq_row[15:0];
-    wire [15:0] dbg_rq_col     = core.rq_col[15:0];
-    wire [15:0] dbg_mac_row    = core.mac_row[15:0];
-    wire [15:0] dbg_mac_col    = core.mac_col[15:0];
-    wire [3:0]  dbg_mac_t      = core.mac_t[3:0];
-    wire [9:0]  dbg_load_row   = core.load_row[9:0];
-    wire [9:0]  dbg_load_col   = core.load_col[9:0];
-    wire [7:0]  dbg_wf_cnt     = core.wf_cnt[7:0];
+    wire [31:0]  core_dbg_ptr0, core_dbg_ptr1, core_dbg_ptr2, core_dbg_ptr3;
+    wire [127:0] core_dbg_data0, core_dbg_data1;
+    wire [31:0]  core_dbg_lb;
 
     reg [31:0] dbg_snap_acc, dbg_snap_vact, dbg_snap_vrq, dbg_snap_vrnd;
     reg [31:0] dbg_snap_vshf, dbg_snap_lb, dbg_snap_wq, dbg_snap_vbias, dbg_snap_vdelta;
@@ -193,15 +189,15 @@ module cnn_top_core (
         end else begin
             dbg_freeze <= as_write && as_address == 8'h19;   // 写 0x64：冻结一拍
             if (core_done || dbg_freeze) begin
-                dbg_snap_acc    <= core.acc_q[31:0];
-                dbg_snap_vact   <= core.v_act_l[0];
-                dbg_snap_vrq    <= core.v_rq64_l[0][31:0];
-                dbg_snap_vrnd   <= core.v_round_l[0][31:0];
-                dbg_snap_vshf   <= core.v_shifted[0][31:0];
-                dbg_snap_lb     <= core.lb_q[31:0];
-                dbg_snap_wq     <= {core.w_q[0][3], core.w_q[0][2], core.w_q[0][1], core.w_q[0][0]};
-                dbg_snap_vbias  <= core.v_biased_l[0];
-                dbg_snap_vdelta <= core.v_rnd_delta[0][31:0];
+                dbg_snap_acc    <= core_dbg_data0[31:0];    // acc_q lane0
+                dbg_snap_vbias  <= core_dbg_data0[63:32];   // v_biased_l[0]
+                dbg_snap_vact   <= core_dbg_data0[95:64];   // v_act_l[0]
+                dbg_snap_vrq    <= core_dbg_data0[127:96];  // v_rq64_l[0] 低 32
+                dbg_snap_vrnd   <= core_dbg_data1[31:0];    // v_round_l[0] 低 32
+                dbg_snap_vshf   <= core_dbg_data1[63:32];   // v_shifted[0] 低 32
+                dbg_snap_vdelta <= core_dbg_data1[95:64];   // v_rnd_delta[0] 低 32
+                dbg_snap_wq     <= core_dbg_data1[127:96];  // w_q[0][3:0]
+                dbg_snap_lb     <= core_dbg_lb;             // lb_q 低 32
             end
         end
     end

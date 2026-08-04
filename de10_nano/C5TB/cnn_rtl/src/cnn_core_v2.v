@@ -66,7 +66,16 @@ module cnn_core_v2 #(
     output reg  [63:0]         o_data,
 
     // ---- 单行块完成 ----
-    output reg                 o_done
+    output reg                 o_done,
+
+    // ---- 观测输出（调试寄存器用，组合直读 core 内部状态/数据；不带 QSys 接口）----
+    output wire [31:0]  dbg_ptr0,   // {state[4:0], o_group[10:0], i_group[10:0], mac_t[3:0]}
+    output wire [31:0]  dbg_ptr1,   // {rq_row[15:0], rq_col[15:0]}
+    output wire [31:0]  dbg_ptr2,   // {mac_row[15:0], mac_col[15:0]}
+    output wire [31:0]  dbg_ptr3,   // {load_row[9:0], load_col[9:0], wf_cnt[7:0]}
+    output wire [127:0] dbg_data0,  // {acc_q[31:0], v_biased_l[0], v_act_l[0], v_rq64_l[0][31:0]}
+    output wire [127:0] dbg_data1,  // {v_round_l[0], v_shifted[0], v_rnd_delta[0], w_q[0][3:0]}
+    output wire [31:0]  dbg_lb      // lb_q[31:0]
 );
 
     //-----------------------------------------------------------------------
@@ -1051,5 +1060,15 @@ module cnn_core_v2 #(
                        v_q[3], v_q[2], v_q[1], v_q[0]};
         end
     end
+
+    // ---- 观测输出（组合直读；Quartus 不支持跨模块层次引用，故以端口引出）----
+    assign dbg_ptr0  = {state[4:0], o_group[10:0], i_group[10:0], mac_t[3:0]};
+    assign dbg_ptr1  = {rq_row[15:0], rq_col[15:0]};
+    assign dbg_ptr2  = {mac_row[15:0], mac_col[15:0]};
+    assign dbg_ptr3  = {load_row[9:0], load_col[9:0], wf_cnt[7:0]};
+    assign dbg_data0 = {acc_q[31:0], v_biased_l[0], v_act_l[0], v_rq64_l[0][31:0]};
+    assign dbg_data1 = {v_round_l[0][31:0], v_shifted[0][31:0], v_rnd_delta[0][31:0],
+                        {w_q[0][3], w_q[0][2], w_q[0][1], w_q[0][0]}};
+    assign dbg_lb    = lb_q[31:0];
 
 endmodule

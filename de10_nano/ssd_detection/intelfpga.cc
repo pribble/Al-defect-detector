@@ -204,16 +204,16 @@ static void dbg_print_layer_snapshot(uint32_t *ip, const char *name) {
   uint32_t r58 = foo_get(ip, 0x58);
   uint32_t r5c = foo_get(ip, 0x5C);
   uint32_t r60 = foo_get(ip, 0x60);
-  uint32_t r68 = foo_get(ip, 0x68);
-  uint32_t r6c = foo_get(ip, 0x6C);
-  uint32_t r70 = foo_get(ip, 0x70);
-  uint32_t r74 = foo_get(ip, 0x74);
-  uint32_t r78 = foo_get(ip, 0x78);
-  uint32_t r7c = foo_get(ip, 0x7C);
-  uint32_t r80 = foo_get(ip, 0x80);
-  uint32_t r84 = foo_get(ip, 0x84);
-  uint32_t r88 = foo_get(ip, 0x88);
-  uint32_t r8c = foo_get(ip, 0x8C);
+  uint32_t r68 = foo_get(ip, 0x90);   // acc
+  uint32_t r6c = foo_get(ip, 0x94);   // v_act_l[0]
+  uint32_t r70 = foo_get(ip, 0x98);   // v_rq64_l[0] 低 32
+  uint32_t r74 = foo_get(ip, 0x9C);   // v_round_l[0] 低 32
+  uint32_t r78 = foo_get(ip, 0xA4);   // v_shifted[0] 低 32
+  uint32_t r7c = foo_get(ip, 0xA8);   // lb_q 低 32
+  uint32_t r80 = foo_get(ip, 0xAC);   // w_q[0][0..3]
+  uint32_t r84 = foo_get(ip, 0xB0);   // v_biased_l[0]
+  uint32_t r88 = foo_get(ip, 0xB4);   // v_rnd_delta[0] 低 32
+  uint32_t r8c = foo_get(ip, 0xB8);   // {done_cnt, o_evt_cnt}
   printf("[DBG] %s: core_state=%d og=%d ig=%d cmd_h=%d cmd_c=%d"
          " rq=%d,%d mac=%d,%d t=%d lr=%d,%d wf=%d"
          " | acc=%08x vact=%08x vrq=%08x vrnd=%08x vshf=%08x"
