@@ -233,8 +233,10 @@ int start_fpga(uint32_t *ip, uint32_t start_reg_addr) {
       last_dbg_print = wait_ip_time.count();
       uint32_t dbg0 = foo_get(ip, 0x44);
       uint32_t dbg1 = foo_get(ip, 0x48);
+      uint32_t dbg2 = foo_get(ip, 0x4C);  // lr 命令/返回计数
       printf("[DBG] t=%.1fs state=%x lr_p=%d wr_p=%d icb=%d ibeat=%d "
-             "| wbeat=%d round_end=%d reset=%d i_ready=%d ow_ready=%d\n",
+             "| wbeat=%d round_end=%d reset=%d i_ready=%d ow_ready=%d "
+             "| lr_cmd=%d lr_rdv=%d\n",
              wait_ip_time.count(),
              (dbg0 >> 22) & 0xF,   // state
              (dbg0 >> 19) & 0x7,   // lr_pending
@@ -245,7 +247,9 @@ int start_fpga(uint32_t *ip, uint32_t start_reg_addr) {
              (dbg1 >> 3) & 1,      // lr_round_end
              (dbg1 >> 2) & 1,      // lr_round_reset
              (dbg1 >> 1) & 1,      // core_i_ready
-             dbg1 & 1);            // core_ow_ready
+             dbg1 & 1,             // core_ow_ready
+             (dbg2 >> 16) & 0xFFFF, // lr_cmd_cnt
+             dbg2 & 0xFFFF);        // lr_rdv_cnt
     }
   }
 }
