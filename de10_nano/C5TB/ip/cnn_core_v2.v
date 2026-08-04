@@ -494,7 +494,8 @@ module cnn_core_v2 #(
     localparam S_MAC_ACC  = 4'd5;   // 窗口 tap 累加拍（v_sum_r → acc_local）
     localparam S_REQ_ADDR = 4'd6;   // requant 请求拍（采样 acc_q）
     localparam S_REQ_MUL  = 4'd7;   // requant 乘加拍（bias+act，寄存 v_act_l）
-    localparam S_REQ_MUL2 = 4'd8;   // requant 乘法拍（32×32 mult，寄存 v_rq64_l/v_shift_l）
+    localparam S_REQ_MUL2 = 4'd8;   // requant 乘法拍级 1（4×16×16 DSP 部分积，寄存 v_p_*/v_shift_l）
+    localparam S_REQ_MUL3 = 4'd15;  // requant 乘法拍级 2（部分积移位相加 → v_rq64_l）
     localparam S_REQ_OUT  = 4'd9;   // requant round 拍（round 加法 → v_round_l）
     localparam S_REQ_OUT2 = 4'd14;  // requant 输出拍（>>shift+饱和 → o_data）
     localparam S_DONE     = 4'd10;
@@ -718,8 +719,13 @@ module cnn_core_v2 #(
                     state <= S_REQ_MUL2;
                 end
 
-                //---- requant 乘法拍：32×32 mult，结果寄存 v_rq64_l ----
+                //---- requant 乘法拍级 1：16×16 部分积（4 个 DSP 乘法，见独立 always）----
                 S_REQ_MUL2: begin
+                    state <= S_REQ_MUL3;
+                end
+
+                //---- requant 乘法拍级 2：部分积移位相加 → v_rq64_l（见独立 always）----
+                S_REQ_MUL3: begin
                     state <= S_REQ_OUT;
                 end
 
@@ -841,7 +847,8 @@ module cnn_core_v2 #(
     //-----------------------------------------------------------------------
     // requant 流水（拆三段，避免单拍组合链过深）：
     //   S_REQ_MUL  拍：bias+act → v_act_l（寄存 32-bit）
-    //   S_REQ_MUL2 拍：32×32 mult → v_rq64_l（寄存 64-bit 积）
+    //   S_REQ_MUL2 拍：4×16×16 部分积（DSP）→ 寄存 v_p_*/v_shift_l
+    //   S_REQ_MUL3 拍：部分积移位相加 → v_rq64_l（64-bit 加法树）
     //   S_REQ_OUT  拍：round 加法 → v_round_l（用上拍寄存的积）
     // 拆流水后功能/事件序列不变（tb 按事件对拍，不测周期数）。
     //-----------------------------------------------------------------------
@@ -849,6 +856,13 @@ module cnn_core_v2 #(
     reg signed [31:0] v_raw, v_biased, v_act;
     reg signed [63:0] v_rq64;
     reg signed [31:0] v_act_l [0:7];   // 每 lane 的 act 后值（流水级 1）
+    // 乘法拆两级（150MHz 下单级 32×33 组合乘法 slack -10.1ns）：
+    //   级 1 = 4 个 16×16 DSP 乘法（v_act_l = a_hi<<16 + a_lo，rq_mult_q = m_hi<<16 + m_lo）
+    //   级 2 = 4 项 64-bit 移位相加（符号位随拼接位置自动就位）
+    reg [31:0] v_p_lolo [0:7];   // a_lo × m_lo（无符号 16×16）
+    reg [31:0] v_p_lohi [0:7];   // a_lo × m_hi（无符号 16×16）
+    reg signed [31:0] v_p_hilo [0:7];  // a_hi × m_lo（signed 16 × unsigned 16）
+    reg signed [31:0] v_p_hihi [0:7];  // a_hi × m_hi（signed 16 × unsigned 16）
     (* multstyle = "dsp" *) reg signed [63:0] v_rq64_l [0:7];  // 每 lane 的 64-bit 积（流水级 2，保 DSP）
     reg [7:0] v_shift_l [0:7];         // 每 lane 的 shift 值（S_REQ_MUL2 拍寄存 RAM 读，断 M10K q 路径）
     reg signed [63:0] v_round_l [0:7]; // 每 lane 的 round 后值（流水级 3）
@@ -878,18 +892,44 @@ module cnn_core_v2 #(
         end
     end
 
-    // 乘法拍：v_act_l × rq_mult_q（32×32），寄存 v_rq64_l；同时把 RAM 读出的
-    // shift 值寄存为 v_shift_l——断开 M10K q 输出到输出拍组合链的长路径
-    // （原 S_REQ_OUT 拍内 2 个 64-bit 桶形移位 + 64-bit 加法 + 饱和，slack -0.5ns）
+    // 乘法级 1（S_REQ_MUL2）：v_act_l × rq_mult_q 拆 4 个 16×16 部分积（DSP 18×18，~4ns）；
+    // 同时把 RAM 读出的 shift 值寄存为 v_shift_l——断开 M10K q 输出到输出拍组合链的长路径
     always @(posedge clk) begin
         if (state == S_REQ_MUL2) begin
             for (ln = 0; ln < 8; ln = ln + 1) begin
                 v_out_ch = o_group * 8 + ln;
                 if (v_out_ch >= out_c_reg)
+                    begin
+                        v_p_lolo[ln] <= 32'd0;
+                        v_p_lohi[ln] <= 32'd0;
+                        v_p_hilo[ln] <= 32'sd0;
+                        v_p_hihi[ln] <= 32'sd0;
+                    end
+                else begin
+                    v_p_lolo[ln] <= v_act_l[ln][15:0] * rq_mult_q[ln][15:0];
+                    v_p_lohi[ln] <= v_act_l[ln][15:0] * rq_mult_q[ln][31:16];
+                    v_p_hilo[ln] <= $signed(v_act_l[ln][31:16]) *
+                                    $signed({1'b0, rq_mult_q[ln][15:0]});
+                    v_p_hihi[ln] <= $signed(v_act_l[ln][31:16]) *
+                                    $signed({1'b0, rq_mult_q[ln][31:16]});
+                end
+                v_shift_l[ln] <= rq_shift_q[ln];
+            end
+        end
+    end
+
+    // 乘法级 2（S_REQ_MUL3）：4 项部分积移位相加 → v_rq64_l（64-bit 平衡加法树，~4ns）
+    always @(posedge clk) begin
+        if (state == S_REQ_MUL3) begin
+            for (ln = 0; ln < 8; ln = ln + 1) begin
+                v_out_ch = o_group * 8 + ln;
+                if (v_out_ch >= out_c_reg)
                     v_rq64_l[ln] <= 64'sd0;
                 else
-                    v_rq64_l[ln] <= $signed(v_act_l[ln]) * $signed({1'b0, rq_mult_q[ln]});
-                v_shift_l[ln] <= rq_shift_q[ln];
+                    v_rq64_l[ln] <= {32'd0, v_p_lolo[ln]}
+                                  + {16'd0, v_p_lohi[ln], 16'd0}
+                                  + {{16{v_p_hilo[ln][31]}}, v_p_hilo[ln], 16'd0}
+                                  + {v_p_hihi[ln], 32'd0};
             end
         end
     end
