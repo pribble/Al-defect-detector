@@ -114,6 +114,28 @@ module cnn_top_core (
                                   core_i_ready, core_ow_ready, dma_obeat[7:0]};
             8'h13: as_readdata = {lr_cmd_cnt, lr_rdv_cnt};   // 0x4C：lr 命令/返回计数
             8'h14: as_readdata = {wr_cmd_cnt, wr_rdv_cnt};   // 0x50：wr 命令/返回计数
+            // ---- 观测寄存器（复现核专用，非黑盒协议）----
+            // 0x54 = {core_state[4:0], o_group[10:0], i_group[10:0], cmd_head, cmd_cnt}
+            8'h15: as_readdata = {dbg_core_state, dbg_o_group, dbg_i_group,
+                                  cmd_head, cmd_cnt};
+            // 0x58 = {rq_row, rq_col}（requant 指针）
+            8'h16: as_readdata = {dbg_rq_row, dbg_rq_col};
+            // 0x5C = {mac_row, mac_col}（MAC 窗口指针）
+            8'h17: as_readdata = {dbg_mac_row, dbg_mac_col};
+            // 0x60 = {mac_t, load_row, load_col, wf_cnt}（DMA/权重进度）
+            8'h18: as_readdata = {dbg_mac_t, dbg_load_row, dbg_load_col, dbg_wf_cnt};
+            // 快照（core_done 或写 0x64 冻结；lane0）：
+            8'h1A: as_readdata = dbg_snap_acc;     // 0x68 acc_q lane0（int32 累加）
+            8'h1B: as_readdata = dbg_snap_vact;    // 0x6C v_act_l[0]（relu/rcl6 后）
+            8'h1C: as_readdata = dbg_snap_vrq;     // 0x70 v_rq64_l[0] 低 32（64-bit 积）
+            8'h1D: as_readdata = dbg_snap_vrnd;    // 0x74 v_round_l[0] 低 32（round 后）
+            8'h1E: as_readdata = dbg_snap_vshf;    // 0x78 v_shifted[0] 低 32（右移后）
+            8'h1F: as_readdata = dbg_snap_lb;      // 0x7C lb_q 低 32（输入采样）
+            8'h20: as_readdata = dbg_snap_wq;      // 0x80 w_q[0][0..3]（权重采样）
+            8'h21: as_readdata = dbg_snap_vbias;   // 0x84 v_biased_l[0]（bias 后）
+            8'h22: as_readdata = dbg_snap_vdelta;  // 0x88 v_rnd_delta[0] 低 32（round 移位）
+            // 0x8C = {done_cnt, o_evt_cnt}（层完成/输出事件累计）
+            8'h23: as_readdata = {dbg_done_cnt, dbg_o_evt_cnt};
             default: as_readdata = 32'h0;
         endcase
     end
@@ -142,6 +164,58 @@ module cnn_top_core (
         .iw_valid(core_iw_valid), .ow_ready(core_ow_ready), .iw_data(core_iw_data),
         .o_valid(core_o_valid), .o_ready(core_o_ready), .o_data(core_o_data)
     );
+
+    //-----------------------------------------------------------------------
+    // 观测探针（层次引用 cnn_core_v2 内部信号，只读；仅供调试寄存器）
+    // 指针类：组合直读（busy 时抓状态机现场）；数据类：快照锁存
+    //（core_done 自动锁存层末值 + 写 0x64 手动冻结 busy 现场）
+    //-----------------------------------------------------------------------
+    wire [4:0]  dbg_core_state = core.state;
+    wire [10:0] dbg_o_group    = core.o_group[10:0];
+    wire [10:0] dbg_i_group    = core.i_group[10:0];
+    wire [15:0] dbg_rq_row     = core.rq_row[15:0];
+    wire [15:0] dbg_rq_col     = core.rq_col[15:0];
+    wire [15:0] dbg_mac_row    = core.mac_row[15:0];
+    wire [15:0] dbg_mac_col    = core.mac_col[15:0];
+    wire [3:0]  dbg_mac_t      = core.mac_t[3:0];
+    wire [9:0]  dbg_load_row   = core.load_row[9:0];
+    wire [9:0]  dbg_load_col   = core.load_col[9:0];
+    wire [7:0]  dbg_wf_cnt     = core.wf_cnt[7:0];
+
+    reg [31:0] dbg_snap_acc, dbg_snap_vact, dbg_snap_vrq, dbg_snap_vrnd;
+    reg [31:0] dbg_snap_vshf, dbg_snap_lb, dbg_snap_wq, dbg_snap_vbias, dbg_snap_vdelta;
+    reg        dbg_freeze;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            dbg_snap_acc <= 0; dbg_snap_vact <= 0; dbg_snap_vrq <= 0; dbg_snap_vrnd <= 0;
+            dbg_snap_vshf <= 0; dbg_snap_lb <= 0; dbg_snap_wq <= 0;
+            dbg_snap_vbias <= 0; dbg_snap_vdelta <= 0; dbg_freeze <= 0;
+        end else begin
+            dbg_freeze <= as_write && as_address == 8'h19;   // 写 0x64：冻结一拍
+            if (core_done || dbg_freeze) begin
+                dbg_snap_acc    <= core.acc_q[31:0];
+                dbg_snap_vact   <= core.v_act_l[0];
+                dbg_snap_vrq    <= core.v_rq64_l[0][31:0];
+                dbg_snap_vrnd   <= core.v_round_l[0][31:0];
+                dbg_snap_vshf   <= core.v_shifted[0][31:0];
+                dbg_snap_lb     <= core.lb_q[31:0];
+                dbg_snap_wq     <= {core.w_q[0][3], core.w_q[0][2], core.w_q[0][1], core.w_q[0][0]};
+                dbg_snap_vbias  <= core.v_biased_l[0];
+                dbg_snap_vdelta <= core.v_rnd_delta[0][31:0];
+            end
+        end
+    end
+
+    // 输出事件计数 / 层完成计数（累计，不复位）
+    reg [15:0] dbg_o_evt_cnt, dbg_done_cnt;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            dbg_o_evt_cnt <= 0; dbg_done_cnt <= 0;
+        end else begin
+            if (core_o_valid && core_o_ready) dbg_o_evt_cnt <= dbg_o_evt_cnt + 1;
+            if (core_done) dbg_done_cnt <= dbg_done_cnt + 1;
+        end
+    end
 
     //-----------------------------------------------------------------------
     // param 解析缓存 + 派生量
