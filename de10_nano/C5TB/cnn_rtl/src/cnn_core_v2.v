@@ -34,7 +34,7 @@ module cnn_core_v2 #(
     parameter G_MAX_OUT_CB = 4,    // 最大输出通道块（模型 out_c<=32）
     parameter G_MAX_IN_ROWS= 41,   // 最大输入行块高度（模型 max in_tile=39）
     parameter G_MAX_OROWS  = 20,   // 最大输出行块高度（模型 max tile=19）
-    parameter G_MAX_W      = 302,  // 最大输入宽度（IMAGE_MAX_W）
+    parameter G_MAX_W      = 512,  // 输入行缓冲最大列数（2 的幂：lb 地址乘法变移位，150MHz 收敛；软件实际 ≤302）
     parameter G_MAX_OW     = 150,  // 最大输出宽度（OUTPUT_MAX_W）
     parameter G_MAX_C      = 1024  // 最大输出通道数（requant 数组容量，模型 out_c 最大 1024）
 )(
@@ -881,6 +881,7 @@ module cnn_core_v2 #(
     reg signed [63:0] v_rq64;
     reg signed [31:0] v_act_l [0:7];   // 每 lane 的 act 后值（流水级 2）
     reg signed [31:0] v_biased_l [0:7]; // 每 lane 的 bias 后值（流水级 1，拆加法/比较链）
+    reg signed [31:0] v_rcl6_l [0:7];   // 每 lane 的 rcl6 上限（S_REQ_MUL 拍寄存 RAM 读，断组合读链）
     // 乘法拆三级（150MHz 单级 32×33 组合乘法 slack -10.1ns；64-bit 加法树 2 级仍紧）：
     //   级 1 = 4 个 16×16 DSP 乘法（v_act_l = a_hi<<16 + a_lo，rq_mult_q = m_hi<<16 + m_lo）
     //   级 2 = 两组 64-bit 并行加法（v_sum_lo/v_sum_hi），每级仅 1 个加法器
@@ -908,6 +909,7 @@ module cnn_core_v2 #(
                     v_biased_l[ln] <= 32'sd0;
                 else
                     v_biased_l[ln] <= acc_q[32*ln +: 32] + rq_bias_q[ln];
+                v_rcl6_l[ln] <= rq_rcl6_q[ln];
             end
         end
     end
@@ -925,7 +927,7 @@ module cnn_core_v2 #(
                         v_act = v_biased_l[ln][31] ? 32'sd0 : v_biased_l[ln];
                     end else if (act_reg == 2'd2) begin
                         v_act = v_biased_l[ln][31] ? 32'sd0 : v_biased_l[ln];
-                        if (v_act > rq_rcl6_q[ln]) v_act = rq_rcl6_q[ln];
+                        if (v_act > v_rcl6_l[ln]) v_act = v_rcl6_l[ln];
                     end
                     v_act_l[ln] <= v_act;
                 end
