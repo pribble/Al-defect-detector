@@ -3,7 +3,7 @@
 //=============================================================================
 // 端口与 ip/cnn_top_hw.tcl 完全一致（QSys 例化 cnn_top_0 的接线不变）：
 //   - hps2cnn_avs   Avalon 从接口（ARM 寄存器，8-bit 地址，waitrequest）
-//   - clock_1/reset 50MHz（soc_system.qsys 的 clk_cnn）
+//   - clock_1/reset 150MHz（soc_system.qsys 的 clk_cnn，PLL outclk_1）
 //   - 4 个 Avalon 主接口：param/scale 32b 读、load 64b 读、output 64b 写
 // 适配说明：
 //   - 内部例化 cnn_top_core（RTL 本体，tb_cnn_top 直接对拍它）
@@ -25,7 +25,7 @@ module cnn_top #(
     parameter OUTPUT_M_AXI_DATA_WIDTH = 64
 )(
     // ---- clock / reset ----
-    input  wire                sysclk,      // 工作时钟：QSys clk_cnn（PLL fpga_clk_cnn，50MHz），驱动全部逻辑与 4 个 Avalon 主接口
+    input  wire                sysclk,      // 工作时钟：QSys clk_cnn（PLL fpga_clk_cnn，150MHz），驱动全部逻辑与 4 个 Avalon 主接口
     input  wire                rst_n,       // 低有效异步复位：QSys clk_cnn.clk_reset
 
     // ---- hps2cnn_avs（Avalon 从接口，HPS→FPGA 寄存器访问）----
