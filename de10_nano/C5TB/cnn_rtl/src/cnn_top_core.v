@@ -105,17 +105,12 @@ module cnn_top_core (
             8'h40: as_readdata = reg_scale;
             // 调试只读寄存器（复现核专用，非黑盒协议；软件 start_fpga
             // 轮询超时期间读取，定位死锁现场）：
-            //   0x44 = {3'b0, start_clear_pending, core_done, 1'b0,
-            //          state[3:0], lr_pending[2:0], wr_pending[2:0],
-            //          dma_icb[7:0], dma_ibeat[7:0]}
-            //   0x48 = {dma_wbeat[19:0], dma_ibeat[15:8],
-            //          lr_round_end, lr_round_reset, core_i_ready, core_ow_ready}
-            8'h11: as_readdata = {3'b0, start_clear_pending, core_done, 1'b0,
-                                  state, lr_pending, wr_pending,
-                                  dma_icb, dma_ibeat[7:0]};
-            8'h12: as_readdata = {dma_wbeat, dma_ibeat[15:8],
-                                  lr_round_end, lr_round_reset,
-                                  core_i_ready, core_ow_ready};
+            //   0x44 = {state[3:0], lr_pending[7:0], wr_pending[7:0], dma_ibeat[11:0]}
+            //   0x48 = {dma_wbeat[19:0], lr_round_end, lr_round_reset,
+            //          core_i_ready, core_ow_ready, dma_obeat[7:0]}
+            8'h11: as_readdata = {state, lr_pending, wr_pending, dma_ibeat[11:0]};
+            8'h12: as_readdata = {dma_wbeat, lr_round_end, lr_round_reset,
+                                  core_i_ready, core_ow_ready, dma_obeat};
             8'h13: as_readdata = {lr_cmd_cnt, lr_rdv_cnt};   // 0x4C：lr 命令/返回计数
             8'h14: as_readdata = {wr_cmd_cnt, wr_rdv_cnt};   // 0x50：wr 命令/返回计数
             default: as_readdata = 32'h0;
@@ -228,7 +223,9 @@ module cnn_top_core (
     //   pr/sr（param/scale 块读）保持单笔：pr 27 字开销可忽略，sr 后续优化。
     // 写完成 = write && !waitrequest，协议不变。
     reg pr_pending, sr_pending;
-    reg [2:0] lr_pending, wr_pending;   // 在途笔数 0..4
+    reg [7:0]  lr_pending, wr_pending;   // 在途笔数 0..4（8-bit：3-bit 会回绕，
+    // 回绕后 lr_p<4 恒真 → lr_read 失去在途限制 → 命令洪泛 → 死锁（板上
+    // 实测 lr_cmd=52772 远超 lr_rdv=24528）
 
     wire pr_got = pr_pending && pr_readdatavalid;
     wire sr_got = sr_pending && sr_readdatavalid;
@@ -244,8 +241,8 @@ module cnn_top_core (
     // lr 轮边界（每 o_group 一轮：CONV = 全部 in_cb 个 cb；DW = 单 cb）
     wire lr_round_end   = (dma_icb == lr_last_cb_r && dma_ibeat == in_seg_words_r - 1);
     wire lr_round_reset = (lr_pending == 0 && lr_round_end && core_i_ready);
-    assign lr_read = core_i_ready && (lr_pending < 3'd4) && !lr_round_end && !lr_round_reset;
-    assign wr_read = core_ow_ready && (wr_pending < 3'd4) && (dma_wbeat < w_rb_beats_r);
+    assign lr_read = core_i_ready && (lr_pending < 8'd4) && !lr_round_end && !lr_round_reset;
+    assign wr_read = core_ow_ready && (wr_pending < 8'd4) && (dma_wbeat < w_rb_beats_r);
     assign core_o_ready  = 1'b1;   // core 输出不阻塞（与 v2 tb 的 o_ready=1 一致）
     assign ow_writedata  = core_o_data;
     assign ow_write      = core_o_valid;
@@ -269,9 +266,9 @@ module cnn_top_core (
             // 正解 = 单语句（同拍净 0，无虚高）+ 非零保护（无下溢）：
             //   pending + 接受 - (返回 && pending≠0)
             lr_pending <= lr_pending + (lr_read && !lr_waitrequest)
-                        - (lr_readdatavalid && lr_pending != 3'd0);
+                        - (lr_readdatavalid && lr_pending != 8'd0);
             wr_pending <= wr_pending + (wr_read && !wr_waitrequest)
-                        - (wr_readdatavalid && wr_pending != 3'd0);
+                        - (wr_readdatavalid && wr_pending != 8'd0);
         end
     end
 
