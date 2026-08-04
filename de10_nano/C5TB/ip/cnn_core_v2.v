@@ -31,17 +31,24 @@
 //-----------------------------------------------------------------------------
 // 16×16 乘法单元（模块级 multstyle=dsp：Quartus 对"数组元素上的 multstyle
 // 属性"推断不可靠，模块级属性 + 显式例化 100% 走 DSP 18×18，~3-4ns）。
-// a_signed=1 时 a 按有符号解释（hilo/hihi 的 a_hi），否则零扩展（lolo/lohi）。
+// A_SIGNED=1 时 a 按有符号解释（hilo/hihi 的 a_hi），否则零扩展（lolo/lohi）。
 // b 恒为无符号（m_lo/m_hi）。乘积统一 17×17 signed，赋给 32-bit 目标时
 // 低 32 位即正确补码（lolo/lohi ≤ 2^32-1、hilo/hihi ∈ [-2^31, 2^31-1]）。
+//
+// a_signed 必须是参数而非运行时信号：Quartus 对带符号选择 mux 的乘法器
+// 无法确定符号，每个例化被实现为 2 个乘法器（占满 1 个 Two Independent
+// 18x18 块）——实测 DSP 从预期 40 涨到 80/112（71%），与 M10K 78% 一起
+// 造成局部布线拥塞（fit 失败）。参数化后符号在综合时确定，每例化 1 个
+// 18×18 且可打包，DSP 块数减半，时序不变（仍走 DSP）。
 //-----------------------------------------------------------------------------
-(* multstyle = "dsp" *) module mul16x16_dsp (
+(* multstyle = "dsp" *) module mul16x16_dsp #(
+    parameter A_SIGNED = 0    // 1: a 按有符号解释（hilo/hihi）；0: 零扩展（lolo/lohi）
+) (
     input  wire [15:0] a,
     input  wire [15:0] b,
-    input  wire        a_signed,
     output wire [31:0] p
 );
-    wire signed [16:0] sa = a_signed ? $signed(a) : $signed({1'b0, a});
+    wire signed [16:0] sa = A_SIGNED ? $signed(a) : $signed({1'b0, a});
     wire signed [16:0] sb = $signed({1'b0, b});
     assign p = sa * sb;
 endmodule
@@ -922,14 +929,10 @@ module cnn_core_v2 #(
     genvar gi;
     generate
         for (gi = 0; gi < 8; gi = gi + 1) begin : g_mul16
-            mul16x16_dsp u_lolo (.a(v_act_l[gi][15:0]),  .b(rq_mult_q[gi][15:0]),
-                                 .a_signed(1'b0), .p(mul_lolo[gi]));
-            mul16x16_dsp u_lohi (.a(v_act_l[gi][15:0]),  .b(rq_mult_q[gi][31:16]),
-                                 .a_signed(1'b0), .p(mul_lohi[gi]));
-            mul16x16_dsp u_hilo (.a(v_act_l[gi][31:16]), .b(rq_mult_q[gi][15:0]),
-                                 .a_signed(1'b1), .p(mul_hilo[gi]));
-            mul16x16_dsp u_hihi (.a(v_act_l[gi][31:16]), .b(rq_mult_q[gi][31:16]),
-                                 .a_signed(1'b1), .p(mul_hihi[gi]));
+            mul16x16_dsp #(.A_SIGNED(0)) u_lolo (.a(v_act_l[gi][15:0]), .b(rq_mult_q[gi][15:0]), .p(mul_lolo[gi]));
+            mul16x16_dsp #(.A_SIGNED(0)) u_lohi (.a(v_act_l[gi][15:0]), .b(rq_mult_q[gi][31:16]), .p(mul_lohi[gi]));
+            mul16x16_dsp #(.A_SIGNED(1)) u_hilo (.a(v_act_l[gi][31:16]), .b(rq_mult_q[gi][15:0]), .p(mul_hilo[gi]));
+            mul16x16_dsp #(.A_SIGNED(1)) u_hihi (.a(v_act_l[gi][31:16]), .b(rq_mult_q[gi][31:16]), .p(mul_hihi[gi]));
         end
     endgenerate
     reg signed [63:0] v_sum_lo [0:7];  // lolo + lohi<<16（无符号两项）
