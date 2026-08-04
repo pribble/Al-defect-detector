@@ -493,7 +493,8 @@ module cnn_core_v2 #(
     localparam S_MAC_MUL2 = 4'd12;  // 窗口 tap 加法树拍（mac_p_r → v_sum_r）
     localparam S_MAC_ACC  = 4'd5;   // 窗口 tap 累加拍（v_sum_r → acc_local）
     localparam S_REQ_ADDR = 4'd6;   // requant 请求拍（采样 acc_q）
-    localparam S_REQ_MUL  = 4'd7;   // requant 乘加拍（bias+act，寄存 v_act_l）
+    localparam S_REQ_MUL  = 4'd7;   // requant 乘加拍级 1（acc_q+bias，寄存 v_biased_l）
+    localparam S_REQ_MULB = 5'd19;  // requant 乘加拍级 2（relu/rcl6 比较 → v_act_l）
     localparam S_REQ_MUL2 = 4'd8;   // requant 乘法拍级 1（4×16×16 DSP 部分积，寄存 v_p_*/v_shift_l）
     localparam S_REQ_MUL3 = 4'd15;  // requant 乘法拍级 2（两组中间和 → v_sum_lo/v_sum_hi）
     localparam S_REQ_MUL4 = 5'd16;  // requant 乘法拍级 3（中间和相加 → v_rq64_l，每级仅 1 个 64-bit 加法）
@@ -717,8 +718,13 @@ module cnn_core_v2 #(
                     state <= S_REQ_MUL;
                 end
 
-                //---- requant 乘加拍：bias+act（快），结果寄存 v_act_l ----
+                //---- requant 乘加拍级 1：acc_q + bias（32-bit 加法单独一拍）----
                 S_REQ_MUL: begin
+                    state <= S_REQ_MULB;
+                end
+
+                //---- requant 乘加拍级 2：relu/rcl6 比较 → v_act_l（比较+mux 单独一拍）----
+                S_REQ_MULB: begin
                     state <= S_REQ_MUL2;
                 end
 
@@ -873,7 +879,8 @@ module cnn_core_v2 #(
     integer ln;
     reg signed [31:0] v_raw, v_biased, v_act;
     reg signed [63:0] v_rq64;
-    reg signed [31:0] v_act_l [0:7];   // 每 lane 的 act 后值（流水级 1）
+    reg signed [31:0] v_act_l [0:7];   // 每 lane 的 act 后值（流水级 2）
+    reg signed [31:0] v_biased_l [0:7]; // 每 lane 的 bias 后值（流水级 1，拆加法/比较链）
     // 乘法拆三级（150MHz 单级 32×33 组合乘法 slack -10.1ns；64-bit 加法树 2 级仍紧）：
     //   级 1 = 4 个 16×16 DSP 乘法（v_act_l = a_hi<<16 + a_lo，rq_mult_q = m_hi<<16 + m_lo）
     //   级 2 = 两组 64-bit 并行加法（v_sum_lo/v_sum_hi），每级仅 1 个加法器
@@ -892,24 +899,35 @@ module cnn_core_v2 #(
     reg [31:0] v_out_ch;
     reg [7:0] v_q [0:7];
 
-    // 乘加拍：acc_q（S_REQ_ADDR 采样的值）→ bias → act，寄存 v_act_l
+    // 乘加拍级 1（S_REQ_MUL）：acc_q + bias → v_biased_l（32-bit 加法单独一拍，~3ns）
     always @(posedge clk) begin
         if (state == S_REQ_MUL) begin
             for (ln = 0; ln < 8; ln = ln + 1) begin
                 v_out_ch = o_group * 8 + ln;
-                if (v_out_ch >= out_c_reg) begin
+                if (v_out_ch >= out_c_reg)
+                    v_biased_l[ln] <= 32'sd0;
+                else
+                    v_biased_l[ln] <= acc_q[32*ln +: 32] + rq_bias_q[ln];
+            end
+        end
+    end
+
+    // 乘加拍级 2（S_REQ_MULB）：relu/rcl6 比较 → v_act_l（比较+mux 单独一拍，~3ns）
+    always @(posedge clk) begin
+        if (state == S_REQ_MULB) begin
+            for (ln = 0; ln < 8; ln = ln + 1) begin
+                v_out_ch = o_group * 8 + ln;
+                if (v_out_ch >= out_c_reg)
                     v_act_l[ln] <= 32'sd0;
-                end else begin
-                v_raw = acc_q[32*ln +: 32];
-                v_biased = v_raw + rq_bias_q[ln];
-                v_act = v_biased;
-                if (act_reg == 2'd1) begin
-                    v_act = v_biased[31] ? 32'sd0 : v_biased;
-                end else if (act_reg == 2'd2) begin
-                    v_act = v_biased[31] ? 32'sd0 : v_biased;
-                    if (v_act > rq_rcl6_q[ln]) v_act = rq_rcl6_q[ln];
-                end
-                v_act_l[ln] <= v_act;
+                else begin
+                    v_act = v_biased_l[ln];
+                    if (act_reg == 2'd1) begin
+                        v_act = v_biased_l[ln][31] ? 32'sd0 : v_biased_l[ln];
+                    end else if (act_reg == 2'd2) begin
+                        v_act = v_biased_l[ln][31] ? 32'sd0 : v_biased_l[ln];
+                        if (v_act > rq_rcl6_q[ln]) v_act = rq_rcl6_q[ln];
+                    end
+                    v_act_l[ln] <= v_act;
                 end
             end
         end
