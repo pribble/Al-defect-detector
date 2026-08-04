@@ -1,7 +1,6 @@
 //=============================================================================
 // cnn_core_v2 — 黑盒式行块驻留卷积执行器（阶段 4 核心）
-//=============================================================================
-// 与阶段 3 的 cnn_core 相比（黑盒真实架构对齐）：
+//=============================================================================// 与阶段 3 的 cnn_core 相比（黑盒真实架构对齐）：
 //   1) 输入流改为 64-bit NHWC8 块序：[C/8][H][W][8]，DDR 顺序 burst 读；
 //      pad 行由本模块补 0（不拉 i_ready，DMA 自动跳过）。
 //   2) 行缓冲按输入通道块组织：[in_cb][in_row_tile][W][8]（行块驻留）。
@@ -28,6 +27,24 @@
 //   i_stream / iw_stream：64-bit 握手（DMA 连续读，地址 = 已发字节数）
 //   o_stream：64-bit 输出事件（8 通道/拍，NHWC8 块序）
 //=============================================================================
+
+//-----------------------------------------------------------------------------
+// 16×16 乘法单元（模块级 multstyle=dsp：Quartus 对"数组元素上的 multstyle
+// 属性"推断不可靠，模块级属性 + 显式例化 100% 走 DSP 18×18，~3-4ns）。
+// a_signed=1 时 a 按有符号解释（hilo/hihi 的 a_hi），否则零扩展（lolo/lohi）。
+// b 恒为无符号（m_lo/m_hi）。乘积统一 17×17 signed，赋给 32-bit 目标时
+// 低 32 位即正确补码（lolo/lohi ≤ 2^32-1、hilo/hihi ∈ [-2^31, 2^31-1]）。
+//-----------------------------------------------------------------------------
+(* multstyle = "dsp" *) module mul16x16_dsp (
+    input  wire [15:0] a,
+    input  wire [15:0] b,
+    input  wire        a_signed,
+    output wire [31:0] p
+);
+    wire signed [16:0] sa = a_signed ? $signed(a) : $signed({1'b0, a});
+    wire signed [16:0] sb = $signed({1'b0, b});
+    assign p = sa * sb;
+endmodule
 
 module cnn_core_v2 #(
     parameter G_MAX_IN_CB  = 1,    // 输入通道块流式驻留（每 o_group 轮重读 1 cb）
@@ -899,6 +916,22 @@ module cnn_core_v2 #(
     (* multstyle = "dsp" *) reg [31:0] v_p_lohi [0:7];   // a_lo × m_hi（无符号 16×16）
     (* multstyle = "dsp" *) reg signed [31:0] v_p_hilo [0:7];  // a_hi × m_lo（signed 16 × unsigned 16）
     (* multstyle = "dsp" *) reg signed [31:0] v_p_hihi [0:7];  // a_hi × m_hi（signed 16 × unsigned 16）
+
+    // 16×16 乘法用显式 DSP 例化（模块级 multstyle 最可靠；数组属性曾被 Quartus 忽略）
+    wire [31:0] mul_lolo [0:7], mul_lohi [0:7], mul_hilo [0:7], mul_hihi [0:7];
+    genvar gi;
+    generate
+        for (gi = 0; gi < 8; gi = gi + 1) begin : g_mul16
+            mul16x16_dsp u_lolo (.a(v_act_l[gi][15:0]),  .b(rq_mult_q[gi][15:0]),
+                                 .a_signed(1'b0), .p(mul_lolo[gi]));
+            mul16x16_dsp u_lohi (.a(v_act_l[gi][15:0]),  .b(rq_mult_q[gi][31:16]),
+                                 .a_signed(1'b0), .p(mul_lohi[gi]));
+            mul16x16_dsp u_hilo (.a(v_act_l[gi][31:16]), .b(rq_mult_q[gi][15:0]),
+                                 .a_signed(1'b1), .p(mul_hilo[gi]));
+            mul16x16_dsp u_hihi (.a(v_act_l[gi][31:16]), .b(rq_mult_q[gi][31:16]),
+                                 .a_signed(1'b1), .p(mul_hihi[gi]));
+        end
+    endgenerate
     reg signed [63:0] v_sum_lo [0:7];  // lolo + lohi<<16（无符号两项）
     reg signed [63:0] v_sum_hi [0:7];  // hilo<<16 + hihi<<32（符号扩展两项）
     reg signed [63:0] v_rnd_delta [0:7];  // round 桶形移位结果（1<<(shift-1)）
@@ -958,12 +991,10 @@ module cnn_core_v2 #(
                         v_p_hihi[ln] <= 32'sd0;
                     end
                 else begin
-                    v_p_lolo[ln] <= v_act_l[ln][15:0] * rq_mult_q[ln][15:0];
-                    v_p_lohi[ln] <= v_act_l[ln][15:0] * rq_mult_q[ln][31:16];
-                    v_p_hilo[ln] <= $signed(v_act_l[ln][31:16]) *
-                                    $signed({1'b0, rq_mult_q[ln][15:0]});
-                    v_p_hihi[ln] <= $signed(v_act_l[ln][31:16]) *
-                                    $signed({1'b0, rq_mult_q[ln][31:16]});
+                    v_p_lolo[ln] <= mul_lolo[ln];
+                    v_p_lohi[ln] <= mul_lohi[ln];
+                    v_p_hilo[ln] <= mul_hilo[ln];
+                    v_p_hihi[ln] <= mul_hihi[ln];
                 end
                 v_shift_l[ln] <= rq_shift_q[ln];
             end
