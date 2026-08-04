@@ -106,12 +106,15 @@ def gen_layer(idx, rng, out_dir):
     for rb in range(lp.row_block):
         base = rb * lp.out_row_tile * s - p
         r0, r1 = max(0, base), min(in_h, base + lp.in_row_tile)
-        for cb in range(lp.in_cb):
-            for r in range(r0, r1):
-                for w in range(in_w):
-                    by = bytes(dm.buf[in_addr(lp, cb, r, w, m)]
-                               for m in range(8))
-                    in_words.append(struct.unpack('<Q', by)[0])
+        # 多 o_group（out_c > 8）时 core 每输出组重读一遍全部输入块
+        # （lb 流式单 cb 驻留），输入段按 chn_block 重复拼接
+        for og in range(lp.chn_block):
+            for cb in range(lp.in_cb):
+                for r in range(r0, r1):
+                    for w in range(in_w):
+                        by = bytes(dm.buf[in_addr(lp, cb, r, w, m)]
+                                   for m in range(8))
+                        in_words.append(struct.unpack('<Q', by)[0])
         r_out0 = rb * lp.out_row_tile
         r_out1 = min(out_h, r_out0 + lp.out_row_tile)
         for cb_out in range(lp.chn_block):

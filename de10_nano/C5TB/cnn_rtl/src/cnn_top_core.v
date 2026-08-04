@@ -108,9 +108,10 @@ module cnn_top_core (
             //   0x44 = {state[3:0], lr_pending[7:0], wr_pending[7:0], dma_ibeat[11:0]}
             //   0x48 = {dma_wbeat[19:0], lr_round_end, lr_round_reset,
             //          core_i_ready, core_ow_ready, dma_obeat[7:0]}
+            //   （obeat 只取低 8 位：out_seg_words 可能 >255 会回绕，仅调试参考）
             8'h11: as_readdata = {state, lr_pending, wr_pending, dma_ibeat[11:0]};
             8'h12: as_readdata = {dma_wbeat, lr_round_end, lr_round_reset,
-                                  core_i_ready, core_ow_ready, dma_obeat};
+                                  core_i_ready, core_ow_ready, dma_obeat[7:0]};
             8'h13: as_readdata = {lr_cmd_cnt, lr_rdv_cnt};   // 0x4C：lr 命令/返回计数
             8'h14: as_readdata = {wr_cmd_cnt, wr_rdv_cnt};   // 0x50：wr 命令/返回计数
             default: as_readdata = 32'h0;
@@ -229,8 +230,49 @@ module cnn_top_core (
 
     wire pr_got = pr_pending && pr_readdatavalid;
     wire sr_got = sr_pending && sr_readdatavalid;
-    wire lr_got = lr_readdatavalid;
-    wire wr_got = wr_readdatavalid;
+    // lr/wr 共享 load master：cnn_top.v 把 lr/wr 的 readdatavalid 都接到
+    // load_avm_readdatavalid，任一方的数据返回都会广播到两路。命令串行
+    // （S_LOAD/S_WEIGHT 互斥，lr_read 与 wr_read 不同时拉高），但返回会
+    // 交错：S_LOAD 末几笔在途命令的返回在 S_WEIGHT 期间到达。裸接时 wr
+    // 返回会冒充 i_valid、lr 返回会冒充 iw_valid → 装载计数错乱 → core
+    // 状态机破坏 → core_done 不来 → 死锁（板上实测 lr_rdv=lr_cmd+wr_cmd）。
+    // 正解：命令类型 FIFO（深度 4 = 桥 MAX_PENDING_RESPONSES，Avalon
+    // 返回保序），返回拍按队首类型路由回本侧。
+    reg [3:0]  cmd_type_q;             // 4 深：0=lr，1=wr
+    reg [1:0]  cmd_head, cmd_tail;
+    reg [2:0]  cmd_cnt;
+    wire cmd_accept = (lr_read && !lr_waitrequest) || (wr_read && !wr_waitrequest);
+    wire cmd_return = (lr_readdatavalid || wr_readdatavalid) && (cmd_cnt != 3'd0);
+    wire cmd_is_wr  = cmd_type_q[cmd_head];
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            cmd_head <= 0; cmd_tail <= 0; cmd_cnt <= 0;
+        end else if (core_done) begin
+            // 行块结束：丢弃在途残留（与 lr/wr_pending 清零一致），
+            // 残留返回到达时 cmd_cnt==0 → 不 pop → 被丢弃
+            cmd_head <= 0; cmd_tail <= 0; cmd_cnt <= 0;
+        end else begin
+            // 单语句净 0：同拍出+入 = 计数不变。两条 if 分开写会在
+            // 返回+接受同拍时后写覆盖（与 pending 历史 bug 同类），
+            // 计数失真 → 返回被误丢 → S_LOAD 等 i_valid 卡死。
+            if (cmd_return && cmd_accept && (cmd_cnt < 3'd4)) begin
+                cmd_type_q[cmd_tail] <= wr_read;   // lr/wr 不同时拉高，无冲突
+                cmd_tail <= cmd_tail + 2'd1;
+                cmd_head <= cmd_head + 2'd1;
+            end else if (cmd_accept && (cmd_cnt < 3'd4)) begin
+                cmd_type_q[cmd_tail] <= wr_read;   // lr/wr 不同时拉高，无冲突
+                cmd_tail <= cmd_tail + 2'd1;
+                cmd_cnt <= cmd_cnt + 1;
+            end else if (cmd_return) begin
+                cmd_head <= cmd_head + 2'd1;
+                cmd_cnt <= cmd_cnt - 1;
+            end
+        end
+    end
+
+    wire lr_got = (lr_readdatavalid || wr_readdatavalid) && (cmd_cnt != 3'd0) && !cmd_is_wr;
+    wire wr_got = (lr_readdatavalid || wr_readdatavalid) && (cmd_cnt != 3'd0) &&  cmd_is_wr;
     wire ow_got = ow_write && !ow_waitrequest;
 
     // core 流映射
@@ -238,11 +280,58 @@ module cnn_top_core (
     assign core_i_data   = lr_readdata;
     assign core_iw_valid = wr_got;
     assign core_iw_data  = wr_readdata;
-    // lr 轮边界（每 o_group 一轮：CONV = 全部 in_cb 个 cb；DW = 单 cb）
-    wire lr_round_end   = (dma_icb == lr_last_cb_r && dma_ibeat == in_seg_words_r - 1);
-    wire lr_round_reset = (lr_pending == 0 && lr_round_end && core_i_ready);
+    // lr 段边界（每 (o_group, cb) 段 = in_seg_words 字）：段尾命令发出后停止，
+    // 等返回清空 + core 离开 S_LOAD 再解锁——否则在途命令跨段提前发出，
+    // 返回在 core 非 S_LOAD 时到达被丢弃（多 cb 层 i_group 错位）。
+    // 最后一段（icb == lr_last_cb_r）额外在 core 重新拉 i_ready 时
+    // round_reset 重置地址（CONV 回段首重读 / DW +1 cb）。
+    wire lr_last_cmd = (dma_ibeat == in_seg_words_r - 1);
+    reg  lr_round_end_q;
+    reg  lr_last_seg_q;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            lr_round_end_q <= 1'b0;
+            lr_last_seg_q  <= 1'b0;
+        end else if (core_done) begin
+            lr_round_end_q <= 1'b0;
+            lr_last_seg_q  <= 1'b0;
+        end else if (lr_round_reset) begin
+            lr_round_end_q <= 1'b0;
+        end else if (lr_round_end_q && lr_pending == 8'd0 && !core_i_ready && !lr_last_seg_q) begin
+            lr_round_end_q <= 1'b0;   // 中间段：返回清空 + core 离开 S_LOAD → 解锁
+        end else if (lr_last_cmd && lr_read && !lr_waitrequest) begin
+            lr_round_end_q <= 1'b1;
+            lr_last_seg_q  <= (dma_icb == lr_last_cb_r);
+        end
+    end
+    wire lr_round_end   = lr_round_end_q;
+    wire lr_round_reset = (lr_pending == 8'd0) && lr_round_end && core_i_ready && lr_last_seg_q;
     assign lr_read = core_i_ready && (lr_pending < 8'd4) && !lr_round_end && !lr_round_reset;
-    assign wr_read = core_ow_ready && (wr_pending < 8'd4) && (dma_wbeat < w_rb_beats_r);
+    // wr 轮末（每 o_group 一轮 = p_k==1 ? 8 : 72 个字）：轮内计数到末值且
+    // 命令发出后停止——否则 wbeat 卡在末值而 (dma_wbeat < w_rb_beats_r)
+    // 恒真，重复命令无限发出；也避免轮间在途返回在 core 非 S_WEIGHT 时
+    // 被丢弃（core 只在其 S_WEIGHT 期间消费 iw_valid）。等 pending 清空
+    // 且 core 离开 S_WEIGHT 后解锁，下一轮 core 重新拉 ow_ready 时再发。
+    reg [7:0] wr_ibeat_q;
+    reg wr_round_end_q;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            wr_ibeat_q <= 8'd0;
+            wr_round_end_q <= 1'b0;
+        end else if (core_done) begin
+            wr_ibeat_q <= 8'd0;
+            wr_round_end_q <= 1'b0;
+        end else if (wr_round_end_q && wr_pending == 8'd0 && !core_ow_ready) begin
+            wr_round_end_q <= 1'b0;
+        end else if (!wr_round_end_q && wr_read && !wr_waitrequest) begin
+            if (wr_ibeat_q == (p_k == 1 ? 8'd7 : 8'd71)) begin
+                wr_ibeat_q <= 8'd0;
+                wr_round_end_q <= 1'b1;
+            end else
+                wr_ibeat_q <= wr_ibeat_q + 8'd1;
+        end
+    end
+    assign wr_read = core_ow_ready && (wr_pending < 8'd4) && (dma_wbeat < w_rb_beats_r) && !wr_round_end_q;
     assign core_o_ready  = 1'b1;   // core 输出不阻塞（与 v2 tb 的 o_ready=1 一致）
     assign ow_writedata  = core_o_data;
     assign ow_write      = core_o_valid;
@@ -258,22 +347,21 @@ module cnn_top_core (
             lr_pending <= 0;
             wr_pending <= 0;
         end else begin
-            // lr/wr 共享 load master：任一方的 readdatavalid 都会到达两路。
-            // 计数器实测（lr_cmd=2999/lr_rdv=2999 全返回，但 lr_p 残留 3）：
-            // 1) 两条 if 的"后写覆盖"在返回+接受同拍（消费拍发下一笔）时
-            //    恒 +1 → pending 虚高 → 第 in_seg_words 笔发不出 → 残留卡死；
-            // 2) 无保护的减法会被对方数据返回下溢（0-1=7）。
-            // 正解 = 单语句（同拍净 0，无虚高）+ 非零保护（无下溢）：
-            //   pending + 接受 - (返回 && pending≠0)
+            // 共享 load master 的返回已由 cmd FIFO 按命令序路由
+            // （见 lr_got/wr_got 定义）：本侧只消费本侧命令的返回。
+            // 单语句净 0（同拍返回+接受，无虚高）+ 非零保护（残留
+            // 丢弃双保险，无下溢）：
+            //   pending + 接受 - (本侧返回 && pending≠0)
             lr_pending <= lr_pending + (lr_read && !lr_waitrequest)
-                        - (lr_readdatavalid && lr_pending != 8'd0);
+                        - (lr_got && lr_pending != 8'd0);
             wr_pending <= wr_pending + (wr_read && !wr_waitrequest)
-                        - (wr_readdatavalid && wr_pending != 8'd0);
+                        - (wr_got && wr_pending != 8'd0);
         end
     end
 
-    // 调试计数器（0x4C/0x50 只读）：命令接受数 vs 数据返回数，
-    // 定位 readdatavalid 不返回是桥的问题还是计数的问题
+    // 调试计数器（0x4C/0x50 只读）：命令接受数 vs 本侧数据返回数
+    // （lr_got/wr_got 已按命令序路由，修复后 lr_rdv==lr_cmd、wr_rdv==wr_cmd，
+    // 不再互相污染），定位 readdatavalid 不返回是桥的问题还是计数的问题
     reg [15:0] lr_cmd_cnt, lr_rdv_cnt, wr_cmd_cnt, wr_rdv_cnt;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -281,9 +369,9 @@ module cnn_top_core (
             wr_cmd_cnt <= 0; wr_rdv_cnt <= 0;
         end else begin
             if (lr_read && !lr_waitrequest) lr_cmd_cnt <= lr_cmd_cnt + 16'd1;
-            if (lr_readdatavalid)           lr_rdv_cnt <= lr_rdv_cnt + 16'd1;
+            if (lr_got)                     lr_rdv_cnt <= lr_rdv_cnt + 16'd1;
             if (wr_read && !wr_waitrequest) wr_cmd_cnt <= wr_cmd_cnt + 16'd1;
-            if (wr_readdatavalid && wr_cmd_cnt != 0) wr_rdv_cnt <= wr_rdv_cnt + 16'd1;
+            if (wr_got)                     wr_rdv_cnt <= wr_rdv_cnt + 16'd1;
         end
     end
 
@@ -514,11 +602,12 @@ module cnn_top_core (
 
                     // lr：命令接受拍推进地址/计数（cb 段尾跳转）；每 o_group 轮末
                     // （数据全返回后 core 重新拉 i_ready）重置：CONV 回行块首重读
-                    // 全部 cb，DW 地址 +1 cb（每 o_group 只读自己的 cb）
+                    // 全部 cb；DW 地址已在段尾跳转后到达下一 cb 段首（跳转 =
+                    // +in_cb_stride - in_seg_tail），round_reset 不再推进
                     if (lr_round_reset) begin
                         dma_icb <= 0; dma_ibeat <= 0;
-                        lr_address <= (p_type == 4) ? (lr_address + in_cb_stride_r)
-                                                    : (reg_ddrin + (p_input_offset << 3) + in_rb_base_r);
+                        if (p_type != 4)
+                            lr_address <= reg_ddrin + (p_input_offset << 3) + in_rb_base_r;
                     end else if (lr_read && !lr_waitrequest) begin
                         if (dma_ibeat == in_seg_words_r - 1) begin
                             lr_address <= lr_address + in_cb_stride_r - in_seg_tail_r;

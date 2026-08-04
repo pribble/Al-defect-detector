@@ -198,10 +198,10 @@ module cnn_core_v2 #(
     reg [7:0]  q_shift_1;
     reg signed [31:0] q_rcl6_1;
     always @(posedge clk) begin
-        q_bias_1  <= bias_store_1[rq_raddr];
-        q_rcl6_1  <= rcl6_store_1[rq_raddr];
-        q_mult_1  <= rq_m_store_1[rq_raddr];
-        q_shift_1 <= rq_r_store_1[rq_raddr];
+        q_bias_1  <= bias_store_1[rq_raddr + 9'd1];
+        q_rcl6_1  <= rcl6_store_1[rq_raddr + 9'd1];
+        q_mult_1  <= rq_m_store_1[rq_raddr + 9'd1];
+        q_shift_1 <= rq_r_store_1[rq_raddr + 9'd1];
     end
     assign rq_bias_q[1]  = q_bias_1;
     assign rq_mult_q[1]  = q_mult_1;
@@ -232,10 +232,10 @@ module cnn_core_v2 #(
     reg [7:0]  q_shift_2;
     reg signed [31:0] q_rcl6_2;
     always @(posedge clk) begin
-        q_bias_2  <= bias_store_2[rq_raddr];
-        q_rcl6_2  <= rcl6_store_2[rq_raddr];
-        q_mult_2  <= rq_m_store_2[rq_raddr];
-        q_shift_2 <= rq_r_store_2[rq_raddr];
+        q_bias_2  <= bias_store_2[rq_raddr + 9'd2];
+        q_rcl6_2  <= rcl6_store_2[rq_raddr + 9'd2];
+        q_mult_2  <= rq_m_store_2[rq_raddr + 9'd2];
+        q_shift_2 <= rq_r_store_2[rq_raddr + 9'd2];
     end
     assign rq_bias_q[2]  = q_bias_2;
     assign rq_mult_q[2]  = q_mult_2;
@@ -266,10 +266,10 @@ module cnn_core_v2 #(
     reg [7:0]  q_shift_3;
     reg signed [31:0] q_rcl6_3;
     always @(posedge clk) begin
-        q_bias_3  <= bias_store_3[rq_raddr];
-        q_rcl6_3  <= rcl6_store_3[rq_raddr];
-        q_mult_3  <= rq_m_store_3[rq_raddr];
-        q_shift_3 <= rq_r_store_3[rq_raddr];
+        q_bias_3  <= bias_store_3[rq_raddr + 9'd3];
+        q_rcl6_3  <= rcl6_store_3[rq_raddr + 9'd3];
+        q_mult_3  <= rq_m_store_3[rq_raddr + 9'd3];
+        q_shift_3 <= rq_r_store_3[rq_raddr + 9'd3];
     end
     assign rq_bias_q[3]  = q_bias_3;
     assign rq_mult_q[3]  = q_mult_3;
@@ -300,10 +300,10 @@ module cnn_core_v2 #(
     reg [7:0]  q_shift_4;
     reg signed [31:0] q_rcl6_4;
     always @(posedge clk) begin
-        q_bias_4  <= bias_store_4[rq_raddr];
-        q_rcl6_4  <= rcl6_store_4[rq_raddr];
-        q_mult_4  <= rq_m_store_4[rq_raddr];
-        q_shift_4 <= rq_r_store_4[rq_raddr];
+        q_bias_4  <= bias_store_4[rq_raddr + 9'd4];
+        q_rcl6_4  <= rcl6_store_4[rq_raddr + 9'd4];
+        q_mult_4  <= rq_m_store_4[rq_raddr + 9'd4];
+        q_shift_4 <= rq_r_store_4[rq_raddr + 9'd4];
     end
     assign rq_bias_q[4]  = q_bias_4;
     assign rq_mult_q[4]  = q_mult_4;
@@ -334,10 +334,10 @@ module cnn_core_v2 #(
     reg [7:0]  q_shift_5;
     reg signed [31:0] q_rcl6_5;
     always @(posedge clk) begin
-        q_bias_5  <= bias_store_5[rq_raddr];
-        q_rcl6_5  <= rcl6_store_5[rq_raddr];
-        q_mult_5  <= rq_m_store_5[rq_raddr];
-        q_shift_5 <= rq_r_store_5[rq_raddr];
+        q_bias_5  <= bias_store_5[rq_raddr + 9'd5];
+        q_rcl6_5  <= rcl6_store_5[rq_raddr + 9'd5];
+        q_mult_5  <= rq_m_store_5[rq_raddr + 9'd5];
+        q_shift_5 <= rq_r_store_5[rq_raddr + 9'd5];
     end
     assign rq_bias_q[5]  = q_bias_5;
     assign rq_mult_q[5]  = q_mult_5;
@@ -368,10 +368,10 @@ module cnn_core_v2 #(
     reg [7:0]  q_shift_6;
     reg signed [31:0] q_rcl6_6;
     always @(posedge clk) begin
-        q_bias_6  <= bias_store_6[rq_raddr];
-        q_rcl6_6  <= rcl6_store_6[rq_raddr];
-        q_mult_6  <= rq_m_store_6[rq_raddr];
-        q_shift_6 <= rq_r_store_6[rq_raddr];
+        q_bias_6  <= bias_store_6[rq_raddr + 9'd6];
+        q_rcl6_6  <= rcl6_store_6[rq_raddr + 9'd6];
+        q_mult_6  <= rq_m_store_6[rq_raddr + 9'd6];
+        q_shift_6 <= rq_r_store_6[rq_raddr + 9'd6];
     end
     assign rq_bias_q[6]  = q_bias_6;
     assign rq_mult_q[6]  = q_mult_6;
@@ -402,10 +402,10 @@ module cnn_core_v2 #(
     reg [7:0]  q_shift_7;
     reg signed [31:0] q_rcl6_7;
     always @(posedge clk) begin
-        q_bias_7  <= bias_store_7[rq_raddr];
-        q_rcl6_7  <= rcl6_store_7[rq_raddr];
-        q_mult_7  <= rq_m_store_7[rq_raddr];
-        q_shift_7 <= rq_r_store_7[rq_raddr];
+        q_bias_7  <= bias_store_7[rq_raddr + 9'd7];
+        q_rcl6_7  <= rcl6_store_7[rq_raddr + 9'd7];
+        q_mult_7  <= rq_m_store_7[rq_raddr + 9'd7];
+        q_shift_7 <= rq_r_store_7[rq_raddr + 9'd7];
     end
     assign rq_bias_q[7]  = q_bias_7;
     assign rq_mult_q[7]  = q_mult_7;
@@ -543,6 +543,10 @@ module cnn_core_v2 #(
 
                 //---- 装载输入行块（流式：每轮 1 个通道块，cb 选择由顶层 DMA 轮控制）----
                 S_LOAD: begin
+                    // 多 o_group 时从 S_REQ_OUT 直接进入：必须拉低 o_valid，
+                    // 否则残留 1 → 输出持续被收集（o_ready=1 恒等）→ 失控
+                    // （单组层走 S_DONE 拉低故未暴露）
+                    o_valid <= 1'b0;
                     if (load_row_valid) begin
                         if (i_valid) begin
                             lb[lb_waddr] <= i_data;

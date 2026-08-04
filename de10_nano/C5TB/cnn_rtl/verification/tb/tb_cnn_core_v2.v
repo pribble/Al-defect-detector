@@ -208,7 +208,7 @@ module tb_cnn_core_v2;
                 base = rb * tile * ss - pp;
                 r0 = (base > 0) ? base : 0;
                 r1 = (base + in_tile < in_h) ? base + in_tile : in_h;
-                in_seg = (r1 > r0 ? r1 - r0 : 0) * in_cb * in_w;
+                in_seg = (r1 > r0 ? r1 - r0 : 0) * in_cb * in_w * out_cb;
             end
             begin : blk2
                 integer r_out0, r_out1;
@@ -250,6 +250,9 @@ module tb_cnn_core_v2;
             if (o_cnt != exp_seg) begin
                 $display("  rb %0d: o_cnt=%0d != exp_seg=%0d", rb, o_cnt,
                          exp_seg);
+                $display("  DBG cfg: out_w=%0d tile=%0d og=%0d rr=%0d rc=%0d state=%0d done=%0d",
+                         dut.out_w_reg, dut.out_row_tile_reg, dut.o_group,
+                         dut.rq_row, dut.rq_col, dut.state, dut.o_done);
                 errors = errors + 1;
             end
             for (i = 0; i < exp_seg && i < o_cnt; i = i + 1) begin

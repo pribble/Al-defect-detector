@@ -94,7 +94,9 @@ module cnn_top #(
     wire        ow_waitrequest;
 
     // 权重读复用 load master（黑盒无独立权重 master；core 的 S_LOAD/S_WEIGHT
-    // 串行，lr_read 与 wr_read 不同时拉高——load_avm_readdata 同时回灌两路）
+    // 串行，lr_read 与 wr_read 不同时拉高）。注意 readdatavalid 是广播的：
+    // 两路都接 load_avm_readdatavalid，返回归属由 cnn_top_core 内的命令类型
+    // FIFO（深度 4，返回保序）按序路由回 lr/wr，不可裸接混用。
     assign lr_readdata = load_avm_readdata;
     assign wr_readdata = load_avm_readdata;
     assign lr_waitrequest = load_avm_waitrequest;

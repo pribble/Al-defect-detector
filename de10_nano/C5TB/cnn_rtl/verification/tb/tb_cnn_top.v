@@ -41,14 +41,14 @@ module tb_cnn_top;
     reg         sr_waitrequest = 0;
     wire [31:0] lr_address;
     wire        lr_read;
-    reg  [63:0] lr_readdata;
-    reg         lr_readdatavalid;
-    reg         lr_waitrequest = 0;
+    wire [63:0] lr_readdata;
+    wire        lr_readdatavalid;
+    wire        lr_waitrequest;
     wire [31:0] wr_address;
     wire        wr_read;
-    reg  [63:0] wr_readdata;
-    reg         wr_readdatavalid;
-    reg         wr_waitrequest = 0;
+    wire [63:0] wr_readdata;
+    wire        wr_readdatavalid;
+    wire        wr_waitrequest;
     wire [31:0] ow_address;
     wire        ow_write;
     wire [63:0] ow_writedata;
@@ -79,78 +79,16 @@ module tb_cnn_top;
     // MAX_PENDING_RESPONSES=4）→ HPS DDR 的真实读行为——
     // read 请求被接受（waitrequest=0）后，数据延迟 RD_LAT 拍由
     // readdatavalid 返回（readdata 与 readdatavalid 同拍有效）。
-    // 单笔在途模型（请求拍锁存地址），足以暴露 read&&!waitrequest 误判。
+    // pr/sr 用单笔在途模型（请求拍锁存地址），足以暴露 read&&!waitrequest
+    // 误判；lr/wr 共享 load master，用 4 深多笔在途 + readdatavalid 广播
+    // 模型（与 cnn_top.v 真实接法一致），可复现 lr/wr 返回交错污染：
+    // S_LOAD 末几笔在途命令的返回在 S_WEIGHT 期间到达，广播后必须由
+    // cnn_top_core 内 cmd FIFO 按命令序路由回本侧，否则装载计数错乱。
     //=====================================================================
     localparam RD_LAT = 3;   // 模拟 DDR 流水读延迟（拍）
 
     reg [31:0] pr_addr_q;  reg [7:0] pr_lat;   reg pr_rdv;
     reg [31:0] sr_addr_q;  reg [7:0] sr_lat;   reg sr_rdv;
-    reg [31:0] lr_addr_q;  reg [7:0] lr_lat;   reg lr_rdv;
-    reg [31:0] wr_addr_q;  reg [7:0] wr_lat;   reg wr_rdv;
-
-    task read_model(reg read_sig, input [31:0] req_addr,
-                    inout [31:0] addr_q, inout [7:0] lat_cnt,
-                    inout reg rdv, input [63:0] mem_ref, ...);
-```
-不行，task 里不能方便地用 always。直接写 4 个 always 块。为了简洁，用 generate 或宏？直接展开写，清晰第一。
-
-pr/sr（32-bit）：
-```verilog
-always @(posedge clk) begin
-    if (!rst_n) begin
-        pr_addr_q <= 0; pr_lat <= 0; pr_rdv <= 0; pr_readdata <= 0;
-    end else if (pr_read && pr_lat == 0) begin
-        pr_addr_q <= pr_address;
-        pr_lat <= RD_LAT;
-        pr_rdv <= 0;
-    end else if (pr_lat != 0) begin
-        pr_lat <= pr_lat - 1;
-        if (pr_lat == 1) begin
-            pr_readdata <= pr_addr_q[2] ? mem[pr_addr_q >> 3][63:32]
-                                        : mem[pr_addr_q >> 3][31:0];
-            pr_rdv <= 1;
-        end else
-            pr_rdv <= 0;
-    end else
-        pr_rdv <= 0;
-end
-```
-注意 `pr_readdata` 是 reg 且现在是时序赋值 ✓（之前是组合 always @(*) 赋值，需删除旧的）。
-
-同样 sr、lr（64-bit）、wr（64-bit）。
-
-然后 dut 实例化加：
-```verilog
-.pr_readdata(pr_readdata), .pr_readdatavalid(pr_rdv), ...
-```
-等等——端口名。dut 的端口叫 pr_readdatavalid。tb 里我用 pr_rdv 变量接。实例化：
-```verilog
-.pr_readdatavalid(pr_rdv),
-.sr_readdatavalid(sr_rdv),
-.lr_readdatavalid(lr_rdv),
-.wr_readdatavalid(wr_rdv),
-```
-
-把旧的组合读 always 块替换成这 4 个 always。<｜end▁of▁thinking｜>
-
-<｜｜DSML｜｜tool_calls>
-<｜｜DSML｜｜invoke name="edit_file">
-<｜｜DSML｜｜parameter name="new_string" string="true">    // DDR 内存
-    reg [63:0] mem [0:MEM_WORDS-1];
-
-    //=====================================================================
-    // 流水读模型：模拟 mm_bridge_sdram0（altera_avalon_mm_bridge，
-    // MAX_PENDING_RESPONSES=4/PIPELINE_RESPONSE=1）→ HPS DDR 的真实读行为：
-    // read 请求被接受（waitrequest=0）后，数据延迟 RD_LAT 拍由
-    // readdatavalid 返回（readdata 与 readdatavalid 同拍有效）。
-    // 单笔在途模型（请求拍锁存地址）即可暴露 read&&!waitrequest 的误判。
-    //=====================================================================
-    localparam RD_LAT = 3;   // 模拟 DDR 流水读延迟（拍）
-
-    reg [31:0] pr_addr_q;  reg [7:0] pr_lat;   reg pr_rdv;
-    reg [31:0] sr_addr_q;  reg [7:0] sr_lat;   reg sr_rdv;
-    reg [31:0] lr_addr_q;  reg [7:0] lr_lat;   reg lr_rdv;
-    reg [31:0] wr_addr_q;  reg [7:0] wr_lat;   reg wr_rdv;
 
     always @(posedge clk) begin
         if (!rst_n) begin
@@ -190,41 +128,54 @@ end
             sr_rdv <= 0;
     end
 
-    always @(posedge clk) begin
-        if (!rst_n) begin
-            lr_addr_q <= 0; lr_lat <= 0; lr_rdv <= 0; lr_readdata <= 0;
-        end else if (lr_read && lr_lat == 0) begin
-            lr_addr_q <= lr_address;
-            lr_lat <= RD_LAT;
-            lr_rdv <= 0;
-        end else if (lr_lat != 0) begin
-            lr_lat <= lr_lat - 1;
-            if (lr_lat == 1) begin
-                lr_readdata <= mem[lr_addr_q >> 3];
-                lr_rdv <= 1;
-            end else
-                lr_rdv <= 0;
-        end else
-            lr_rdv <= 0;
-    end
+    //---- 共享 load master（lr/wr 复用，cnn_top.v 真实接法）----
+    // 多笔在途（深度 4 = MAX_PENDING_RESPONSES，返回保序），每笔命令接受
+    // 拍入队锁存地址，RD_LAT 拍后按序出队；readdatavalid/readdata 广播到
+    // lr/wr 两路（cnn_top.v 中 .lr_readdatavalid/.wr_readdatavalid 同接
+    // load_avm_readdatavalid）。桥满（occ==4）时 waitrequest 反压。
+    reg [31:0] ld_addr_q [0:3];
+    reg [7:0]  ld_lat_q  [0:3];
+    reg [1:0]  ld_head, ld_tail;
+    reg [2:0]  ld_occ;
+    integer ld_i;
+    wire ld_accept = (lr_read || wr_read) && !lr_waitrequest;
+    wire ld_pop    = (ld_occ != 3'd0) && (ld_lat_q[ld_head] == 8'd0);
 
     always @(posedge clk) begin
         if (!rst_n) begin
-            wr_addr_q <= 0; wr_lat <= 0; wr_rdv <= 0; wr_readdata <= 0;
-        end else if (wr_read && wr_lat == 0) begin
-            wr_addr_q <= wr_address;
-            wr_lat <= RD_LAT;
-            wr_rdv <= 0;
-        end else if (wr_lat != 0) begin
-            wr_lat <= wr_lat - 1;
-            if (wr_lat == 1) begin
-                wr_readdata <= mem[wr_addr_q >> 3];
-                wr_rdv <= 1;
-            end else
-                wr_rdv <= 0;
-        end else
-            wr_rdv <= 0;
+            ld_head <= 0; ld_tail <= 0; ld_occ <= 0;
+            for (ld_i = 0; ld_i < 4; ld_i = ld_i + 1)
+                ld_lat_q[ld_i] <= 8'd0;
+        end else begin
+            for (ld_i = 0; ld_i < 4; ld_i = ld_i + 1)
+                if (ld_lat_q[ld_i] != 8'd0)
+                    ld_lat_q[ld_i] <= ld_lat_q[ld_i] - 8'd1;
+            // 单语句净 0：同拍出+入 = occ 不变，但 head 必须同步推进
+            // （两条 if 分开写会后写覆盖；同拍分支漏 head 推进会重复
+            // 出队同一地址 → 数据错位）
+            if (ld_accept && (ld_occ < 3'd4)) begin
+                ld_addr_q[ld_tail] <= lr_read ? lr_address : wr_address;
+                ld_lat_q[ld_tail]  <= RD_LAT;
+                ld_tail <= ld_tail + 2'd1;
+                if (ld_pop) begin
+                    ld_head <= ld_head + 2'd1;   // 同拍出队：head 推进、occ 不变
+                end else
+                    ld_occ <= ld_occ + 1;
+            end else if (ld_pop) begin
+                ld_head <= ld_head + 2'd1;
+                ld_occ <= ld_occ - 1;
+            end
+        end
     end
+
+    wire lr_rdv, wr_rdv;
+    assign lr_readdata = mem[ld_addr_q[ld_head] >> 3];
+    assign wr_readdata = mem[ld_addr_q[ld_head] >> 3];
+    assign lr_rdv = ld_pop;
+    assign wr_rdv = ld_pop;
+    // 桥满反压（MAX_PENDING_RESPONSES=4）
+    assign lr_waitrequest = (ld_occ >= 3'd4);
+    assign wr_waitrequest = (ld_occ >= 3'd4);
 
     // 输出写
     always @(posedge clk) begin
@@ -256,6 +207,14 @@ end
     always @(posedge clk) begin
         if (dut.lr_read && dut.wr_read)
             $display("  ASSERT FAIL: lr_read && wr_read 同时拉高（load master 复用冲突）");
+    end
+
+    // 诊断：lr_got/wr_got 计数 vs 命令数（验证 FIFO 路由无丢失/无串扰）
+    integer lr_got_cnt = 0, wr_got_cnt = 0;
+    integer dbg_lr = 0, dbg_wr = 0, dbg_sr = 0, dbg_lb = 0, dbg_ov = 0;
+    always @(posedge clk) begin
+        if (dut.lr_got) lr_got_cnt = lr_got_cnt + 1;
+        if (dut.wr_got) wr_got_cnt = wr_got_cnt + 1;
     end
 
     task arm_write(input [7:0] addr, input [31:0] data);
@@ -324,9 +283,12 @@ end
             mem[(DDRW_BASE + i*8) >> 3] = w_mem[i];
 
         // 写寄存器（软件流程：先配 DMA 基址，再 START）
+        // 注意：core 的 ow_address = reg_ddrout + p_output_offset*8
+        // （param[3] = out_off_words，输出区偏移），故 reg_ddrout 需预减，
+        // 使实际写入落在 DDROUT_BASE 比对区
         arm_write(8'h10, DDRIN_BASE);
         arm_write(8'h1C, DDRW_BASE);
-        arm_write(8'h28, DDROUT_BASE);
+        arm_write(8'h28, DDROUT_BASE - param_mem[3]*8);
         arm_write(8'h34, PARAM_BASE);
         arm_write(8'h40, SCALE_BASE);
         arm_write(8'h00, 32'h1);   // START
@@ -341,8 +303,16 @@ end
                 arm_read(8'h00, st);
                 wc = wc + 1;
                 if (wc > 5000000) begin
-                    $display("  START poll timeout: state=%0d rb=%0d core_st=%0d",
-                             dut.state, dut.rb, dut.core.state);
+                    $display("  START poll timeout: state=%0d rb=%0d core_st=%0d lr_p=%0d wr_p=%0d cnt=%0d is_wr=%0d lr_rd=%0d rdv=%0d lr_got=%0d i_rdy=%0d i_vld=%0d icb=%0d ibeat=%0d wbeat=%0d wre=%0d iwr=%0d wf=%0d og=%0d inseg=%0d loadr=%0d lastcb=%0d",
+                             dut.state, dut.rb, dut.core.state,
+                             dut.lr_pending, dut.wr_pending, dut.cmd_cnt,
+                             dut.cmd_is_wr, dut.lr_read, dut.lr_readdatavalid,
+                             dut.lr_got, dut.core_i_ready, dut.core_i_valid,
+                             dut.dma_icb, dut.dma_ibeat, dut.dma_wbeat,
+                             dut.wr_round_end_q, dut.core_ow_ready,
+                             dut.core.wf_cnt, dut.core.o_group,
+                             dut.in_seg_words_r, dut.load_rows_r,
+                             dut.lr_last_cb_r);
                     disable poll;
                 end
             end
@@ -372,6 +342,20 @@ end
             $display("PASS: %0d events bit-exact", nexp);
         else
             $display("FAIL: %0d errors", errors);
+        $display("DBG: lr_cmd=%0d lr_got=%0d wr_cmd=%0d wr_got=%0d occ=%0d cnt=%0d",
+                 dut.lr_cmd_cnt, lr_got_cnt, dut.wr_cmd_cnt, wr_got_cnt,
+                 ld_occ, dut.cmd_cnt);
+        $display("DBG: cfg in_cb=%0d in_h=%0d in_w=%0d out_cb=%0d out_w=%0d k=%0d stride=%0d type=%0d tile=%0d in_tile=%0d act=%0d pad=%0d og=%0d ig=%0d",
+                 dut.core.in_cb_reg, dut.core.in_h_reg, dut.core.in_w_reg,
+                 dut.core.out_cb_reg, dut.core.out_w_reg,
+                 dut.core.k_reg, dut.core.stride_reg, dut.core.type_reg,
+                 dut.core.out_row_tile_reg, dut.core.in_row_tile_reg,
+                 dut.core.act_reg, dut.core.pad_reg,
+                 dut.core.o_group, dut.core.i_group);
+        $display("DBG: dma in_seg=%0d in_tail=%0d out_seg=%0d w_rb=%0d cb_stride=%0d lr_last_cb=%0d load_rows=%0d rb_base=%0d in_rb_base=%0d",
+                 dut.in_seg_words_r, dut.in_seg_tail_r, dut.out_seg_words_r,
+                 dut.w_rb_beats_r, dut.in_cb_stride_r, dut.lr_last_cb_r,
+                 dut.load_rows_r, dut.rb_base_r, dut.in_rb_base_r);
         $finish;
     end
 

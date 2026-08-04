@@ -15,7 +15,8 @@ verilator --binary --timing --public-flat-rw -Wno-lint -Wno-fatal \
 cd verification
 pass=0; fail=0
 for d in v2/layer_*; do
-    rm -f vec_core_v2 && ln -s "$(basename "$d")" vec_core_v2
+    rm -f vec_core_v2 && ln -s "v2/$(basename "$d")" vec_core_v2
+    [ -e vec_core_v2/cfg.hex ] || { echo "$d: 软链断链"; fail=$((fail+1)); continue; }
     out=$(timeout 300 /tmp/cnn_core_v2_vlt/sim_v2 2>&1 | grep -E "PASS|FAIL|TIMEOUT" | head -1)
     if echo "$out" | grep -q PASS; then pass=$((pass+1)); else fail=$((fail+1)); echo "$d: $out"; fi
 done
