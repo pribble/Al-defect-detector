@@ -495,12 +495,13 @@ module cnn_core_v2 #(
     localparam S_REQ_ADDR = 4'd6;   // requant 请求拍（采样 acc_q）
     localparam S_REQ_MUL  = 4'd7;   // requant 乘加拍（bias+act，寄存 v_act_l）
     localparam S_REQ_MUL2 = 4'd8;   // requant 乘法拍级 1（4×16×16 DSP 部分积，寄存 v_p_*/v_shift_l）
-    localparam S_REQ_MUL3 = 4'd15;  // requant 乘法拍级 2（部分积移位相加 → v_rq64_l）
+    localparam S_REQ_MUL3 = 4'd15;  // requant 乘法拍级 2（两组中间和 → v_sum_lo/v_sum_hi）
+    localparam S_REQ_MUL4 = 5'd16;  // requant 乘法拍级 3（中间和相加 → v_rq64_l，每级仅 1 个 64-bit 加法）
     localparam S_REQ_OUT  = 4'd9;   // requant round 拍（round 加法 → v_round_l）
     localparam S_REQ_OUT2 = 4'd14;  // requant 输出拍（>>shift+饱和 → o_data）
     localparam S_DONE     = 4'd10;
 
-    reg [3:0] state;
+    reg [4:0] state;
     reg [31:0] load_row, load_col;
     reg        load_first;        // 本轮装载是 o_group 首 cb（完成后需清 acc）
     reg [31:0] wf_cnt;
@@ -724,8 +725,13 @@ module cnn_core_v2 #(
                     state <= S_REQ_MUL3;
                 end
 
-                //---- requant 乘法拍级 2：部分积移位相加 → v_rq64_l（见独立 always）----
+                //---- requant 乘法拍级 2：两组中间和（lolo+lohi、hilo+hihi 并行 64-bit 加法）----
                 S_REQ_MUL3: begin
+                    state <= S_REQ_MUL4;
+                end
+
+                //---- requant 乘法拍级 3：中间和相加 → v_rq64_l（见独立 always）----
+                S_REQ_MUL4: begin
                     state <= S_REQ_OUT;
                 end
 
@@ -856,13 +862,16 @@ module cnn_core_v2 #(
     reg signed [31:0] v_raw, v_biased, v_act;
     reg signed [63:0] v_rq64;
     reg signed [31:0] v_act_l [0:7];   // 每 lane 的 act 后值（流水级 1）
-    // 乘法拆两级（150MHz 下单级 32×33 组合乘法 slack -10.1ns）：
+    // 乘法拆三级（150MHz 单级 32×33 组合乘法 slack -10.1ns；64-bit 加法树 2 级仍紧）：
     //   级 1 = 4 个 16×16 DSP 乘法（v_act_l = a_hi<<16 + a_lo，rq_mult_q = m_hi<<16 + m_lo）
-    //   级 2 = 4 项 64-bit 移位相加（符号位随拼接位置自动就位）
+    //   级 2 = 两组 64-bit 并行加法（v_sum_lo/v_sum_hi），每级仅 1 个加法器
+    //   级 3 = 中间和相加 → v_rq64_l
     reg [31:0] v_p_lolo [0:7];   // a_lo × m_lo（无符号 16×16）
     reg [31:0] v_p_lohi [0:7];   // a_lo × m_hi（无符号 16×16）
     reg signed [31:0] v_p_hilo [0:7];  // a_hi × m_lo（signed 16 × unsigned 16）
     reg signed [31:0] v_p_hihi [0:7];  // a_hi × m_hi（signed 16 × unsigned 16）
+    reg signed [63:0] v_sum_lo [0:7];  // lolo + lohi<<16（无符号两项）
+    reg signed [63:0] v_sum_hi [0:7];  // hilo<<16 + hihi<<32（符号扩展两项）
     (* multstyle = "dsp" *) reg signed [63:0] v_rq64_l [0:7];  // 每 lane 的 64-bit 积（流水级 2，保 DSP）
     reg [7:0] v_shift_l [0:7];         // 每 lane 的 shift 值（S_REQ_MUL2 拍寄存 RAM 读，断 M10K q 路径）
     reg signed [63:0] v_round_l [0:7]; // 每 lane 的 round 后值（流水级 3）
@@ -918,18 +927,33 @@ module cnn_core_v2 #(
         end
     end
 
-    // 乘法级 2（S_REQ_MUL3）：4 项部分积移位相加 → v_rq64_l（64-bit 平衡加法树，~4ns）
+    // 乘法级 2（S_REQ_MUL3）：4 项部分积分为两组中间和（并行 64-bit 加法，各 ~3ns）
     always @(posedge clk) begin
         if (state == S_REQ_MUL3) begin
+            for (ln = 0; ln < 8; ln = ln + 1) begin
+                v_out_ch = o_group * 8 + ln;
+                if (v_out_ch >= out_c_reg) begin
+                    v_sum_lo[ln] <= 64'sd0;
+                    v_sum_hi[ln] <= 64'sd0;
+                end else begin
+                    v_sum_lo[ln] <= {32'd0, v_p_lolo[ln]}
+                                  + {16'd0, v_p_lohi[ln], 16'd0};
+                    v_sum_hi[ln] <= {{16{v_p_hilo[ln][31]}}, v_p_hilo[ln], 16'd0}
+                                  + {v_p_hihi[ln], 32'd0};
+                end
+            end
+        end
+    end
+
+    // 乘法级 3（S_REQ_MUL4）：两组中间和相加 → v_rq64_l（单个 64-bit 加法，~3ns）
+    always @(posedge clk) begin
+        if (state == S_REQ_MUL4) begin
             for (ln = 0; ln < 8; ln = ln + 1) begin
                 v_out_ch = o_group * 8 + ln;
                 if (v_out_ch >= out_c_reg)
                     v_rq64_l[ln] <= 64'sd0;
                 else
-                    v_rq64_l[ln] <= {32'd0, v_p_lolo[ln]}
-                                  + {16'd0, v_p_lohi[ln], 16'd0}
-                                  + {{16{v_p_hilo[ln][31]}}, v_p_hilo[ln], 16'd0}
-                                  + {v_p_hihi[ln], 32'd0};
+                    v_rq64_l[ln] <= v_sum_lo[ln] + v_sum_hi[ln];
             end
         end
     end
