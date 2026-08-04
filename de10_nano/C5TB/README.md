@@ -24,13 +24,13 @@ SDMMC、USB、UART）接到 QSys 生成的 `soc_system` 系统上，并在其中
 | `soc_system_board_info.xml` / `hps_common_board_info.xml` | 生成设备树时使用的板级信息（供 sopc2dts） |
 | `ip/cnn_top_hw.tcl` | 自定义 CNN 加速器 IP 硬件描述（引用 `cnn_top.v`/`cnn_top_core.v`/`cnn_core_v2.v`/`mac8x8_dsp.v`/`mac8x8_lut.v` 五个 RTL 文件，已替换旧黑盒归档） |
 | `ip/cnn_top.v` 等五个 `.v` | cnn_top 的 RTL 实现（QSys 适配层 + 核心 + 卷积执行器 + 8×8 乘法器，见 `cnn_rtl/README.md`） |
-| `ip/pll/` | PLL IP：`FPGA_CLK1_50`（50 MHz）分出 `fpga_clk_50` / `fpga_clk_cnn` / `fpga_clk_stp` 三路时钟 |
+| `ip/pll/` | PLL IP：`FPGA_CLK1_50`（50 MHz 参考）分出三路：`fpga_clk_50`（outclk_0，50 MHz）/ `fpga_clk_cnn`（outclk_1，**150 MHz**，驱动 cnn_top）/ `fpga_clk_stp`（outclk_2，100 MHz） |
 | `tools/` | 构建辅助脚本与**已提交的生成产物**（见下） |
 
 ### 顶层结构（C5TB_top.v）
 
 ```
-FPGA_CLK1_50 ──> pll_inst ──> fpga_clk_50 / fpga_clk_cnn / fpga_clk_stp
+FPGA_CLK1_50 ──> pll_inst ──> fpga_clk_50(50M) / fpga_clk_cnn(150M) / fpga_clk_stp(100M)
                                    │
                               soc_system (QSys)
                                    ├── HPS DDR3（32-bit）

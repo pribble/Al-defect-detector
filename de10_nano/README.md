@@ -51,7 +51,7 @@ export LD_LIBRARY_PATH=./paddlelite_lib:$LD_LIBRARY_PATH
 ./ssd_detection config.txt        # HTTP 模式，监听 0.0.0.0:8080
 ```
 
-- **C5TB/（硬件）变更流程独立**：Quartus 18.1 全编译 → `tools/sof_to_rbf.bat` 生成
+- **C5TB/（硬件）变更流程独立**：Quartus Prime 23.1 Lite Edition 全编译（工程创建于 18.1，兼容正常）→ `tools/sof_to_rbf.bat` 生成
   `soc_system.rbf` → `tools/gen_dtb.bat` 生成设备树 → 部署到 HPS 启动分区
   （详见 [C5TB/README.md](C5TB/README.md)）。
 - 详细构建/调试见各子模块 README。

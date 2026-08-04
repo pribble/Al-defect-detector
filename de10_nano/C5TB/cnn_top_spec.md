@@ -4,7 +4,8 @@
 
 本文档从**黑盒外部可观测行为**出发，描述 `cnn_top` 加速器的接口、寄存器协议、
 指令格式、数据布局与数值语义。它是纯 RTL 复现（`cnn_rtl/`，已替代黑盒
-`ip/cnn_top.qxp`）的**历史规格依据**——复现已完成并于 2026-08 上板运行，RTL 实现见
+`ip/cnn_top.qxp`）的**历史规格依据**——复现已完成（仿真 16/16+6/6 对拍全过），
+RTL 上板正确性 2026-08 调试中，RTL 实现见
 `cnn_rtl/README.md` 与 `ip/` 下三个 `.v`。所有信息均来自仓库内可读文件
 （接口/参数、软件协议、QSys 连接），**不包含任何内部微架构/时序的猜测性承诺**，
 未决点见 §11。
@@ -14,7 +15,9 @@
 - `cnn_top` 是 QSys 自定义 IP（Component Editor 18.1，v2.0，`ip/cnn_top_hw.tcl`）。
   原综合网表为 QXP 归档（Netlist Only，`ip/cnn_top.qxp`，8.3MB，无 RTL 源码）；
   **2026-08 已由开源复现 RTL（`ip/cnn_top.v`/`cnn_top_core.v`/`cnn_core_v2.v`）替代，
-  qxp 已删除**。
+  qxp 已删除**（注意：`soc_system/synthesis/submodules/cnn_top.qxp` 为 7/31 QSys
+  生成残留，.gitignore 忽略；QSys 未重新 Generate 时综合会引用它而非 `ip/` 下的
+  自研 RTL——需重新 Generate HDL 或手动同步 5 个 .v 到 submodules/）。
 - 系统级连接完整可读：`soc_system.qsys` 中 `cnn_top_0` 的接口连接与基地址；
   `soc_system.xml`（QSys 生成日志）保留全部 IP 参数值。
 - 软件侧协议完整可读：`ssd_detection/intelfpga.cc`（寄存器读写、DMA、重排）、
@@ -213,8 +216,13 @@ out_int8  = saturate((v_rq64 + 2^(shift-1)) >> shift)  // shift=30，round-half-
 - `ws`/`b` 为模型 per-channel weight_scale/bias，`is`/`os` 为 input/output scale；
   mult/bias_int/shift/rcl6 由 `conv_op.cc` 预转（§6.5），公式与舍入
   （away-from-zero）对齐 `cnn_rtl/tools/ref_int8.py`（500 轮随机验证一致）。
-- RTL 实现：`S_REQ_MUL` 加 bias+act → `S_REQ_MUL2` 32×32 乘 → `S_REQ_OUT`
-  round+算术右移+饱和 [-128,127]。
+- RTL 实现（2026-08 时序收敛后为 9 拍单操作流水，每拍仅加法/移位/比较之一，
+  150 MHz 收敛）：`S_REQ_MUL`（acc+bias）→ `S_REQ_MULB`（relu/rcl6）→
+  `S_REQ_MUL2`（4×16×16 DSP 部分积）→ `S_REQ_MUL3`（两组中间和）→
+  `S_REQ_MUL4`（中间和相加）→ `S_REQ_OUT`（round 桶形移位）→
+  `S_REQ_ROUND2`（round 加法）→ `S_REQ_OUT2`（算术右移）→ `S_REQ_OUT3`
+  （饱和 [-128,127] + 输出）。事件序列/数值语义与旧 3 拍实现完全一致
+  （tb 按事件对拍，不测周期数）。
 
 ## 8. 执行时序与分块
 
