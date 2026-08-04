@@ -494,8 +494,9 @@ module cnn_core_v2 #(
     localparam S_MAC_ACC  = 4'd5;   // 窗口 tap 累加拍（v_sum_r → acc_local）
     localparam S_REQ_ADDR = 4'd6;   // requant 请求拍（采样 acc_q）
     localparam S_REQ_MUL  = 4'd7;   // requant 乘加拍（bias+act，寄存 v_act_l）
-    localparam S_REQ_MUL2 = 4'd8;   // requant 乘法拍（32×32 mult，寄存 v_rq64_l）
-    localparam S_REQ_OUT  = 4'd9;   // requant 输出拍（round+shift+饱和 → o_data）
+    localparam S_REQ_MUL2 = 4'd8;   // requant 乘法拍（32×32 mult，寄存 v_rq64_l/v_shift_l）
+    localparam S_REQ_OUT  = 4'd9;   // requant round 拍（round 加法 → v_round_l）
+    localparam S_REQ_OUT2 = 4'd14;  // requant 输出拍（>>shift+饱和 → o_data）
     localparam S_DONE     = 4'd10;
 
     reg [3:0] state;
@@ -543,7 +544,7 @@ module cnn_core_v2 #(
 
                 //---- 装载输入行块（流式：每轮 1 个通道块，cb 选择由顶层 DMA 轮控制）----
                 S_LOAD: begin
-                    // 多 o_group 时从 S_REQ_OUT 直接进入：必须拉低 o_valid，
+                    // 多 o_group 时从 S_REQ_OUT2 直接进入：必须拉低 o_valid，
                     // 否则残留 1 → 输出持续被收集（o_ready=1 恒等）→ 失控
                     // （单组层走 S_DONE 拉低故未暴露）
                     o_valid <= 1'b0;
@@ -722,8 +723,13 @@ module cnn_core_v2 #(
                     state <= S_REQ_OUT;
                 end
 
-                //---- requant 输出拍（round+移位+饱和，行→列→8 通道，块序）----
+                //---- requant round 拍：round 加法（结果 v_round_l，见独立 always）----
                 S_REQ_OUT: begin
+                    state <= S_REQ_OUT2;
+                end
+
+                //---- requant 输出拍（>>shift+饱和 → o_data；行→列→8 通道，块序）----
+                S_REQ_OUT2: begin
                     o_valid <= 1'b1;
                     if (o_ready) begin
                         if (rq_col == out_w_reg - 1) begin
@@ -836,7 +842,7 @@ module cnn_core_v2 #(
     // requant 流水（拆三段，避免单拍组合链过深）：
     //   S_REQ_MUL  拍：bias+act → v_act_l（寄存 32-bit）
     //   S_REQ_MUL2 拍：32×32 mult → v_rq64_l（寄存 64-bit 积）
-    //   S_REQ_OUT  拍：round+shift+饱和 → o_data（用上拍寄存的积）
+    //   S_REQ_OUT  拍：round 加法 → v_round_l（用上拍寄存的积）
     // 拆流水后功能/事件序列不变（tb 按事件对拍，不测周期数）。
     //-----------------------------------------------------------------------
     integer ln;
@@ -844,6 +850,8 @@ module cnn_core_v2 #(
     reg signed [63:0] v_rq64;
     reg signed [31:0] v_act_l [0:7];   // 每 lane 的 act 后值（流水级 1）
     (* multstyle = "dsp" *) reg signed [63:0] v_rq64_l [0:7];  // 每 lane 的 64-bit 积（流水级 2，保 DSP）
+    reg [7:0] v_shift_l [0:7];         // 每 lane 的 shift 值（S_REQ_MUL2 拍寄存 RAM 读，断 M10K q 路径）
+    reg signed [63:0] v_round_l [0:7]; // 每 lane 的 round 后值（流水级 3）
     reg [31:0] v_out_ch;
     reg [7:0] v_q [0:7];
 
@@ -870,7 +878,9 @@ module cnn_core_v2 #(
         end
     end
 
-    // 乘法拍：v_act_l × rq_mult_q（32×32），寄存 v_rq64_l
+    // 乘法拍：v_act_l × rq_mult_q（32×32），寄存 v_rq64_l；同时把 RAM 读出的
+    // shift 值寄存为 v_shift_l——断开 M10K q 输出到输出拍组合链的长路径
+    // （原 S_REQ_OUT 拍内 2 个 64-bit 桶形移位 + 64-bit 加法 + 饱和，slack -0.5ns）
     always @(posedge clk) begin
         if (state == S_REQ_MUL2) begin
             for (ln = 0; ln < 8; ln = ln + 1) begin
@@ -879,22 +889,35 @@ module cnn_core_v2 #(
                     v_rq64_l[ln] <= 64'sd0;
                 else
                     v_rq64_l[ln] <= $signed(v_act_l[ln]) * $signed({1'b0, rq_mult_q[ln]});
+                v_shift_l[ln] <= rq_shift_q[ln];
             end
         end
     end
 
-    // 输出拍：round + shift + 饱和 → o_data
+    // round 拍（S_REQ_OUT）：round 加法 → v_round_l（输入 v_rq64_l/v_shift_l 均寄存，链短）
     always @(posedge clk) begin
         if (state == S_REQ_OUT) begin
+            for (ln = 0; ln < 8; ln = ln + 1) begin
+                v_out_ch = o_group * 8 + ln;
+                if (v_out_ch >= out_c_reg)
+                    v_round_l[ln] <= 64'sd0;
+                else if (v_shift_l[ln] > 8'd0)
+                    v_round_l[ln] <= v_rq64_l[ln] + (64'sd1 << (v_shift_l[ln] - 8'd1));
+                else
+                    v_round_l[ln] <= v_rq64_l[ln];
+            end
+        end
+    end
+
+    // 输出拍（S_REQ_OUT2）：round 值算术右移 + 饱和 → o_data
+    always @(posedge clk) begin
+        if (state == S_REQ_OUT2) begin
             for (ln = 0; ln < 8; ln = ln + 1) begin
                 v_out_ch = o_group * 8 + ln;
                 if (v_out_ch >= out_c_reg) begin
                     v_q[ln] = 8'd0;
                 end else begin
-                v_rq64 = v_rq64_l[ln];
-                if (rq_shift_q[ln] > 0)
-                    v_rq64 = v_rq64 + (64'sd1 << (rq_shift_q[ln] - 1));
-                v_rq64 = v_rq64 >>> rq_shift_q[ln];
+                v_rq64 = v_round_l[ln] >>> v_shift_l[ln];
                 if (v_rq64 > 64'sd127)      v_q[ln] = 8'sd127;
                 else if (v_rq64 < -64'sd128) v_q[ln] = 8'h80;   // -128（8'sd128 字面量溢出）
                 else                         v_q[ln] = v_rq64[7:0];
