@@ -262,15 +262,16 @@ module cnn_top_core (
             wr_pending <= 0;
         end else begin
             // lr/wr 共享 load master：任一方的 readdatavalid 都会到达两路。
-            // 不在途一侧必须"非零保护"（pending==0 时不减），否则被对方
-            // 数据返回下溢回绕（0-1=7），pending 永久不归零 → lr_round_reset
-            // 永远不触发 → 死锁（板上实测：wbeat=0 但 wr_p=1、lr_p=3 卡死）。
-            // 误减边界：本侧在途>0 时对方数据返回会误减 1，但对方返回与
-            // 本侧命令接受同拍 +1/-1 抵消（单 readdatavalid/拍），净计数准确。
-            if (lr_readdatavalid && lr_pending != 3'd0) lr_pending <= lr_pending - 3'd1;
-            if (lr_read && !lr_waitrequest)             lr_pending <= lr_pending + 3'd1;
-            if (wr_readdatavalid && wr_pending != 3'd0) wr_pending <= wr_pending - 3'd1;
-            if (wr_read && !wr_waitrequest)             wr_pending <= wr_pending + 3'd1;
+            // 计数器实测（lr_cmd=2999/lr_rdv=2999 全返回，但 lr_p 残留 3）：
+            // 1) 两条 if 的"后写覆盖"在返回+接受同拍（消费拍发下一笔）时
+            //    恒 +1 → pending 虚高 → 第 in_seg_words 笔发不出 → 残留卡死；
+            // 2) 无保护的减法会被对方数据返回下溢（0-1=7）。
+            // 正解 = 单语句（同拍净 0，无虚高）+ 非零保护（无下溢）：
+            //   pending + 接受 - (返回 && pending≠0)
+            lr_pending <= lr_pending + (lr_read && !lr_waitrequest)
+                        - (lr_readdatavalid && lr_pending != 3'd0);
+            wr_pending <= wr_pending + (wr_read && !wr_waitrequest)
+                        - (wr_readdatavalid && wr_pending != 3'd0);
         end
     end
 
