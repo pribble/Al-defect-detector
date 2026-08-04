@@ -549,7 +549,7 @@ module cnn_core_v2 #(
 
                 //---- 装载输入行块（流式：每轮 1 个通道块，cb 选择由顶层 DMA 轮控制）----
                 S_LOAD: begin
-                    // 多 o_group 时从 S_REQ_OUT2 直接进入：必须拉低 o_valid，
+                    // 多 o_group 时从 S_REQ_OUT3 直接进入：必须拉低 o_valid，
                     // 否则残留 1 → 输出持续被收集（o_ready=1 恒等）→ 失控
                     // （单组层走 S_DONE 拉低故未暴露）
                     o_valid <= 1'b0;
@@ -877,7 +877,7 @@ module cnn_core_v2 #(
     // 拆流水后功能/事件序列不变（tb 按事件对拍，不测周期数）。
     //-----------------------------------------------------------------------
     integer ln;
-    reg signed [31:0] v_raw, v_biased, v_act;
+    reg signed [31:0] v_act;
     reg signed [63:0] v_rq64;
     reg signed [31:0] v_act_l [0:7];   // 每 lane 的 act 后值（流水级 2）
     reg signed [31:0] v_biased_l [0:7]; // 每 lane 的 bias 后值（流水级 1，拆加法/比较链）

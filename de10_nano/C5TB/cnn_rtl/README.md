@@ -156,6 +156,23 @@ cnn_rtl/
 
 **遗留**：上板检测正确性待验证（897a40f 后）；性能（装载/MAC 未重叠、pr/sr 仍单笔在途）待优化；tb 覆盖仅小通道参数（见上节验证覆盖边界）。
 
+## 时序收敛（2026-08-05，150MHz 目标）
+
+PLL outclk_1 恢复 150MHz（`e49c95c`）后，综合报告逐条拆流水直至收敛：
+
+| # | failing path（slack @150MHz） | 根因 | 修复 |
+|---|---|---|---|
+| 1 | `rq_m_store_5 → v_rq64_l`（-10.1ns） | 32×33 单级组合乘法 | `0e9949a`：拆 4×16×16 DSP 部分积 + 加法树（S_REQ_MUL2/MUL3） |
+| 2 | 同路径（加法树仍紧） | 64-bit 加法树 2 级 | `7de0c2f`：S_REQ_MUL3 两组中间和 + S_REQ_MUL4(5'd16) 最终和（每级 1 个加法） |
+| 3 | round/输出路径（同批） | 64-bit 桶形移位 + 加法/比较串行 | `a94f74a`：移位各占一拍（S_REQ_OUT→v_rnd_delta、S_REQ_ROUND2(5'd17) 加法、S_REQ_OUT2→v_shifted、S_REQ_OUT3(5'd18) 饱和） |
+| 4 | `bias_store_3 → v_act_l`（-8.6ns） | acc_q+bias 加法 + relu/rcl6 比较单级 | `7cce245`：S_REQ_MUL 加法→v_biased_l、S_REQ_MULB(5'd19) 比较→v_act_l |
+
+requant 现为 9 拍单操作流水（S_REQ_ADDR → MUL → MULB → MUL2 → MUL3 → MUL4 → OUT → ROUND2 → OUT2 → OUT3），
+每拍仅加法/移位/比较之一（≤~5ns）；state 扩 5-bit；事件级对拍不受拍数影响（v2 16/16 + cnn_top 6/6 PASS）。
+
+**部署注意**：Quartus 综合读的是 QSys 生成物 `soc_system/synthesis/submodules/` 里的 RTL 拷贝
+（.gitignore 忽略、git pull 不更新）——更新 `ip/` 后需重新 Generate QSys，或手动拷 5 个 .v 到 submodules/。
+
 ## 相关文档
 
 - [cnn_top_spec.md](../cnn_top_spec.md) —— 黑盒规格（接口/寄存器/指令/布局/数值语义），**改造的唯一验收依据**
