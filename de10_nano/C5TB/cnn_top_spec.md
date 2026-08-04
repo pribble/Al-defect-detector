@@ -23,7 +23,7 @@ RTL 上板正确性 2026-08 调试中，RTL 实现见
 - 软件侧协议完整可读：`ssd_detection/intelfpga.cc`（寄存器读写、DMA、重排）、
   `ssd_detection/include/intelfpga.h`（指令结构）、
   `ssd_detection/paddle_lite/lite/kernels/intel_fpga/bridges/conv_op.cc`（参数/scale 填充）。
-- 现状：复现 RTL 已上板运行（`test.sh` 全链路）；检测正确性于 2026-08 流式化 + param 偏移 + M10K 容量系列修复后待最终验证（调试历史见 `cnn_rtl/README.md`）。
+- 现状：复现 RTL 已上板联调（`test.sh` 全链路可跑通）；检测正确性于 2026-08 流式化 + param 偏移 + M10K 容量系列修复后**待最终验证**（调试历史见 `cnn_rtl/README.md`；时序收敛见其中"2026-08-05 时序收敛"节）。
 
 ## 2. 顶层接口
 
