@@ -96,7 +96,7 @@ module cnn_core_v2 #(
     output wire [31:0]  dbg_ptr0,   // {state[4:0], o_group[10:0], i_group[10:0], mac_t[3:0]}
     output wire [31:0]  dbg_ptr1,   // {rq_row[15:0], rq_col[15:0]}
     output wire [31:0]  dbg_ptr2,   // {mac_row[15:0], mac_col[15:0]}
-    output wire [31:0]  dbg_ptr3,   // {load_row[9:0], load_col[9:0], wf_cnt[7:0]}
+    output wire [31:0]  dbg_ptr3    // {load_row[9:0], load_col[9:0], wf_cnt[7:0]}
 );
 
     //-----------------------------------------------------------------------
