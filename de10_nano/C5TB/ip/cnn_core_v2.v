@@ -542,6 +542,8 @@ module cnn_core_v2 #(
     reg [31:0] load_row, load_col;
     reg        load_first;        // 本轮装载是 o_group 首 cb（完成后需清 acc）
     reg [31:0] wf_cnt;
+    reg [2:0]  wf_lane;   // wbuf 写 lane 计数（k=3：wf_cnt/9；k=1：wf_cnt），替代除法器
+    reg [3:0]  wf_t;      // wbuf 写 tap 计数（k=3：wf_cnt%9；k=1：恒 0）
     reg [31:0] o_group, i_group;
     reg [31:0] mac_row, mac_col, mac_t;
     reg        mac_first_q, mac_last_q;   // S_MAC_MUL2 拍寄存首/末 tap 标志（拆 mac_t 32-bit 比较链）
@@ -561,7 +563,7 @@ module cnn_core_v2 #(
             o_valid <= 1'b0;
             load_row <= 0; load_col <= 0;
             load_first <= 1'b1;
-            wf_cnt <= 0; o_group <= 0; i_group <= 0;
+            wf_cnt <= 0; wf_lane <= 0; wf_t <= 0; o_group <= 0; i_group <= 0;
             mac_row <= 0; mac_col <= 0; mac_t <= 0;
             rq_row <= 0; rq_col <= 0;
             mac_c_valid_r <= 1'b0;
@@ -647,16 +649,25 @@ module cnn_core_v2 #(
                 // 软件布局（conv2d_weight_reorganize）：k=3 slice = 8×9×8B，k=1 slice = 8×1×8B
                 S_WEIGHT: begin
                     if (iw_valid) begin
-                        // 新布局 wbuf[lane][m][t]：k=3 时 wf_cnt = lane*9 + t；k=1 时 wf_cnt = lane（t=0）
+                        // wbuf[lane][m][t] 写：wf_lane/wf_t 同步计数（wf_cnt/9、%9 除法器
+                        // 时序爆炸 -53ns，改用计数器：k=3 t 主序递增；k=1 lane 主序）
                         if (k_reg == 1) begin
                             for (m = 0; m < 8; m = m + 1)
-                                wbuf[wf_cnt][m][0] <= iw_data[m*8 +: 8];
+                                wbuf[wf_lane][m][0] <= iw_data[m*8 +: 8];
+                            wf_lane <= wf_lane + 1;
                         end else begin
                             for (m = 0; m < 8; m = m + 1)
-                                wbuf[wf_cnt/9][m][wf_cnt%9] <= iw_data[m*8 +: 8];
+                                wbuf[wf_lane][m][wf_t] <= iw_data[m*8 +: 8];
+                            if (wf_t == 4'd8) begin
+                                wf_t <= 4'd0;
+                                wf_lane <= wf_lane + 1;
+                            end else
+                                wf_t <= wf_t + 1;
                         end
                         if (wf_cnt == (k_reg == 1 ? 8*1 - 1 : 8*9 - 1)) begin
                             wf_cnt <= 0;
+                            wf_lane <= 3'd0;
+                            wf_t <= 4'd0;
                             mac_row <= 0; mac_col <= 0; mac_t <= 0;
                             state <= S_MAC_ADDR;
                         end else
