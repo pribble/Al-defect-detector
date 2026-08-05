@@ -512,9 +512,19 @@ module cnn_core_v2 #(
     // -0.839ns 主因）；打一拍后组合链终点变为普通寄存器，M10K 地址由寄存器驱动。
     // 最大地址 = 4*41*302-1 = 49527（lb）、19*150+149 = 2999（acc），16-bit 够。
     reg [15:0]          lb_addr_r;
+    (* preserve *) reg [15:0] lb_wa_q;    // lb 写地址打拍（S_LOAD 收拍寄存、下一拍写；断 load_row→lb 写口组合链 P2-2）
+    reg [63:0]          lb_wd_q;          // lb 写数据打拍（与地址对齐）
     (* preserve *) reg [15:0]       acc_addr_mac_r;   // preserve：阻止吸收进 M10K 地址寄存器（mac_row→porta_address_reg 组合链 -4.223）
     (* preserve *) reg [15:0]       acc_raddr_r;      // requant 读地址打拍（preserve：拆 rq_row→porta_address_reg 组合链 -4.181）
     (* preserve *) reg [15:0]       acc_wa_q;         // acc 写口统一地址（每拍采样：S_MAC_ACC 拍取写回地址、其他拍取清零地址，写口单一寄存器源）
+    (* preserve *) reg [15:0]       acc_clr_wa;       // acc 清零地址（S_ACC_CLR 沿前 = 上拍寄存的推进后地址，断 rq_row→porta 组合链 P1）
+
+    // lb 写（流水打拍）：S_LOAD 收拍寄存地址/数据、下一拍写入；退出 S_LOAD 后
+    // S_ACC_CLR 首拍补写最后位置（后续拍重复写同位置，数据相同无害）
+    always @(posedge clk) begin
+        if (state == S_LOAD || state == S_ACC_CLR)
+            lb[lb_wa_q] <= lb_wd_q;
+    end
 
     //-----------------------------------------------------------------------
     // 状态机
@@ -575,7 +585,10 @@ module cnn_core_v2 #(
             // 地址寄存器复位同样归并到主状态机（S_MAC_ADDR 分支在同一块）：
             // lb_q/acc_q 每拍无条件采样，无复位时 x 地址越界读会污染 acc_q
             lb_addr_r <= 16'd0;
+            lb_wa_q <= 16'd0;
+            lb_wd_q <= 64'h0;
             acc_addr_mac_r <= 16'd0;
+            acc_clr_wa <= 16'd0;
         end else begin
             case (state)
                 S_IDLE: begin
@@ -596,7 +609,8 @@ module cnn_core_v2 #(
                     o_valid <= 1'b0;
                     if (load_row_valid) begin
                         if (i_valid) begin
-                            lb[lb_waddr] <= i_data;
+                            lb_wa_q <= lb_waddr[15:0];
+                            lb_wd_q <= i_data;
                             if (load_col == in_w_reg - 1) begin
                                 load_col <= 0;
                                 if (load_row == in_row_tile_reg - 1) begin
@@ -606,6 +620,7 @@ module cnn_core_v2 #(
                                     if (load_first) begin
                                         load_first <= 0;
                                         rq_row <= 0; rq_col <= 0;
+                                        acc_clr_wa <= 16'd0;
                                         state <= S_ACC_CLR;
                                     end else
                                         state <= S_WEIGHT;
@@ -616,7 +631,8 @@ module cnn_core_v2 #(
                         end
                     end else begin
                         // pad 行：写 0 并跳过（不消费输入；BRAM 上电不定须清零）
-                        lb[lb_waddr] <= 64'h0;
+                        lb_wa_q <= lb_waddr[15:0];
+                        lb_wd_q <= 64'h0;
                         if (load_col == in_w_reg - 1) begin
                             load_col <= 0;
                             if (load_row == in_row_tile_reg - 1) begin
@@ -637,16 +653,22 @@ module cnn_core_v2 #(
                 //---- acc 清零（每输出组开始，逐 256-bit 字）----
                 S_ACC_CLR: begin
                     o_valid <= 1'b0;
-                    acc[acc_waddr_clr] <= 256'sd0;
+                    // 清零写（沿前 acc_clr_wa = 上拍寄存的"推进后地址" = 当前 rq 位置）
+                    acc[acc_clr_wa] <= 256'sd0;
+                    // 推进 + 同步寄存"推进后地址"（断 rq_row→acc 写口组合链，P1）
                     if (rq_row == out_row_tile_reg - 1 && rq_col == out_w_reg - 1) begin
                         rq_row <= 0; rq_col <= 0;
+                        acc_clr_wa <= 16'd0;
                         i_group <= 0;
                         state <= S_WEIGHT;
                     end else if (rq_col == out_w_reg - 1) begin
                         rq_col <= 0;
                         rq_row <= rq_row + 1;
-                    end else
+                        acc_clr_wa <= (rq_row + 1) * G_MAX_OW;
+                    end else begin
                         rq_col <= rq_col + 1;
+                        acc_clr_wa <= rq_row * G_MAX_OW + rq_col + 1;
+                    end
                 end
 
                 //---- 装载权重 slice（k=3：72 拍 [lane][9tap][8]；k=1：8 拍，lane 主序跳 72B 到 t=0 组）----
@@ -673,6 +695,7 @@ module cnn_core_v2 #(
                             wf_lane <= 3'd0;
                             wf_t <= 4'd0;
                             mac_row <= 0; mac_col <= 0; mac_t <= 0;
+                            mac_kh_q <= 4'd0; mac_kw_q <= 4'd0;
                             state <= S_MAC_ADDR;
                         end else
                             wf_cnt <= wf_cnt + 1;
@@ -746,6 +769,8 @@ module cnn_core_v2 #(
                                 (acc_local[32*lane +: 32] + v_sum_r[lane]);
                         acc[acc_wa_q] <= acc_wr_next;
                         mac_t <= 0;
+                        mac_kh_q <= 4'd0;
+                        mac_kw_q <= 4'd0;
                         if (mac_col == out_w_reg - 1) begin
                             mac_col <= 0;
                             if (mac_row == out_row_tile_reg - 1) begin
@@ -767,6 +792,8 @@ module cnn_core_v2 #(
                         end
                     end else begin
                         mac_t <= mac_t + 1;
+                        mac_kh_q <= (k_reg == 3) ? mac_kh_next : 4'd0;
+                        mac_kw_q <= (k_reg == 3) ? mac_kw_next : 4'd0;
                         state <= S_MAC_ADDR;
                     end
                 end
@@ -872,6 +899,28 @@ module cnn_core_v2 #(
     // 查表替代 32-bit 除法器（lpm_divide，组合链超长导致 setup 违例 -82ns）
     // （lb 已流式单 cb 驻留，不再有 mac_cb 通道块维度）
     reg [3:0] mac_kh, mac_kw;
+    // 下一 tap 的 kh/kw 提前寄存（S_MAC_ACC 拍采样查表(mac_t+1)，S_MAC_ADDR 拍用，
+    // 拆 mac_t→查表→lb_raddr 组合链 P2-3；S_WEIGHT 末/末 tap 分支重置为 kh(0)=0）
+    reg [3:0] mac_kh_q, mac_kw_q;
+    wire [3:0] mac_t_next = mac_t + 4'd1;
+    reg [3:0] mac_kh_next, mac_kw_next;
+    always @(*) begin
+        if (k_reg == 3) begin
+            case (mac_t_next[3:0])
+                4'd0: begin mac_kh_next = 4'd0; mac_kw_next = 4'd0; end
+                4'd1: begin mac_kh_next = 4'd0; mac_kw_next = 4'd1; end
+                4'd2: begin mac_kh_next = 4'd0; mac_kw_next = 4'd2; end
+                4'd3: begin mac_kh_next = 4'd1; mac_kw_next = 4'd0; end
+                4'd4: begin mac_kh_next = 4'd1; mac_kw_next = 4'd1; end
+                4'd5: begin mac_kh_next = 4'd1; mac_kw_next = 4'd2; end
+                4'd6: begin mac_kh_next = 4'd2; mac_kw_next = 4'd0; end
+                4'd7: begin mac_kh_next = 4'd2; mac_kw_next = 4'd1; end
+                default: begin mac_kh_next = 4'd2; mac_kw_next = 4'd2; end
+            endcase
+        end else begin
+            mac_kh_next = 4'd0; mac_kw_next = 4'd0;
+        end
+    end
     always @(*) begin
         if (k_reg == 3) begin
             case (mac_t[3:0])
@@ -892,10 +941,10 @@ module cnn_core_v2 #(
     end
     // 行（lb 索引）：窗口第 kh 行 = o_row*stride + kh + pad（装载时行 0 = base 行）；
     // stride_reg ∈ {1,2}，移位替代乘法器（mac_row*stride_reg 会被综合成 32-bit 乘法）
-    wire [31:0] mac_r = ((stride_reg == 2) ? {mac_row[30:0], 1'b0} : mac_row) + mac_kh;
+    wire [31:0] mac_r = ((stride_reg == 2) ? {mac_row[30:0], 1'b0} : mac_row) + mac_kh_q;
     // 列（输入列）：w*stride + kw - pad，越界补 0
     wire signed [31:0] mac_c = $signed((stride_reg == 2) ? {mac_col[30:0], 1'b0} : mac_col)
-                            + $signed(mac_kw) - $signed(pad_reg);
+                            + $signed(mac_kw_q) - $signed(pad_reg);
     wire mac_c_valid = (mac_c >= 0) && (mac_c < in_w_reg);
     wire [31:0] mac_c_cl = mac_c[31:0];
 
