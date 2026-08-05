@@ -167,11 +167,13 @@ module cnn_core_v2 #(
     // RAM 恢复救回 16/32 个（g_rq_param 奇数实例），偶数实例数组照旧展开成
     // 寄存器（ALM 爆）。lb/acc 在模块顶层且全部推断成功，故此处与它们
     // 完全同构：顶层数组 + 每数组独立写 always + 读地址打拍 + 无条件采样。
+    reg [9:0] rq_raddr_q;   // rq_raddr 打拍（断 o_group→32 个 requant RAM 地址布线段）
     // 每 lane 读地址 = o_group*8 + lane（10-bit，o_group ≤ 127；写地址
     // cfg_addr[9:0] 截断，值域 ≤1023 与 1024 深匹配）。
     wire [9:0] rq_raddr = {o_group[6:0], 3'd0};   // 组合地址，直接驱动读端口（链短）
-    // 注意：不可打拍（rq_raddr_r）——S_REQ_ADDR 拍采新组地址、S_REQ_MUL 拍
-    // 就要用 q_bias；打拍 + M10K 同步读 = 2 拍延迟，bias/rcl6 错 1 组
+    // 打拍说明（覆盖旧注释"不可打拍"）：旧设计 rq_raddr 在 requant 首拍才更新会错 1 组；
+    // 当前 o_group 在 S_REQ_OUT3 末更新，到 requant 前隔 S_LOAD/ACC_CLR/WEIGHT/MAC 多拍，
+    // rq_raddr_q 每拍采样早已稳定为新组，q_* 采样/使用均无错位（tb 多 o_group 层验证）
     (* ramstyle = "M10K" *) reg signed [31:0] bias_store_0 [0:G_MAX_C-1];
     (* ramstyle = "M10K" *) reg [31:0] rq_m_store_0 [0:G_MAX_C-1];
     (* ramstyle = "M10K" *) reg [7:0]  rq_r_store_0 [0:G_MAX_C-1];
@@ -197,10 +199,10 @@ module cnn_core_v2 #(
     reg [7:0]  q_shift_0;
     reg signed [31:0] q_rcl6_0;
     always @(posedge clk) begin
-        q_bias_0  <= bias_store_0[rq_raddr];
-        q_rcl6_0  <= rcl6_store_0[rq_raddr];
-        q_mult_0  <= rq_m_store_0[rq_raddr];
-        q_shift_0 <= rq_r_store_0[rq_raddr];
+        q_bias_0  <= bias_store_0[rq_raddr_q];
+        q_rcl6_0  <= rcl6_store_0[rq_raddr_q];
+        q_mult_0  <= rq_m_store_0[rq_raddr_q];
+        q_shift_0 <= rq_r_store_0[rq_raddr_q];
     end
     assign rq_bias_q[0]  = q_bias_0;
     assign rq_mult_q[0]  = q_mult_0;
@@ -231,10 +233,10 @@ module cnn_core_v2 #(
     reg [7:0]  q_shift_1;
     reg signed [31:0] q_rcl6_1;
     always @(posedge clk) begin
-        q_bias_1  <= bias_store_1[rq_raddr + 9'd1];
-        q_rcl6_1  <= rcl6_store_1[rq_raddr + 9'd1];
-        q_mult_1  <= rq_m_store_1[rq_raddr + 9'd1];
-        q_shift_1 <= rq_r_store_1[rq_raddr + 9'd1];
+        q_bias_1  <= bias_store_1[rq_raddr_q + 9'd1];
+        q_rcl6_1  <= rcl6_store_1[rq_raddr_q + 9'd1];
+        q_mult_1  <= rq_m_store_1[rq_raddr_q + 9'd1];
+        q_shift_1 <= rq_r_store_1[rq_raddr_q + 9'd1];
     end
     assign rq_bias_q[1]  = q_bias_1;
     assign rq_mult_q[1]  = q_mult_1;
@@ -265,10 +267,10 @@ module cnn_core_v2 #(
     reg [7:0]  q_shift_2;
     reg signed [31:0] q_rcl6_2;
     always @(posedge clk) begin
-        q_bias_2  <= bias_store_2[rq_raddr + 9'd2];
-        q_rcl6_2  <= rcl6_store_2[rq_raddr + 9'd2];
-        q_mult_2  <= rq_m_store_2[rq_raddr + 9'd2];
-        q_shift_2 <= rq_r_store_2[rq_raddr + 9'd2];
+        q_bias_2  <= bias_store_2[rq_raddr_q + 9'd2];
+        q_rcl6_2  <= rcl6_store_2[rq_raddr_q + 9'd2];
+        q_mult_2  <= rq_m_store_2[rq_raddr_q + 9'd2];
+        q_shift_2 <= rq_r_store_2[rq_raddr_q + 9'd2];
     end
     assign rq_bias_q[2]  = q_bias_2;
     assign rq_mult_q[2]  = q_mult_2;
@@ -299,10 +301,10 @@ module cnn_core_v2 #(
     reg [7:0]  q_shift_3;
     reg signed [31:0] q_rcl6_3;
     always @(posedge clk) begin
-        q_bias_3  <= bias_store_3[rq_raddr + 9'd3];
-        q_rcl6_3  <= rcl6_store_3[rq_raddr + 9'd3];
-        q_mult_3  <= rq_m_store_3[rq_raddr + 9'd3];
-        q_shift_3 <= rq_r_store_3[rq_raddr + 9'd3];
+        q_bias_3  <= bias_store_3[rq_raddr_q + 9'd3];
+        q_rcl6_3  <= rcl6_store_3[rq_raddr_q + 9'd3];
+        q_mult_3  <= rq_m_store_3[rq_raddr_q + 9'd3];
+        q_shift_3 <= rq_r_store_3[rq_raddr_q + 9'd3];
     end
     assign rq_bias_q[3]  = q_bias_3;
     assign rq_mult_q[3]  = q_mult_3;
@@ -333,10 +335,10 @@ module cnn_core_v2 #(
     reg [7:0]  q_shift_4;
     reg signed [31:0] q_rcl6_4;
     always @(posedge clk) begin
-        q_bias_4  <= bias_store_4[rq_raddr + 9'd4];
-        q_rcl6_4  <= rcl6_store_4[rq_raddr + 9'd4];
-        q_mult_4  <= rq_m_store_4[rq_raddr + 9'd4];
-        q_shift_4 <= rq_r_store_4[rq_raddr + 9'd4];
+        q_bias_4  <= bias_store_4[rq_raddr_q + 9'd4];
+        q_rcl6_4  <= rcl6_store_4[rq_raddr_q + 9'd4];
+        q_mult_4  <= rq_m_store_4[rq_raddr_q + 9'd4];
+        q_shift_4 <= rq_r_store_4[rq_raddr_q + 9'd4];
     end
     assign rq_bias_q[4]  = q_bias_4;
     assign rq_mult_q[4]  = q_mult_4;
@@ -367,10 +369,10 @@ module cnn_core_v2 #(
     reg [7:0]  q_shift_5;
     reg signed [31:0] q_rcl6_5;
     always @(posedge clk) begin
-        q_bias_5  <= bias_store_5[rq_raddr + 9'd5];
-        q_rcl6_5  <= rcl6_store_5[rq_raddr + 9'd5];
-        q_mult_5  <= rq_m_store_5[rq_raddr + 9'd5];
-        q_shift_5 <= rq_r_store_5[rq_raddr + 9'd5];
+        q_bias_5  <= bias_store_5[rq_raddr_q + 9'd5];
+        q_rcl6_5  <= rcl6_store_5[rq_raddr_q + 9'd5];
+        q_mult_5  <= rq_m_store_5[rq_raddr_q + 9'd5];
+        q_shift_5 <= rq_r_store_5[rq_raddr_q + 9'd5];
     end
     assign rq_bias_q[5]  = q_bias_5;
     assign rq_mult_q[5]  = q_mult_5;
@@ -401,10 +403,10 @@ module cnn_core_v2 #(
     reg [7:0]  q_shift_6;
     reg signed [31:0] q_rcl6_6;
     always @(posedge clk) begin
-        q_bias_6  <= bias_store_6[rq_raddr + 9'd6];
-        q_rcl6_6  <= rcl6_store_6[rq_raddr + 9'd6];
-        q_mult_6  <= rq_m_store_6[rq_raddr + 9'd6];
-        q_shift_6 <= rq_r_store_6[rq_raddr + 9'd6];
+        q_bias_6  <= bias_store_6[rq_raddr_q + 9'd6];
+        q_rcl6_6  <= rcl6_store_6[rq_raddr_q + 9'd6];
+        q_mult_6  <= rq_m_store_6[rq_raddr_q + 9'd6];
+        q_shift_6 <= rq_r_store_6[rq_raddr_q + 9'd6];
     end
     assign rq_bias_q[6]  = q_bias_6;
     assign rq_mult_q[6]  = q_mult_6;
@@ -435,10 +437,10 @@ module cnn_core_v2 #(
     reg [7:0]  q_shift_7;
     reg signed [31:0] q_rcl6_7;
     always @(posedge clk) begin
-        q_bias_7  <= bias_store_7[rq_raddr + 9'd7];
-        q_rcl6_7  <= rcl6_store_7[rq_raddr + 9'd7];
-        q_mult_7  <= rq_m_store_7[rq_raddr + 9'd7];
-        q_shift_7 <= rq_r_store_7[rq_raddr + 9'd7];
+        q_bias_7  <= bias_store_7[rq_raddr_q + 9'd7];
+        q_rcl6_7  <= rcl6_store_7[rq_raddr_q + 9'd7];
+        q_mult_7  <= rq_m_store_7[rq_raddr_q + 9'd7];
+        q_shift_7 <= rq_r_store_7[rq_raddr_q + 9'd7];
     end
     assign rq_bias_q[7]  = q_bias_7;
     assign rq_mult_q[7]  = q_mult_7;
@@ -460,7 +462,6 @@ module cnn_core_v2 #(
     // 单维索引拼接（常量乘法综合时折叠成移位/加法，不产生逻辑）
     wire [20:0] lb_waddr = load_row*G_MAX_W + load_col;
     wire [20:0] lb_raddr = mac_r*G_MAX_W + mac_c_cl;
-    wire [15:0] acc_waddr_clr = rq_row*G_MAX_OW + rq_col;
     wire [15:0] acc_waddr_mac = mac_row*G_MAX_OW + mac_col;
     wire [15:0] acc_raddr_clr = rq_row*G_MAX_OW + rq_col;
     wire [15:0] acc_raddr_mac = mac_row*G_MAX_OW + mac_col;
@@ -585,6 +586,8 @@ module cnn_core_v2 #(
             rq_row <= 0; rq_col <= 0;
             mac_c_valid_r <= 1'b0;
             acc_local <= 256'sd0;   // 复位归并到主状态机（单一驱动，避免 Quartus 10028）
+            acc_wr_q <= 256'sd0;
+            acc_wr_we_q <= 1'b0;
             // 地址寄存器复位同样归并到主状态机（S_MAC_ADDR 分支在同一块）：
             // lb_q/acc_q 每拍无条件采样，无复位时 x 地址越界读会污染 acc_q
             lb_addr_r <= 16'd0;
@@ -610,6 +613,11 @@ module cnn_core_v2 #(
                     // 否则残留 1 → 输出持续被收集（o_ready=1 恒等）→ 失控
                     // （单组层走 S_DONE 拉低故未暴露）
                     o_valid <= 1'b0;
+                    // 末 tap 写回（延后 1 拍搭车，case 内写点保 M10K 推断；写拍沿清脉冲）
+                    if (acc_wr_we_q) begin
+                        acc[acc_wa_q] <= acc_wr_q;
+                        acc_wr_we_q <= 1'b0;
+                    end
                     if (load_row_valid) begin
                         if (i_valid) begin
                             lb_wa_q <= lb_waddr[15:0];
@@ -708,6 +716,11 @@ module cnn_core_v2 #(
                 //---- 窗口 MAC（地址拍）：组合计算 lb/acc 读地址并寄存，
                 //     断开 32-bit 常量乘法链直通 M10K 地址端口的长路径 ----
                 S_MAC_ADDR: begin
+                    // 末 tap 写回（延后 1 拍搭车，case 内写点保 M10K 推断；写拍沿清脉冲）
+                    if (acc_wr_we_q) begin
+                        acc[acc_wa_q] <= acc_wr_q;
+                        acc_wr_we_q <= 1'b0;
+                    end
                     lb_addr_r      <= lb_raddr[15:0];
                     acc_addr_mac_r <= acc_raddr_mac[15:0];
                     state <= S_MAC_RD;
@@ -770,7 +783,8 @@ module cnn_core_v2 #(
                             acc_wr_next[32*lane +: 32] = (k_reg == 1) ?
                                 (acc_q[32*lane +: 32] + v_sum_r[lane]) :
                                 (acc_local[32*lane +: 32] + v_sum_r[lane]);
-                        acc[acc_wa_q] <= acc_wr_next;
+                        acc_wr_q <= acc_wr_next;   // 写数据打拍（下一拍随转移状态写回）
+                        acc_wr_we_q <= 1'b1;       // 写回脉冲（写拍沿清 0）
                         mac_t <= 0;
                         mac_kh_q <= 4'd0;
                         mac_kw_q <= 4'd0;
@@ -803,6 +817,11 @@ module cnn_core_v2 #(
 
                 //---- requant 请求拍：采样 acc[rq_row][rq_col] ----
                 S_REQ_ADDR: begin
+                    // 末 tap 写回（延后 1 拍搭车，case 内写点保 M10K 推断；写拍沿清脉冲）
+                    if (acc_wr_we_q) begin
+                        acc[acc_wa_q] <= acc_wr_q;
+                        acc_wr_we_q <= 1'b0;
+                    end
                     o_valid <= 1'b0;
                     state <= S_REQ_MUL;
                 end
@@ -901,7 +920,6 @@ module cnn_core_v2 #(
     // 窗口 tap 位置：k_reg ∈ {1,3}（model_profile 实测）、mac_t ∈ [0,8]，
     // 查表替代 32-bit 除法器（lpm_divide，组合链超长导致 setup 违例 -82ns）
     // （lb 已流式单 cb 驻留，不再有 mac_cb 通道块维度）
-    reg [3:0] mac_kh, mac_kw;
     // 下一 tap 的 kh/kw 提前寄存（S_MAC_ACC 拍采样查表(mac_t+1)，S_MAC_ADDR 拍用，
     // 拆 mac_t→查表→lb_raddr 组合链 P2-3；S_WEIGHT 末/末 tap 分支重置为 kh(0)=0）
     reg [3:0] mac_kh_q, mac_kw_q;
@@ -922,24 +940,6 @@ module cnn_core_v2 #(
             endcase
         end else begin
             mac_kh_next = 4'd0; mac_kw_next = 4'd0;
-        end
-    end
-    always @(*) begin
-        if (k_reg == 3) begin
-            case (mac_t[3:0])
-                4'd0: begin mac_kh = 0; mac_kw = 0; end
-                4'd1: begin mac_kh = 0; mac_kw = 1; end
-                4'd2: begin mac_kh = 0; mac_kw = 2; end
-                4'd3: begin mac_kh = 1; mac_kw = 0; end
-                4'd4: begin mac_kh = 1; mac_kw = 1; end
-                4'd5: begin mac_kh = 1; mac_kw = 2; end
-                4'd6: begin mac_kh = 2; mac_kw = 0; end
-                4'd7: begin mac_kh = 2; mac_kw = 1; end
-                default: begin mac_kh = 2; mac_kw = 2; end
-            endcase
-        end else begin
-            mac_kh = mac_t[3:0];   // k=1：kh=mac_t, kw=0（mac_t%1=0）
-            mac_kw = 4'd0;
         end
     end
     // 行（lb 索引）：窗口第 kh 行 = o_row*stride + kh + pad（装载时行 0 = base 行）；
@@ -972,6 +972,7 @@ module cnn_core_v2 #(
                         w_q[lane][m] <= wbuf[lane][m][mac_t];
             end
             acc_raddr_r <= acc_raddr_clr[15:0];   // requant 读地址打拍（每拍采样，rq_row 推进后首拍锁存新值）
+            rq_raddr_q <= rq_raddr;                 // requant 参数读地址打拍（每拍，断 o_group 布线）
             // acc 写口统一地址：S_MAC_MUL3 拍取写回地址（当轮 mac_row），S_MAC_ACC 拍写回
             // 用沿前值；其他拍取清零地址（rq_row 稳定）——写口永不直接连组合
             if (state == S_MAC_MUL3)
@@ -991,6 +992,8 @@ module cnn_core_v2 #(
     // 破坏 M10K 推断；acc_local/acc 保持整字写，Quartus 才可推断 block RAM）
     reg [255:0] acc_next;      // acc_local 的下一拍值（每 lane 独立 int32 累加）
     reg [255:0] acc_wr_next;   // 末 tap 写回 acc 的整字（每 lane = acc_local + 本 tap 部分和）
+    reg [255:0] acc_wr_q;      // 末 tap 写回数据打拍（断 v_sum_r→acc 写口 256-bit 组合链）
+    reg         acc_wr_we_q;   // 写回脉冲：末 tap 沿后置 1，写拍沿清 0（单拍）
 
     //-----------------------------------------------------------------------
     // requant 流水（拆流水，避免单拍组合链过深）：

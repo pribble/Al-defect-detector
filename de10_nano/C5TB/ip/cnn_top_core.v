@@ -208,7 +208,7 @@ module cnn_top_core (
         if (!rst_n) begin
             dbg_o_evt_cnt <= 0; dbg_done_cnt <= 0;
         end else begin
-            if (core_o_valid && core_o_ready) dbg_o_evt_cnt <= dbg_o_evt_cnt + 1;
+            if (core_o_valid && core_o_ready) dbg_o_evt_cnt <= dbg_o_evt_cnt + 16'd1;
             if (core_done) dbg_done_cnt <= dbg_done_cnt + 1;
         end
     end
