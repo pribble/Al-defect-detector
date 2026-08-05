@@ -46,14 +46,14 @@ module cnn_top_core (
     input  wire                lr_waitrequest,
 
     // ---- 权重读（64-bit）----（调试版不读，固定拉低）
-    output reg  [31:0]         wr_address,
+    output wire [31:0]         wr_address,
     output wire                wr_read,
     input  wire [63:0]         wr_readdata,
     input  wire                wr_readdatavalid,
     input  wire                wr_waitrequest,
 
     // ---- 输出写（64-bit）----（调试版不写，固定拉低）
-    output reg  [31:0]         ow_address,
+    output wire [31:0]         ow_address,
     output wire                ow_write,
     output wire [63:0]         ow_writedata,
     input  wire                ow_waitrequest
