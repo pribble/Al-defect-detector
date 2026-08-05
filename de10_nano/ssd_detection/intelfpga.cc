@@ -189,8 +189,12 @@ int fpga_init() {
   return 0;
 }
 
-// FPGA 调试开关：FPGA_DEBUG=1 时每层完成后打印观测寄存器快照
-static int fpga_debug = -1;
+// FPGA 调试开关：编译期默认开（FPGA_DEBUG 宏，-DFPGA_DEBUG=0 可关）；
+// 运行时可用环境变量 FPGA_DEBUG 覆盖（>0 开、=0 关）
+#ifndef FPGA_DEBUG
+#define FPGA_DEBUG 1
+#endif
+static int fpga_debug = FPGA_DEBUG;
 
 // 层完成快照（观测寄存器 0x54-0x8C，复现核专用；位布局见 cnn_top_core.v）：
 //   0x54 = {core_state[4:0], o_group[10:0], i_group[10:0], cmd_head, cmd_cnt}
@@ -589,9 +593,12 @@ struct device_weight_config dw_conv2d_weight_reorganize(
 }
 
 int intelfpga_subgraph(struct DeviceGraphNode *node) {
+  // 日志即时输出（无缓冲），避免管道/重定向下 [DBG] 滞留不显示
+  setvbuf(stdout, nullptr, _IONBF, 0);
   fpga_init();
-  if (fpga_debug < 0)
-    fpga_debug = getenv("FPGA_DEBUG") ? atoi(getenv("FPGA_DEBUG")) : 0;
+  // 环境变量存在时覆盖编译期默认（部署环境不便设变量时编译期已默认开）
+  if (getenv("FPGA_DEBUG"))
+    fpga_debug = atoi(getenv("FPGA_DEBUG"));
   struct timespec hw_start, hw_end;
   long long input_organize_time = 0, output_organize_time = 0;
   long long fpga_time = 0;
