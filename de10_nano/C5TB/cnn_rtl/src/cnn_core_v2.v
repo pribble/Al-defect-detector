@@ -923,16 +923,17 @@ module cnn_core_v2 #(
     (* multstyle = "dsp" *) reg [31:0] v_p_lohi [0:7];   // a_lo × m_hi（无符号 16×16）
     (* multstyle = "dsp" *) reg signed [31:0] v_p_hilo [0:7];  // a_hi × m_lo（signed 16 × unsigned 16）
     (* multstyle = "dsp" *) reg signed [31:0] v_p_hihi [0:7];  // a_hi × m_hi（signed 16 × unsigned 16）
+    reg [31:0] rq_mult_m [0:7];   // S_REQ_MUL 拍寄存的乘法器 b 输入（拆 RAM 读与 DSP 乘法组合链）
 
     // 16×16 乘法用显式 DSP 例化（模块级 multstyle 最可靠；数组属性曾被 Quartus 忽略）
     wire [31:0] mul_lolo [0:7], mul_lohi [0:7], mul_hilo [0:7], mul_hihi [0:7];
     genvar gi;
     generate
         for (gi = 0; gi < 8; gi = gi + 1) begin : g_mul16
-            mul16x16_dsp #(.A_SIGNED(0)) u_lolo (.a(v_act_l[gi][15:0]), .b(rq_mult_q[gi][15:0]), .p(mul_lolo[gi]));
-            mul16x16_dsp #(.A_SIGNED(0)) u_lohi (.a(v_act_l[gi][15:0]), .b(rq_mult_q[gi][31:16]), .p(mul_lohi[gi]));
-            mul16x16_dsp #(.A_SIGNED(1)) u_hilo (.a(v_act_l[gi][31:16]), .b(rq_mult_q[gi][15:0]), .p(mul_hilo[gi]));
-            mul16x16_dsp #(.A_SIGNED(1)) u_hihi (.a(v_act_l[gi][31:16]), .b(rq_mult_q[gi][31:16]), .p(mul_hihi[gi]));
+            mul16x16_dsp #(.A_SIGNED(0)) u_lolo (.a(v_act_l[gi][15:0]), .b(rq_mult_m[gi][15:0]), .p(mul_lolo[gi]));
+            mul16x16_dsp #(.A_SIGNED(0)) u_lohi (.a(v_act_l[gi][15:0]), .b(rq_mult_m[gi][31:16]), .p(mul_lohi[gi]));
+            mul16x16_dsp #(.A_SIGNED(1)) u_hilo (.a(v_act_l[gi][31:16]), .b(rq_mult_m[gi][15:0]), .p(mul_hilo[gi]));
+            mul16x16_dsp #(.A_SIGNED(1)) u_hihi (.a(v_act_l[gi][31:16]), .b(rq_mult_m[gi][31:16]), .p(mul_hihi[gi]));
         end
     endgenerate
     reg signed [63:0] v_sum_lo [0:7];  // lolo + lohi<<16（无符号两项）
@@ -956,6 +957,15 @@ module cnn_core_v2 #(
                     v_biased_l[ln] <= acc_q[32*ln +: 32] + rq_bias_q[ln];
                 v_rcl6_l[ln] <= rq_rcl6_q[ln];
             end
+        end
+    end
+
+    // 乘法器 b 输入打拍（S_REQ_MUL 拍寄存 rq_mult_q）：拆开 RAM 读路径
+    // （含 read-during-write pass-through mux）与 DSP 乘法，避免组合穿透直达 v_p_*
+    always @(posedge clk) begin
+        if (state == S_REQ_MUL) begin
+            for (ln = 0; ln < 8; ln = ln + 1)
+                rq_mult_m[ln] <= rq_mult_q[ln];
         end
     end
 
