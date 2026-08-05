@@ -462,6 +462,7 @@ module cnn_core_v2 #(
     wire [31:0] lb_raddr = mac_r*G_MAX_W + mac_c_cl;
     wire [31:0] acc_waddr_clr = rq_row*G_MAX_OW + rq_col;
     wire [31:0] acc_waddr_mac = mac_row*G_MAX_OW + mac_col;
+    reg  [31:0] acc_wa_q;   // S_MAC_MUL3 拍寄存 acc 写回地址（拆 mac_row→acc A 口地址组合链）
     wire [31:0] acc_raddr_clr = rq_row*G_MAX_OW + rq_col;
     wire [31:0] acc_raddr_mac = mac_row*G_MAX_OW + mac_col;
     reg signed [7:0] wbuf [0:7][0:7][0:8];   // [lane][m][t]：w_q 读 = 9:1 mux（原 [lane*72+t*8+m] 平铺是 72:1，mac_t→w_q 路径 18.95ns）
@@ -716,6 +717,8 @@ module cnn_core_v2 #(
                             mac_p_r[lane][4] + mac_p_r[lane][5] + mac_p_r[lane][6] + mac_p_r[lane][7];
                     for (lane = 0; lane < 8; lane = lane + 1)
                         v_sum_r[lane] <= v_sum[lane];
+                    // acc 写回地址提前寄存（mac_row→acc_waddr_mac 组合链拆出 S_MAC_ACC 拍）
+                    acc_wa_q <= acc_waddr_mac;
                     state <= S_MAC_ACC;
                 end
 
@@ -742,7 +745,7 @@ module cnn_core_v2 #(
                             acc_wr_next[32*lane +: 32] = (k_reg == 1) ?
                                 (acc_q[32*lane +: 32] + v_sum_r[lane]) :
                                 (acc_local[32*lane +: 32] + v_sum_r[lane]);
-                        acc[acc_waddr_mac] <= acc_wr_next;
+                        acc[acc_wa_q] <= acc_wr_next;
                         mac_t <= 0;
                         if (mac_col == out_w_reg - 1) begin
                             mac_col <= 0;
