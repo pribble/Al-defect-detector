@@ -109,12 +109,12 @@ module cnn_core_v2 #(
     //  13:in_cb 14:out_cb 15:base_row（本行块输入 base 行号）
     //-----------------------------------------------------------------------
     reg [3:0]  type_reg, act_reg;
-    reg [31:0] in_h_reg,  in_w_reg;
-    reg [31:0] out_c_reg, out_w_reg;
-    reg [31:0] k_reg, pad_reg, stride_reg;
-    reg [31:0] out_row_tile_reg, in_row_tile_reg;
-    reg [31:0] in_cb_reg, out_cb_reg;
-    reg signed [31:0] base_row_reg;
+    reg [11:0] in_h_reg,  in_w_reg;
+    reg [11:0] out_c_reg, out_w_reg;
+    reg [3:0]  k_reg, pad_reg, stride_reg;
+    reg [11:0] out_row_tile_reg, in_row_tile_reg;
+    reg [11:0] in_cb_reg, out_cb_reg;
+    reg signed [12:0] base_row_reg;
 
     // requant 参数存储（cfg_sel 1/2/3/4 = bias/mult/shift/rcl6，addr=输出通道）
     // 见下方 generate 块 g_rq_param：8 lane 并行读 8 个不同通道地址，
@@ -128,18 +128,18 @@ module cnn_core_v2 #(
                     case (cfg_addr)
                         20'd0: type_reg      <= cfg_wdata[3:0];
                         20'd1: act_reg       <= cfg_wdata[1:0];
-                        20'd3: in_h_reg      <= cfg_wdata;
-                        20'd4: in_w_reg      <= cfg_wdata;
-                        20'd5: out_c_reg     <= cfg_wdata;
-                        20'd7: out_w_reg     <= cfg_wdata;
-                        20'd8: k_reg         <= cfg_wdata;
-                        20'd9: pad_reg       <= cfg_wdata;
-                        20'd10: stride_reg   <= cfg_wdata;
-                        20'd11: out_row_tile_reg <= cfg_wdata;
-                        20'd12: in_row_tile_reg  <= cfg_wdata;
-                        20'd13: in_cb_reg     <= cfg_wdata;
-                        20'd14: out_cb_reg    <= cfg_wdata;
-                        20'd15: base_row_reg  <= cfg_wdata;
+                        20'd3: in_h_reg      <= cfg_wdata[11:0];
+                        20'd4: in_w_reg      <= cfg_wdata[11:0];
+                        20'd5: out_c_reg     <= cfg_wdata[11:0];
+                        20'd7: out_w_reg     <= cfg_wdata[11:0];
+                        20'd8: k_reg         <= cfg_wdata[3:0];
+                        20'd9: pad_reg       <= cfg_wdata[3:0];
+                        20'd10: stride_reg   <= cfg_wdata[3:0];
+                        20'd11: out_row_tile_reg <= cfg_wdata[11:0];
+                        20'd12: in_row_tile_reg  <= cfg_wdata[11:0];
+                        20'd13: in_cb_reg     <= cfg_wdata[11:0];
+                        20'd14: out_cb_reg    <= cfg_wdata[11:0];
+                        20'd15: base_row_reg  <= cfg_wdata[12:0];
                         default: ;
                     endcase
                 end
@@ -458,12 +458,12 @@ module cnn_core_v2 #(
     (* ramstyle = "M10K, no_rw_check" *) reg signed [255:0] acc [0:G_MAX_OROWS*G_MAX_OW-1];
 
     // 单维索引拼接（常量乘法综合时折叠成移位/加法，不产生逻辑）
-    wire [31:0] lb_waddr = load_row*G_MAX_W + load_col;
-    wire [31:0] lb_raddr = mac_r*G_MAX_W + mac_c_cl;
-    wire [31:0] acc_waddr_clr = rq_row*G_MAX_OW + rq_col;
-    wire [31:0] acc_waddr_mac = mac_row*G_MAX_OW + mac_col;
-    wire [31:0] acc_raddr_clr = rq_row*G_MAX_OW + rq_col;
-    wire [31:0] acc_raddr_mac = mac_row*G_MAX_OW + mac_col;
+    wire [20:0] lb_waddr = load_row*G_MAX_W + load_col;
+    wire [20:0] lb_raddr = mac_r*G_MAX_W + mac_c_cl;
+    wire [15:0] acc_waddr_clr = rq_row*G_MAX_OW + rq_col;
+    wire [15:0] acc_waddr_mac = mac_row*G_MAX_OW + mac_col;
+    wire [15:0] acc_raddr_clr = rq_row*G_MAX_OW + rq_col;
+    wire [15:0] acc_raddr_mac = mac_row*G_MAX_OW + mac_col;
     reg signed [7:0] wbuf [0:7][0:7][0:8];   // [lane][m][t]：w_q 读 = 9:1 mux（原 [lane*72+t*8+m] 平铺是 72:1，mac_t→w_q 路径 18.95ns）
 
     // MAC 8×8 乘法器：拆成独立子模块（模块级 multstyle 强制 DSP/LUT 分配），
@@ -553,18 +553,19 @@ module cnn_core_v2 #(
     localparam S_DONE     = 4'd10;
 
     reg [4:0] state;
-    reg [31:0] load_row, load_col;
+    reg [11:0] load_row, load_col;
     reg        load_first;        // 本轮装载是 o_group 首 cb（完成后需清 acc）
-    reg [31:0] wf_cnt;
+    reg [7:0]  wf_cnt;
     reg [2:0]  wf_lane;   // wbuf 写 lane 计数（k=3：wf_cnt/9；k=1：wf_cnt），替代除法器
     reg [3:0]  wf_t;      // wbuf 写 tap 计数（k=3：wf_cnt%9；k=1：恒 0）
-    reg [31:0] o_group, i_group;
-    reg [31:0] mac_row, mac_col, mac_t;
+    reg [11:0] o_group, i_group;
+    reg [11:0] mac_row, mac_col;
+    reg [3:0]  mac_t;
     reg        mac_first_q, mac_last_q;   // S_MAC_MUL2 拍寄存首/末 tap 标志（拆 mac_t 32-bit 比较链）
     reg [31:0] rq_row, rq_col;
 
     // 行缓冲行 r 对应输入行 base_row_reg + r；有效 = 输入行 ∈ [0, in_h)
-    wire signed [31:0] load_in_row = base_row_reg + load_row;
+    wire signed [12:0] load_in_row = base_row_reg + load_row;
     wire load_row_valid = (load_in_row >= 0) && (load_in_row < in_h_reg);
 
     //-----------------------------------------------------------------------
@@ -729,8 +730,8 @@ module cnn_core_v2 #(
                         for (m = 0; m < 8; m = m + 1)
                             mac_p_r[lane][m] <= mac_p[lane][m];
                     // 首/末 tap 标志提前寄存（32-bit 比较拆出 S_MAC_ACC 拍）
-                    mac_first_q <= (mac_t == 32'd0);
-                    mac_last_q  <= (mac_t == (k_reg == 1 ? 32'd0 : 32'd8));
+                    mac_first_q <= (mac_t == 4'd0);
+                    mac_last_q  <= (mac_t == (k_reg == 1 ? 4'd0 : 4'd8));
                     state <= S_MAC_MUL3;
                 end
                 S_MAC_MUL3: begin
@@ -941,12 +942,12 @@ module cnn_core_v2 #(
     end
     // 行（lb 索引）：窗口第 kh 行 = o_row*stride + kh + pad（装载时行 0 = base 行）；
     // stride_reg ∈ {1,2}，移位替代乘法器（mac_row*stride_reg 会被综合成 32-bit 乘法）
-    wire [31:0] mac_r = ((stride_reg == 2) ? {mac_row[30:0], 1'b0} : mac_row) + mac_kh_q;
+    wire [11:0] mac_r = ((stride_reg == 2) ? {mac_row[10:0], 1'b0} : mac_row) + mac_kh_q;
     // 列（输入列）：w*stride + kw - pad，越界补 0
-    wire signed [31:0] mac_c = $signed((stride_reg == 2) ? {mac_col[30:0], 1'b0} : mac_col)
+    wire signed [12:0] mac_c = $signed((stride_reg == 2) ? {mac_col[10:0], 1'b0} : mac_col)
                             + $signed(mac_kw_q) - $signed(pad_reg);
     wire mac_c_valid = (mac_c >= 0) && (mac_c < in_w_reg);
-    wire [31:0] mac_c_cl = mac_c[31:0];
+    wire [11:0] mac_c_cl = mac_c[11:0];
 
     // S_MAC_RD 拍寄存 tap 列有效位（拆 k_reg→乘加树组合链，setup 违例 -6.18ns 主因）
 
@@ -1034,7 +1035,7 @@ module cnn_core_v2 #(
     (* multstyle = "dsp" *) reg signed [63:0] v_rq64_l [0:7];  // 每 lane 的 64-bit 积（流水级 2，保 DSP）
     reg [7:0] v_shift_l [0:7];         // 每 lane 的 shift 值（S_REQ_MUL2 拍寄存 RAM 读，断 M10K q 路径）
     reg signed [63:0] v_round_l [0:7]; // 每 lane 的 round 后值（流水级 3）
-    reg [31:0] v_out_ch;
+    reg [11:0] v_out_ch;
     reg [7:0] v_q [0:7];
 
     // 乘加拍级 1（S_REQ_MUL）：bias/mult RAM 读打拍 → rq_bias_m/rq_mult_m
@@ -1208,8 +1209,8 @@ module cnn_core_v2 #(
 
     // ---- 观测输出（组合直读；Quartus 不支持跨模块层次引用，故以端口引出）----
     assign dbg_ptr0  = {state[4:0], o_group[10:0], i_group[10:0], mac_t[3:0]};
-    assign dbg_ptr1  = {rq_row[15:0], rq_col[15:0]};
-    assign dbg_ptr2  = {mac_row[15:0], mac_col[15:0]};
+    assign dbg_ptr1  = {4'd0, rq_row, 4'd0, rq_col};
+    assign dbg_ptr2  = {4'd0, mac_row, 4'd0, mac_col};
     assign dbg_ptr3  = {load_row[9:0], load_col[9:0], wf_cnt[7:0]};
     assign dbg_data0 = {acc_q[31:0], v_biased_l[0], v_act_l[0], v_rq64_l[0][31:0]};
     assign dbg_data1 = {v_round_l[0][31:0], v_shifted[0][31:0], v_rnd_delta[0][31:0],
