@@ -106,8 +106,7 @@ module cnn_core_v2 #(
     output wire [31:0]  dbg_scale2, // ch0 shift（cfg_sel 3）
     output wire [31:0]  dbg_scale3, // ch0 rcl6（cfg_sel 4）
     output wire [31:0]  dbg_in0,    // 输入区首字低 32（S_LOAD 首拍 i_data 锁存）
-    output wire [31:0]  dbg_in1,    // 输入区首字高 32
-  // {acc_q[31:0], v_biased_l[0], v_act_l[0], v_rq64_l[0][31:0]}
+    output wire [31:0]  dbg_in1     // 输入区首字高 32
 );
 
     //-----------------------------------------------------------------------
