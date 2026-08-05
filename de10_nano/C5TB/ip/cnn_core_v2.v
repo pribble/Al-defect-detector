@@ -512,7 +512,8 @@ module cnn_core_v2 #(
     // -0.839ns 主因）；打一拍后组合链终点变为普通寄存器，M10K 地址由寄存器驱动。
     // 最大地址 = 4*41*302-1 = 49527（lb）、19*150+149 = 2999（acc），16-bit 够。
     reg [15:0]          lb_addr_r;
-    reg [15:0]          acc_addr_mac_r;
+    (* preserve *) reg [15:0]       acc_addr_mac_r;   // preserve：阻止吸收进 M10K 地址寄存器（mac_row→porta_address_reg 组合链 -4.223）
+    (* preserve *) reg [15:0]       acc_raddr_r;      // requant 读地址打拍（preserve：拆 rq_row→porta_address_reg 组合链 -4.181）
 
     //-----------------------------------------------------------------------
     // 状态机
@@ -917,8 +918,9 @@ module cnn_core_v2 #(
                     for (m = 0; m < 8; m = m + 1)
                         w_q[lane][m] <= wbuf[lane][m][mac_t];
             end
+            acc_raddr_r <= acc_raddr_clr[15:0];   // requant 读地址打拍（每拍采样，rq_row 推进后首拍锁存新值）
             if (state == S_REQ_ADDR || state == S_REQ_MUL || state == S_REQ_MUL2)
-                acc_q <= acc[acc_raddr_clr];
+                acc_q <= acc[acc_raddr_r];
             else
                 acc_q <= acc[acc_addr_mac_r];
         end
