@@ -218,9 +218,18 @@ module cnn_core_v2 #(
         .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
         .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
         .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0")
+        .outdata_reg_b("CLOCK0"),
+        .address_aclr_a("NONE"),
+        .address_aclr_b("NONE"),
+        .outdata_aclr_b("NONE"),
+        .clock_enable_input_a("BYPASS"),
+        .clock_enable_input_b("BYPASS"),
+        .clock_enable_output_b("BYPASS"),
+        .power_up_uninitialized("FALSE"),
+        .intended_device_family("Cyclone V")
     ) u_rq_bias_0 (
         .clock0(clk),
+        .clock1(clk),
         .address_a(cfg_addr[9:0]),
         .wren_a(cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C),
         .data_a(cfg_wdata),
@@ -232,9 +241,18 @@ module cnn_core_v2 #(
         .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
         .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
         .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0")
+        .outdata_reg_b("CLOCK0"),
+        .address_aclr_a("NONE"),
+        .address_aclr_b("NONE"),
+        .outdata_aclr_b("NONE"),
+        .clock_enable_input_a("BYPASS"),
+        .clock_enable_input_b("BYPASS"),
+        .clock_enable_output_b("BYPASS"),
+        .power_up_uninitialized("FALSE"),
+        .intended_device_family("Cyclone V")
     ) u_rq_mult_0 (
         .clock0(clk),
+        .clock1(clk),
         .address_a(cfg_addr[9:0]),
         .wren_a(cfg_we && cfg_sel == 3'd2 && cfg_addr < G_MAX_C),
         .data_a(cfg_wdata),
@@ -246,9 +264,18 @@ module cnn_core_v2 #(
         .width_a(8), .widthad_a(10), .numwords_a(G_MAX_C),
         .width_b(8), .widthad_b(10), .numwords_b(G_MAX_C),
         .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0")
+        .outdata_reg_b("CLOCK0"),
+        .address_aclr_a("NONE"),
+        .address_aclr_b("NONE"),
+        .outdata_aclr_b("NONE"),
+        .clock_enable_input_a("BYPASS"),
+        .clock_enable_input_b("BYPASS"),
+        .clock_enable_output_b("BYPASS"),
+        .power_up_uninitialized("FALSE"),
+        .intended_device_family("Cyclone V")
     ) u_rq_shift_0 (
         .clock0(clk),
+        .clock1(clk),
         .address_a(cfg_addr[9:0]),
         .wren_a(cfg_we && cfg_sel == 3'd3 && cfg_addr < G_MAX_C),
         .data_a(cfg_wdata[7:0]),
@@ -260,9 +287,18 @@ module cnn_core_v2 #(
         .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
         .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
         .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0")
+        .outdata_reg_b("CLOCK0"),
+        .address_aclr_a("NONE"),
+        .address_aclr_b("NONE"),
+        .outdata_aclr_b("NONE"),
+        .clock_enable_input_a("BYPASS"),
+        .clock_enable_input_b("BYPASS"),
+        .clock_enable_output_b("BYPASS"),
+        .power_up_uninitialized("FALSE"),
+        .intended_device_family("Cyclone V")
     ) u_rq_rcl6_0 (
         .clock0(clk),
+        .clock1(clk),
         .address_a(cfg_addr[9:0]),
         .wren_a(cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C),
         .data_a(cfg_wdata),
@@ -319,9 +355,18 @@ module cnn_core_v2 #(
         .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
         .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
         .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0")
+        .outdata_reg_b("CLOCK0"),
+        .address_aclr_a("NONE"),
+        .address_aclr_b("NONE"),
+        .outdata_aclr_b("NONE"),
+        .clock_enable_input_a("BYPASS"),
+        .clock_enable_input_b("BYPASS"),
+        .clock_enable_output_b("BYPASS"),
+        .power_up_uninitialized("FALSE"),
+        .intended_device_family("Cyclone V")
     ) u_rq_bias_1 (
         .clock0(clk),
+        .clock1(clk),
         .address_a(cfg_addr[9:0]),
         .wren_a(cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C),
         .data_a(cfg_wdata),
@@ -333,9 +378,18 @@ module cnn_core_v2 #(
         .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
         .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
         .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0")
+        .outdata_reg_b("CLOCK0"),
+        .address_aclr_a("NONE"),
+        .address_aclr_b("NONE"),
+        .outdata_aclr_b("NONE"),
+        .clock_enable_input_a("BYPASS"),
+        .clock_enable_input_b("BYPASS"),
+        .clock_enable_output_b("BYPASS"),
+        .power_up_uninitialized("FALSE"),
+        .intended_device_family("Cyclone V")
     ) u_rq_mult_1 (
         .clock0(clk),
+        .clock1(clk),
         .address_a(cfg_addr[9:0]),
         .wren_a(cfg_we && cfg_sel == 3'd2 && cfg_addr < G_MAX_C),
         .data_a(cfg_wdata),
@@ -347,9 +401,18 @@ module cnn_core_v2 #(
         .width_a(8), .widthad_a(10), .numwords_a(G_MAX_C),
         .width_b(8), .widthad_b(10), .numwords_b(G_MAX_C),
         .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0")
+        .outdata_reg_b("CLOCK0"),
+        .address_aclr_a("NONE"),
+        .address_aclr_b("NONE"),
+        .outdata_aclr_b("NONE"),
+        .clock_enable_input_a("BYPASS"),
+        .clock_enable_input_b("BYPASS"),
+        .clock_enable_output_b("BYPASS"),
+        .power_up_uninitialized("FALSE"),
+        .intended_device_family("Cyclone V")
     ) u_rq_shift_1 (
         .clock0(clk),
+        .clock1(clk),
         .address_a(cfg_addr[9:0]),
         .wren_a(cfg_we && cfg_sel == 3'd3 && cfg_addr < G_MAX_C),
         .data_a(cfg_wdata[7:0]),
@@ -361,9 +424,18 @@ module cnn_core_v2 #(
         .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
         .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
         .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0")
+        .outdata_reg_b("CLOCK0"),
+        .address_aclr_a("NONE"),
+        .address_aclr_b("NONE"),
+        .outdata_aclr_b("NONE"),
+        .clock_enable_input_a("BYPASS"),
+        .clock_enable_input_b("BYPASS"),
+        .clock_enable_output_b("BYPASS"),
+        .power_up_uninitialized("FALSE"),
+        .intended_device_family("Cyclone V")
     ) u_rq_rcl6_1 (
         .clock0(clk),
+        .clock1(clk),
         .address_a(cfg_addr[9:0]),
         .wren_a(cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C),
         .data_a(cfg_wdata),
@@ -420,9 +492,18 @@ module cnn_core_v2 #(
         .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
         .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
         .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0")
+        .outdata_reg_b("CLOCK0"),
+        .address_aclr_a("NONE"),
+        .address_aclr_b("NONE"),
+        .outdata_aclr_b("NONE"),
+        .clock_enable_input_a("BYPASS"),
+        .clock_enable_input_b("BYPASS"),
+        .clock_enable_output_b("BYPASS"),
+        .power_up_uninitialized("FALSE"),
+        .intended_device_family("Cyclone V")
     ) u_rq_bias_2 (
         .clock0(clk),
+        .clock1(clk),
         .address_a(cfg_addr[9:0]),
         .wren_a(cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C),
         .data_a(cfg_wdata),
@@ -434,9 +515,18 @@ module cnn_core_v2 #(
         .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
         .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
         .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0")
+        .outdata_reg_b("CLOCK0"),
+        .address_aclr_a("NONE"),
+        .address_aclr_b("NONE"),
+        .outdata_aclr_b("NONE"),
+        .clock_enable_input_a("BYPASS"),
+        .clock_enable_input_b("BYPASS"),
+        .clock_enable_output_b("BYPASS"),
+        .power_up_uninitialized("FALSE"),
+        .intended_device_family("Cyclone V")
     ) u_rq_mult_2 (
         .clock0(clk),
+        .clock1(clk),
         .address_a(cfg_addr[9:0]),
         .wren_a(cfg_we && cfg_sel == 3'd2 && cfg_addr < G_MAX_C),
         .data_a(cfg_wdata),
@@ -448,9 +538,18 @@ module cnn_core_v2 #(
         .width_a(8), .widthad_a(10), .numwords_a(G_MAX_C),
         .width_b(8), .widthad_b(10), .numwords_b(G_MAX_C),
         .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0")
+        .outdata_reg_b("CLOCK0"),
+        .address_aclr_a("NONE"),
+        .address_aclr_b("NONE"),
+        .outdata_aclr_b("NONE"),
+        .clock_enable_input_a("BYPASS"),
+        .clock_enable_input_b("BYPASS"),
+        .clock_enable_output_b("BYPASS"),
+        .power_up_uninitialized("FALSE"),
+        .intended_device_family("Cyclone V")
     ) u_rq_shift_2 (
         .clock0(clk),
+        .clock1(clk),
         .address_a(cfg_addr[9:0]),
         .wren_a(cfg_we && cfg_sel == 3'd3 && cfg_addr < G_MAX_C),
         .data_a(cfg_wdata[7:0]),
@@ -462,9 +561,18 @@ module cnn_core_v2 #(
         .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
         .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
         .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0")
+        .outdata_reg_b("CLOCK0"),
+        .address_aclr_a("NONE"),
+        .address_aclr_b("NONE"),
+        .outdata_aclr_b("NONE"),
+        .clock_enable_input_a("BYPASS"),
+        .clock_enable_input_b("BYPASS"),
+        .clock_enable_output_b("BYPASS"),
+        .power_up_uninitialized("FALSE"),
+        .intended_device_family("Cyclone V")
     ) u_rq_rcl6_2 (
         .clock0(clk),
+        .clock1(clk),
         .address_a(cfg_addr[9:0]),
         .wren_a(cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C),
         .data_a(cfg_wdata),
@@ -521,9 +629,18 @@ module cnn_core_v2 #(
         .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
         .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
         .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0")
+        .outdata_reg_b("CLOCK0"),
+        .address_aclr_a("NONE"),
+        .address_aclr_b("NONE"),
+        .outdata_aclr_b("NONE"),
+        .clock_enable_input_a("BYPASS"),
+        .clock_enable_input_b("BYPASS"),
+        .clock_enable_output_b("BYPASS"),
+        .power_up_uninitialized("FALSE"),
+        .intended_device_family("Cyclone V")
     ) u_rq_bias_3 (
         .clock0(clk),
+        .clock1(clk),
         .address_a(cfg_addr[9:0]),
         .wren_a(cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C),
         .data_a(cfg_wdata),
@@ -535,9 +652,18 @@ module cnn_core_v2 #(
         .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
         .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
         .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0")
+        .outdata_reg_b("CLOCK0"),
+        .address_aclr_a("NONE"),
+        .address_aclr_b("NONE"),
+        .outdata_aclr_b("NONE"),
+        .clock_enable_input_a("BYPASS"),
+        .clock_enable_input_b("BYPASS"),
+        .clock_enable_output_b("BYPASS"),
+        .power_up_uninitialized("FALSE"),
+        .intended_device_family("Cyclone V")
     ) u_rq_mult_3 (
         .clock0(clk),
+        .clock1(clk),
         .address_a(cfg_addr[9:0]),
         .wren_a(cfg_we && cfg_sel == 3'd2 && cfg_addr < G_MAX_C),
         .data_a(cfg_wdata),
@@ -549,9 +675,18 @@ module cnn_core_v2 #(
         .width_a(8), .widthad_a(10), .numwords_a(G_MAX_C),
         .width_b(8), .widthad_b(10), .numwords_b(G_MAX_C),
         .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0")
+        .outdata_reg_b("CLOCK0"),
+        .address_aclr_a("NONE"),
+        .address_aclr_b("NONE"),
+        .outdata_aclr_b("NONE"),
+        .clock_enable_input_a("BYPASS"),
+        .clock_enable_input_b("BYPASS"),
+        .clock_enable_output_b("BYPASS"),
+        .power_up_uninitialized("FALSE"),
+        .intended_device_family("Cyclone V")
     ) u_rq_shift_3 (
         .clock0(clk),
+        .clock1(clk),
         .address_a(cfg_addr[9:0]),
         .wren_a(cfg_we && cfg_sel == 3'd3 && cfg_addr < G_MAX_C),
         .data_a(cfg_wdata[7:0]),
@@ -563,9 +698,18 @@ module cnn_core_v2 #(
         .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
         .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
         .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0")
+        .outdata_reg_b("CLOCK0"),
+        .address_aclr_a("NONE"),
+        .address_aclr_b("NONE"),
+        .outdata_aclr_b("NONE"),
+        .clock_enable_input_a("BYPASS"),
+        .clock_enable_input_b("BYPASS"),
+        .clock_enable_output_b("BYPASS"),
+        .power_up_uninitialized("FALSE"),
+        .intended_device_family("Cyclone V")
     ) u_rq_rcl6_3 (
         .clock0(clk),
+        .clock1(clk),
         .address_a(cfg_addr[9:0]),
         .wren_a(cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C),
         .data_a(cfg_wdata),
@@ -622,9 +766,18 @@ module cnn_core_v2 #(
         .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
         .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
         .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0")
+        .outdata_reg_b("CLOCK0"),
+        .address_aclr_a("NONE"),
+        .address_aclr_b("NONE"),
+        .outdata_aclr_b("NONE"),
+        .clock_enable_input_a("BYPASS"),
+        .clock_enable_input_b("BYPASS"),
+        .clock_enable_output_b("BYPASS"),
+        .power_up_uninitialized("FALSE"),
+        .intended_device_family("Cyclone V")
     ) u_rq_bias_4 (
         .clock0(clk),
+        .clock1(clk),
         .address_a(cfg_addr[9:0]),
         .wren_a(cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C),
         .data_a(cfg_wdata),
@@ -636,9 +789,18 @@ module cnn_core_v2 #(
         .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
         .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
         .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0")
+        .outdata_reg_b("CLOCK0"),
+        .address_aclr_a("NONE"),
+        .address_aclr_b("NONE"),
+        .outdata_aclr_b("NONE"),
+        .clock_enable_input_a("BYPASS"),
+        .clock_enable_input_b("BYPASS"),
+        .clock_enable_output_b("BYPASS"),
+        .power_up_uninitialized("FALSE"),
+        .intended_device_family("Cyclone V")
     ) u_rq_mult_4 (
         .clock0(clk),
+        .clock1(clk),
         .address_a(cfg_addr[9:0]),
         .wren_a(cfg_we && cfg_sel == 3'd2 && cfg_addr < G_MAX_C),
         .data_a(cfg_wdata),
@@ -650,9 +812,18 @@ module cnn_core_v2 #(
         .width_a(8), .widthad_a(10), .numwords_a(G_MAX_C),
         .width_b(8), .widthad_b(10), .numwords_b(G_MAX_C),
         .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0")
+        .outdata_reg_b("CLOCK0"),
+        .address_aclr_a("NONE"),
+        .address_aclr_b("NONE"),
+        .outdata_aclr_b("NONE"),
+        .clock_enable_input_a("BYPASS"),
+        .clock_enable_input_b("BYPASS"),
+        .clock_enable_output_b("BYPASS"),
+        .power_up_uninitialized("FALSE"),
+        .intended_device_family("Cyclone V")
     ) u_rq_shift_4 (
         .clock0(clk),
+        .clock1(clk),
         .address_a(cfg_addr[9:0]),
         .wren_a(cfg_we && cfg_sel == 3'd3 && cfg_addr < G_MAX_C),
         .data_a(cfg_wdata[7:0]),
@@ -664,9 +835,18 @@ module cnn_core_v2 #(
         .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
         .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
         .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0")
+        .outdata_reg_b("CLOCK0"),
+        .address_aclr_a("NONE"),
+        .address_aclr_b("NONE"),
+        .outdata_aclr_b("NONE"),
+        .clock_enable_input_a("BYPASS"),
+        .clock_enable_input_b("BYPASS"),
+        .clock_enable_output_b("BYPASS"),
+        .power_up_uninitialized("FALSE"),
+        .intended_device_family("Cyclone V")
     ) u_rq_rcl6_4 (
         .clock0(clk),
+        .clock1(clk),
         .address_a(cfg_addr[9:0]),
         .wren_a(cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C),
         .data_a(cfg_wdata),
@@ -723,9 +903,18 @@ module cnn_core_v2 #(
         .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
         .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
         .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0")
+        .outdata_reg_b("CLOCK0"),
+        .address_aclr_a("NONE"),
+        .address_aclr_b("NONE"),
+        .outdata_aclr_b("NONE"),
+        .clock_enable_input_a("BYPASS"),
+        .clock_enable_input_b("BYPASS"),
+        .clock_enable_output_b("BYPASS"),
+        .power_up_uninitialized("FALSE"),
+        .intended_device_family("Cyclone V")
     ) u_rq_bias_5 (
         .clock0(clk),
+        .clock1(clk),
         .address_a(cfg_addr[9:0]),
         .wren_a(cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C),
         .data_a(cfg_wdata),
@@ -737,9 +926,18 @@ module cnn_core_v2 #(
         .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
         .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
         .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0")
+        .outdata_reg_b("CLOCK0"),
+        .address_aclr_a("NONE"),
+        .address_aclr_b("NONE"),
+        .outdata_aclr_b("NONE"),
+        .clock_enable_input_a("BYPASS"),
+        .clock_enable_input_b("BYPASS"),
+        .clock_enable_output_b("BYPASS"),
+        .power_up_uninitialized("FALSE"),
+        .intended_device_family("Cyclone V")
     ) u_rq_mult_5 (
         .clock0(clk),
+        .clock1(clk),
         .address_a(cfg_addr[9:0]),
         .wren_a(cfg_we && cfg_sel == 3'd2 && cfg_addr < G_MAX_C),
         .data_a(cfg_wdata),
@@ -751,9 +949,18 @@ module cnn_core_v2 #(
         .width_a(8), .widthad_a(10), .numwords_a(G_MAX_C),
         .width_b(8), .widthad_b(10), .numwords_b(G_MAX_C),
         .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0")
+        .outdata_reg_b("CLOCK0"),
+        .address_aclr_a("NONE"),
+        .address_aclr_b("NONE"),
+        .outdata_aclr_b("NONE"),
+        .clock_enable_input_a("BYPASS"),
+        .clock_enable_input_b("BYPASS"),
+        .clock_enable_output_b("BYPASS"),
+        .power_up_uninitialized("FALSE"),
+        .intended_device_family("Cyclone V")
     ) u_rq_shift_5 (
         .clock0(clk),
+        .clock1(clk),
         .address_a(cfg_addr[9:0]),
         .wren_a(cfg_we && cfg_sel == 3'd3 && cfg_addr < G_MAX_C),
         .data_a(cfg_wdata[7:0]),
@@ -765,9 +972,18 @@ module cnn_core_v2 #(
         .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
         .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
         .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0")
+        .outdata_reg_b("CLOCK0"),
+        .address_aclr_a("NONE"),
+        .address_aclr_b("NONE"),
+        .outdata_aclr_b("NONE"),
+        .clock_enable_input_a("BYPASS"),
+        .clock_enable_input_b("BYPASS"),
+        .clock_enable_output_b("BYPASS"),
+        .power_up_uninitialized("FALSE"),
+        .intended_device_family("Cyclone V")
     ) u_rq_rcl6_5 (
         .clock0(clk),
+        .clock1(clk),
         .address_a(cfg_addr[9:0]),
         .wren_a(cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C),
         .data_a(cfg_wdata),
@@ -824,9 +1040,18 @@ module cnn_core_v2 #(
         .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
         .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
         .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0")
+        .outdata_reg_b("CLOCK0"),
+        .address_aclr_a("NONE"),
+        .address_aclr_b("NONE"),
+        .outdata_aclr_b("NONE"),
+        .clock_enable_input_a("BYPASS"),
+        .clock_enable_input_b("BYPASS"),
+        .clock_enable_output_b("BYPASS"),
+        .power_up_uninitialized("FALSE"),
+        .intended_device_family("Cyclone V")
     ) u_rq_bias_6 (
         .clock0(clk),
+        .clock1(clk),
         .address_a(cfg_addr[9:0]),
         .wren_a(cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C),
         .data_a(cfg_wdata),
@@ -838,9 +1063,18 @@ module cnn_core_v2 #(
         .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
         .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
         .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0")
+        .outdata_reg_b("CLOCK0"),
+        .address_aclr_a("NONE"),
+        .address_aclr_b("NONE"),
+        .outdata_aclr_b("NONE"),
+        .clock_enable_input_a("BYPASS"),
+        .clock_enable_input_b("BYPASS"),
+        .clock_enable_output_b("BYPASS"),
+        .power_up_uninitialized("FALSE"),
+        .intended_device_family("Cyclone V")
     ) u_rq_mult_6 (
         .clock0(clk),
+        .clock1(clk),
         .address_a(cfg_addr[9:0]),
         .wren_a(cfg_we && cfg_sel == 3'd2 && cfg_addr < G_MAX_C),
         .data_a(cfg_wdata),
@@ -852,9 +1086,18 @@ module cnn_core_v2 #(
         .width_a(8), .widthad_a(10), .numwords_a(G_MAX_C),
         .width_b(8), .widthad_b(10), .numwords_b(G_MAX_C),
         .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0")
+        .outdata_reg_b("CLOCK0"),
+        .address_aclr_a("NONE"),
+        .address_aclr_b("NONE"),
+        .outdata_aclr_b("NONE"),
+        .clock_enable_input_a("BYPASS"),
+        .clock_enable_input_b("BYPASS"),
+        .clock_enable_output_b("BYPASS"),
+        .power_up_uninitialized("FALSE"),
+        .intended_device_family("Cyclone V")
     ) u_rq_shift_6 (
         .clock0(clk),
+        .clock1(clk),
         .address_a(cfg_addr[9:0]),
         .wren_a(cfg_we && cfg_sel == 3'd3 && cfg_addr < G_MAX_C),
         .data_a(cfg_wdata[7:0]),
@@ -866,9 +1109,18 @@ module cnn_core_v2 #(
         .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
         .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
         .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0")
+        .outdata_reg_b("CLOCK0"),
+        .address_aclr_a("NONE"),
+        .address_aclr_b("NONE"),
+        .outdata_aclr_b("NONE"),
+        .clock_enable_input_a("BYPASS"),
+        .clock_enable_input_b("BYPASS"),
+        .clock_enable_output_b("BYPASS"),
+        .power_up_uninitialized("FALSE"),
+        .intended_device_family("Cyclone V")
     ) u_rq_rcl6_6 (
         .clock0(clk),
+        .clock1(clk),
         .address_a(cfg_addr[9:0]),
         .wren_a(cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C),
         .data_a(cfg_wdata),
@@ -925,9 +1177,18 @@ module cnn_core_v2 #(
         .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
         .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
         .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0")
+        .outdata_reg_b("CLOCK0"),
+        .address_aclr_a("NONE"),
+        .address_aclr_b("NONE"),
+        .outdata_aclr_b("NONE"),
+        .clock_enable_input_a("BYPASS"),
+        .clock_enable_input_b("BYPASS"),
+        .clock_enable_output_b("BYPASS"),
+        .power_up_uninitialized("FALSE"),
+        .intended_device_family("Cyclone V")
     ) u_rq_bias_7 (
         .clock0(clk),
+        .clock1(clk),
         .address_a(cfg_addr[9:0]),
         .wren_a(cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C),
         .data_a(cfg_wdata),
@@ -939,9 +1200,18 @@ module cnn_core_v2 #(
         .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
         .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
         .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0")
+        .outdata_reg_b("CLOCK0"),
+        .address_aclr_a("NONE"),
+        .address_aclr_b("NONE"),
+        .outdata_aclr_b("NONE"),
+        .clock_enable_input_a("BYPASS"),
+        .clock_enable_input_b("BYPASS"),
+        .clock_enable_output_b("BYPASS"),
+        .power_up_uninitialized("FALSE"),
+        .intended_device_family("Cyclone V")
     ) u_rq_mult_7 (
         .clock0(clk),
+        .clock1(clk),
         .address_a(cfg_addr[9:0]),
         .wren_a(cfg_we && cfg_sel == 3'd2 && cfg_addr < G_MAX_C),
         .data_a(cfg_wdata),
@@ -953,9 +1223,18 @@ module cnn_core_v2 #(
         .width_a(8), .widthad_a(10), .numwords_a(G_MAX_C),
         .width_b(8), .widthad_b(10), .numwords_b(G_MAX_C),
         .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0")
+        .outdata_reg_b("CLOCK0"),
+        .address_aclr_a("NONE"),
+        .address_aclr_b("NONE"),
+        .outdata_aclr_b("NONE"),
+        .clock_enable_input_a("BYPASS"),
+        .clock_enable_input_b("BYPASS"),
+        .clock_enable_output_b("BYPASS"),
+        .power_up_uninitialized("FALSE"),
+        .intended_device_family("Cyclone V")
     ) u_rq_shift_7 (
         .clock0(clk),
+        .clock1(clk),
         .address_a(cfg_addr[9:0]),
         .wren_a(cfg_we && cfg_sel == 3'd3 && cfg_addr < G_MAX_C),
         .data_a(cfg_wdata[7:0]),
@@ -967,9 +1246,18 @@ module cnn_core_v2 #(
         .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
         .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
         .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0")
+        .outdata_reg_b("CLOCK0"),
+        .address_aclr_a("NONE"),
+        .address_aclr_b("NONE"),
+        .outdata_aclr_b("NONE"),
+        .clock_enable_input_a("BYPASS"),
+        .clock_enable_input_b("BYPASS"),
+        .clock_enable_output_b("BYPASS"),
+        .power_up_uninitialized("FALSE"),
+        .intended_device_family("Cyclone V")
     ) u_rq_rcl6_7 (
         .clock0(clk),
+        .clock1(clk),
         .address_a(cfg_addr[9:0]),
         .wren_a(cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C),
         .data_a(cfg_wdata),
@@ -981,6 +1269,7 @@ module cnn_core_v2 #(
     assign rq_mult_q[7]  = q_mult_7;
     assign rq_shift_q[7] = q_shift_7;
     assign rq_rcl6_q[7]  = q_rcl6_7;
+
 
 
     //-----------------------------------------------------------------------
