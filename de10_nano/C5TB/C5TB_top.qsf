@@ -559,7 +559,7 @@ set_location_assignment PIN_AF5 -to SEG[2]
 set_location_assignment PIN_AG6 -to SEG[1]
 set_location_assignment PIN_AF7 -to SEG[0]
 set_global_assignment -name FITTER_EFFORT "AUTO FIT"
-set_global_assignment -name SEED 5
+set_global_assignment -name SEED 7
 set_global_assignment -name SDC_FILE C5TB_top.sdc
 set_global_assignment -name SIGNALTAP_FILE stp1.stp
 set_global_assignment -name QIP_FILE soc_system/synthesis/soc_system.qip
