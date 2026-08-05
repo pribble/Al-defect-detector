@@ -143,6 +143,15 @@ int ConvConverter(void *ctx, OpLite *op, KernelBase *kernel) {
             device_param->scale[o_dims[1] + i] = rnd(b / (ws * is_));
             device_param->scale[2 * o_dims[1] + i] = 30;
             device_param->scale[3 * o_dims[1] + i] = rnd(6.0 * os_ / (ws * is_));
+            // 上板调试：打印 scale 计算过程（前 4 通道），确认第一层下溢/溢出
+            if (i < 4)
+                fprintf(stderr,
+                        "[SCALE] %s ch%d: is=%.6e os=%.6e ws=%.6e b=%.6e f=%.6e "
+                        "mult=%d bias_int=%d rcl6=%d\n",
+                        output_name.c_str(), i, is_, os_, ws, b, f,
+                        device_param->scale[i],
+                        device_param->scale[o_dims[1] + i],
+                        device_param->scale[3 * o_dims[1] + i]);
         }
     }
 
