@@ -220,7 +220,8 @@ module cnn_top_core (
 
     reg [15:0] p_in_c, p_in_h, p_in_w, p_out_c, p_out_h, p_out_w;   // ≤302
     reg [31:0] p_input_offset, p_weight_offset, p_output_offset;   // param[0/1/3]，字偏移（×8 = 字节）
-    reg [7:0]  p_k, p_pad, p_stride, p_act, p_type;
+    reg [1:0]  p_k;   // 窄化（k ∈ {1,3}，比较/选择变短，拆 p_k→w_rb_beats_r 乘法链）
+    reg [7:0]  p_pad, p_stride, p_act, p_type;
     reg [7:0]  p_out_row_tile, p_in_row_tile, p_in_cb, p_out_cb, p_row_block;   // ≤19/4
 
     //-----------------------------------------------------------------------
@@ -239,8 +240,9 @@ module cnn_top_core (
     reg [31:0] out_cb_stride_r;         // p_out_h*p_out_w*8（输出每 cb 块字节偏移）
     reg [31:0] out_rb_stride_r;         // p_out_row_tile*p_out_w*8（输出每行块字节偏移）
     reg signed [31:0] rb_tile_stride_r; // p_out_row_tile * p_stride（rb_base 增量）
-    reg [31:0] w_cb_r;                  // p_out_cb * (type==4 ? 1 : p_in_cb)
-    reg [31:0] w_rb_beats_r;            // w_cb_r * 72（每行块权重拍数）
+    reg [15:0] w_cb_r;                  // p_out_cb * (type==4 ? 1 : p_in_cb)（窄化：实际 ≤1024，乘法树变短）
+    reg [23:0] w_rb_beats_r;            // w_cb_r * 72（每行块权重拍数，窄化：≤4.7M）
+    reg [7:0]  wr_slice_q;              // S_PREP_L 拍 1 寄存 (p_k==1 ? 8 : 72)（拆 p_k 比较与乘法链）
     reg [7:0]  lr_last_cb_r;            // lr 轮末 cb：CONV = p_in_cb-1，DW = 0（单 cb）
     reg [31:0] in_row_w8_r;             // p_in_w * 8
     reg signed [15:0] r0_in_r;          // max(rb_base_r, 0)，≤in_h
@@ -458,6 +460,7 @@ module cnn_top_core (
             start_clear_pending <= 0;
             dma_icb <= 0; dma_ibeat <= 0; dma_wbeat <= 0;
             dma_ocb <= 0; dma_obeat <= 0;
+            wr_slice_q <= 8'd0;
         end else begin
             case (state)
                 S_IDLE: begin
@@ -576,12 +579,14 @@ module cnn_top_core (
                         w_cb_r   <= p_out_cb * (p_type == 4 ? 1 : p_in_cb);
                         in_row_w8_r <= p_in_w << 3;
                         lr_last_cb_r <= (p_type == 4) ? 8'd0 : (p_in_cb - 1);
+                        // p_k 比较/选择提前一拍（拆 p_k→w_rb_beats_r 的 32-bit 乘法链）
+                        wr_slice_q <= (p_k == 2'd1) ? 8'd8 : 8'd72;
                     end else begin
                         rd_cnt <= 0;
                         in_cb_stride_r  <= in_hw_r << 3;
                         out_cb_stride_r <= out_hw_r << 3;
                         out_rb_stride_r <= (p_out_row_tile * p_out_w) << 3;
-                        w_rb_beats_r    <= w_cb_r * (p_k == 1 ? 8 : 72);   // k=1：slice=8 拍；k=3：72 拍
+                        w_rb_beats_r    <= w_cb_r * wr_slice_q;   // 16×8 乘法（原 32-bit×mux 链）
                         state <= S_RD_SCALE;
                     end
                 end
