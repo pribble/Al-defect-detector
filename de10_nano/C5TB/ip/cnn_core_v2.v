@@ -1370,7 +1370,8 @@ module cnn_core_v2 #(
     localparam S_REQ_ADDR = 4'd6;   // requant 请求拍（采样 acc_q）
     localparam S_REQ_MUL  = 4'd7;   // requant 乘加拍级 1（acc_q+bias，寄存 v_biased_l）
     localparam S_REQ_MULB = 5'd19;  // requant 乘加拍级 2（bias 加法 → v_biased_l）
-    localparam S_REQ_MULC = 5'd20;  // requant 乘加拍级 3（relu/rcl6 比较 → v_act_l）
+    localparam S_REQ_MULC = 5'd20;  // requant 乘加拍级 3（relu/rcl6 比较 → v_rcl6_cmp_q）
+    localparam S_REQ_MULC2 = 5'd22; // requant 乘加拍级 3b（relu/rcl6 mux → v_act_l，拆比较+mux 链）
     localparam S_REQ_MUL2 = 4'd8;   // requant 乘法拍级 1（4×16×16 DSP 部分积，寄存 v_p_*/v_shift_l）
     localparam S_REQ_MUL3 = 4'd15;  // requant 乘法拍级 2（两组中间和 → v_sum_lo/v_sum_hi）
     localparam S_REQ_MUL4 = 5'd16;  // requant 乘法拍级 3（中间和相加 → v_rq64_l，每级仅 1 个 64-bit 加法）
@@ -1500,10 +1501,11 @@ module cnn_core_v2 #(
                     end else if (rq_col == out_w_reg - 1) begin
                         rq_col <= 0;
                         rq_row <= rq_row + 1;
-                        acc_clr_wa <= (rq_row + 1) * G_MAX_OW;
+                        // 递推推进后地址（替代 rq_row*G_MAX_OW 乘加树，-2.596 路径）
+                        acc_clr_wa <= acc_clr_wa + G_MAX_OW - out_w_reg + 1;
                     end else begin
                         rq_col <= rq_col + 1;
-                        acc_clr_wa <= rq_row * G_MAX_OW + rq_col + 1;
+                        acc_clr_wa <= acc_clr_wa + 1;
                     end
                 end
 
@@ -1619,6 +1621,7 @@ module cnn_core_v2 #(
                                 mac_row <= 0;
                                 if (type_reg == 4 || i_group == in_cb_reg - 1) begin
                                     rq_row <= 0; rq_col <= 0;
+                                    acc_clr_wa <= 16'd0;   // requant 从 (0,0) 起，清零地址同步归零
                                     state <= S_REQ_ADDR;
                                 end else begin
                                     i_group <= i_group + 1;
@@ -1661,6 +1664,9 @@ module cnn_core_v2 #(
                     state <= S_REQ_MULC;
                 end
                 S_REQ_MULC: begin
+                    state <= S_REQ_MULC2;
+                end
+                S_REQ_MULC2: begin
                     state <= S_REQ_MUL2;
                 end
 
@@ -1705,19 +1711,24 @@ module cnn_core_v2 #(
                                 // o_valid 由下一状态（S_ACC_CLR/S_DONE）拉低，
                                 // 保证最后一事件 o_data 已被输出握手收走
                                 if (o_group == out_cb_reg - 1) begin
+                                    acc_clr_wa <= 16'd0;
                                     state <= S_DONE;
                                 end else begin
                                     o_group <= o_group + 1;
                                     rq_row <= 0; rq_col <= 0;
+                                    acc_clr_wa <= 16'd0;
                                     load_first <= 1'b1;
                                     state <= S_LOAD;   // 流式：重装新 o_group 的输入 cb
                                 end
                             end else begin
                                 rq_row <= rq_row + 1;
+                                // 递推清零地址（跟随 rq，替代乘加树）
+                                acc_clr_wa <= acc_clr_wa + G_MAX_OW - out_w_reg + 1;
                                 state <= S_REQ_ADDR;
                             end
                         end else begin
                             rq_col <= rq_col + 1;
+                            acc_clr_wa <= acc_clr_wa + 1;
                             state <= S_REQ_ADDR;
                         end
                     end
@@ -1835,6 +1846,7 @@ module cnn_core_v2 #(
     reg signed [63:0] v_rq64;
     reg signed [31:0] v_act_l [0:7];   // 每 lane 的 act 后值（流水级 2）
     reg signed [31:0] v_biased_l [0:7]; // 每 lane 的 bias 后值（流水级 1，拆加法/比较链）
+    reg        v_rcl6_cmp_q [0:7];  // 每 lane 的 v_biased > v_rcl6 比较结果（S_REQ_MULC 拍寄存，拆比较+mux 链）
     reg signed [31:0] v_rcl6_l [0:7];   // 每 lane 的 rcl6 上限（S_REQ_MUL 拍寄存 RAM 读，断组合读链）
     // 乘法拆三级（150MHz 单级 32×33 组合乘法 slack -10.1ns；64-bit 加法树 2 级仍紧）：
     //   级 1 = 4 个 16×16 DSP 乘法（v_act_l = a_hi<<16 + a_lo，rq_mult_q = m_hi<<16 + m_lo）
@@ -1901,9 +1913,22 @@ module cnn_core_v2 #(
         end
     end
 
-    // 乘加拍级 3（S_REQ_MULC）：relu/rcl6 比较 → v_act_l（比较+mux 单独一拍，~3ns）
+    // 乘加拍级 3（S_REQ_MULC）：relu/rcl6 的 32-bit 比较单独一拍（拆比较+mux 链，-2.54 路径）
     always @(posedge clk) begin
         if (state == S_REQ_MULC) begin
+            for (ln = 0; ln < 8; ln = ln + 1) begin
+                v_out_ch = o_group * 8 + ln;
+                // 与原语义一致：仅正值才可能被 rcl6 截断（relu 后 0 恒 ≤ rcl6）
+                v_rcl6_cmp_q[ln] <= (v_out_ch < out_c_reg) &&
+                                    !v_biased_l[ln][31] &&
+                                    (v_biased_l[ln] > v_rcl6_l[ln]);
+            end
+        end
+    end
+
+    // 乘加拍级 3b（S_REQ_MULC2）：relu/rcl6 mux → v_act_l（mux 单独一拍）
+    always @(posedge clk) begin
+        if (state == S_REQ_MULC2) begin
             for (ln = 0; ln < 8; ln = ln + 1) begin
                 v_out_ch = o_group * 8 + ln;
                 if (v_out_ch >= out_c_reg)
@@ -1914,7 +1939,7 @@ module cnn_core_v2 #(
                         v_act = v_biased_l[ln][31] ? 32'sd0 : v_biased_l[ln];
                     end else if (act_reg == 2'd2) begin
                         v_act = v_biased_l[ln][31] ? 32'sd0 : v_biased_l[ln];
-                        if (v_act > v_rcl6_l[ln]) v_act = v_rcl6_l[ln];
+                        if (v_rcl6_cmp_q[ln]) v_act = v_rcl6_l[ln];
                     end
                     v_act_l[ln] <= v_act;
                 end
