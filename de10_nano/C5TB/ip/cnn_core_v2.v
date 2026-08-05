@@ -585,6 +585,8 @@ module cnn_core_v2 #(
             rq_row <= 0; rq_col <= 0;
             mac_c_valid_r <= 1'b0;
             acc_local <= 256'sd0;   // 复位归并到主状态机（单一驱动，避免 Quartus 10028）
+            acc_wr_q <= 256'sd0;
+            acc_wr_we_q <= 1'b0;
             // 地址寄存器复位同样归并到主状态机（S_MAC_ADDR 分支在同一块）：
             // lb_q/acc_q 每拍无条件采样，无复位时 x 地址越界读会污染 acc_q
             lb_addr_r <= 16'd0;
@@ -770,7 +772,8 @@ module cnn_core_v2 #(
                             acc_wr_next[32*lane +: 32] = (k_reg == 1) ?
                                 (acc_q[32*lane +: 32] + v_sum_r[lane]) :
                                 (acc_local[32*lane +: 32] + v_sum_r[lane]);
-                        acc[acc_wa_q] <= acc_wr_next;
+                        acc_wr_q <= acc_wr_next;   // 写数据打拍（下一拍写回，拆组合链）
+                        acc_wr_we_q <= 1'b1;       // 写回脉冲（写拍沿清 0）
                         mac_t <= 0;
                         mac_kh_q <= 4'd0;
                         mac_kw_q <= 4'd0;
@@ -886,6 +889,15 @@ module cnn_core_v2 #(
                 end
                 default: state <= S_IDLE;
             endcase
+            // 末 tap 写回（延后 1 拍）：末 tap 后必进 S_MAC_ADDR（同组下一位置，写
+            // (7,7) 与当拍读 (0,0) 不同地址）/S_REQ_ADDR（requant 读 (7,7) 在遍历末
+            // 尾，早已写入）/S_LOAD/S_WEIGHT，语义不变；写拍沿清脉冲，避免持续写
+            // 覆盖后续 S_ACC_CLR 清零（清零地址可能与写回地址相同）
+            if (acc_wr_we_q && (state == S_MAC_ADDR || state == S_REQ_ADDR ||
+                                state == S_LOAD || state == S_WEIGHT)) begin
+                acc[acc_wa_q] <= acc_wr_q;
+                acc_wr_we_q <= 1'b0;
+            end
         end
     end
 
@@ -991,6 +1003,8 @@ module cnn_core_v2 #(
     // 破坏 M10K 推断；acc_local/acc 保持整字写，Quartus 才可推断 block RAM）
     reg [255:0] acc_next;      // acc_local 的下一拍值（每 lane 独立 int32 累加）
     reg [255:0] acc_wr_next;   // 末 tap 写回 acc 的整字（每 lane = acc_local + 本 tap 部分和）
+    reg [255:0] acc_wr_q;      // 末 tap 写回数据打拍（断 v_sum_r→acc 写口 256-bit 组合链）
+    reg         acc_wr_we_q;   // 写回脉冲：末 tap 沿后置 1，写拍沿清 0（单拍）
 
     //-----------------------------------------------------------------------
     // requant 流水（拆流水，避免单拍组合链过深）：
