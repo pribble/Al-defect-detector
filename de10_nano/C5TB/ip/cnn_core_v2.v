@@ -2063,7 +2063,10 @@ module cnn_core_v2 #(
     end
 
     // ---- 观测输出（组合直读；Quartus 不支持跨模块层次引用，故以端口引出）----
-    assign dbg_ptr0  = {state[4:0], o_group[10:0], i_group[10:0], mac_t[3:0]};
+    // 注意：拼接必须补足 32 位（尾随 1'b0）——31 位拼接赋 32 位 wire 时
+    // Quartus 按 Verilog 标准右对齐 + MSB 补 0，软件读 0x54 的位布局会整体
+    // 错位 1 位（og 读到 (out_cb-1)>>1、ig 读到 {og[0], i_group[9:0]}）。
+    assign dbg_ptr0  = {state[4:0], o_group[10:0], i_group[10:0], mac_t[3:0], 1'b0};
     assign dbg_ptr1  = {4'd0, rq_row, 4'd0, rq_col};
     assign dbg_ptr2  = {4'd0, mac_row, 4'd0, mac_col};
     assign dbg_ptr3  = {load_row[9:0], load_col[9:0], wf_cnt[7:0]};

@@ -159,6 +159,10 @@ int ConvConverter(void *ctx, OpLite *op, KernelBase *kernel) {
     device_param->param.kernel=w_dims[2];
     device_param->param.stride=param.strides[0];
     device_param->param.relu=at_;
+    // 上板调试：打印每层 act/type/通道数（FPGA 推理子图），确认激活是否写入
+    fprintf(stderr, "[INTELFPGA] %s: act=%u type=%d in_c=%d out_c=%d k=%d s=%d\n",
+            output_name.c_str(), at_, device_param->param.type,
+            i_dims[1], o_dims[1], w_dims[2], param.strides[0]);
     device_param->param.dilation=dilations[0];
 
     device_param->param.type=(param.groups==1)?INTELFPGA_Conv2D:INTELFPGA_DW_Conv2D;
