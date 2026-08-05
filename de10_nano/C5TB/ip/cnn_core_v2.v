@@ -514,6 +514,7 @@ module cnn_core_v2 #(
     reg [15:0]          lb_addr_r;
     (* preserve *) reg [15:0]       acc_addr_mac_r;   // preserve：阻止吸收进 M10K 地址寄存器（mac_row→porta_address_reg 组合链 -4.223）
     (* preserve *) reg [15:0]       acc_raddr_r;      // requant 读地址打拍（preserve：拆 rq_row→porta_address_reg 组合链 -4.181）
+    (* preserve *) reg [15:0]       acc_wa_q;         // acc 写口统一地址（每拍采样：S_MAC_ACC 拍取写回地址、其他拍取清零地址，写口单一寄存器源）
 
     //-----------------------------------------------------------------------
     // 状态机
@@ -743,7 +744,7 @@ module cnn_core_v2 #(
                             acc_wr_next[32*lane +: 32] = (k_reg == 1) ?
                                 (acc_q[32*lane +: 32] + v_sum_r[lane]) :
                                 (acc_local[32*lane +: 32] + v_sum_r[lane]);
-                        acc[acc_waddr_mac] <= acc_wr_next;
+                        acc[acc_wa_q] <= acc_wr_next;
                         mac_t <= 0;
                         if (mac_col == out_w_reg - 1) begin
                             mac_col <= 0;
@@ -919,6 +920,10 @@ module cnn_core_v2 #(
                         w_q[lane][m] <= wbuf[lane][m][mac_t];
             end
             acc_raddr_r <= acc_raddr_clr[15:0];   // requant 读地址打拍（每拍采样，rq_row 推进后首拍锁存新值）
+            // acc 写口统一地址：S_MAC_MUL3 拍取写回地址（当轮 mac_row），S_MAC_ACC 拍写回
+            // 用沿前值；其他拍取清零地址（rq_row 稳定）——写口永不直接连组合
+            if (state == S_MAC_MUL3)
+                acc_wa_q <= acc_waddr_mac[15:0];
             if (state == S_REQ_ADDR || state == S_REQ_MUL || state == S_REQ_MUL2)
                 acc_q <= acc[acc_raddr_r];
             else
