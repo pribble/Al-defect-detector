@@ -97,6 +97,10 @@ module cnn_core_v2 #(
     output wire [31:0]  dbg_ptr1,   // {rq_row[15:0], rq_col[15:0]}
     output wire [31:0]  dbg_ptr2,   // {mac_row[15:0], mac_col[15:0]}
     output wire [31:0]  dbg_ptr3,   // {load_row[9:0], load_col[9:0], wf_cnt[7:0]}
+    output wire [31:0]  dbg_cfg0,   // {in_h, in_w, k, type}（cfg 标量快照，定位上板参数错位）
+    output wire [31:0]  dbg_cfg1,   // {out_c, out_w, act, pad, stride}
+    output wire [31:0]  dbg_cfg2,   // {out_row_tile, in_row_tile, in_cb}
+    output wire [31:0]  dbg_cfg3,   // {out_cb, base_row}
     output wire [127:0] dbg_data0,  // {acc_q[31:0], v_biased_l[0], v_act_l[0], v_rq64_l[0][31:0]}
     output wire [127:0] dbg_data1,  // {v_round_l[0], v_shifted[0], v_rnd_delta[0], w_q[0][3:0]}
     output wire [31:0]  dbg_lb      // lb_q[31:0]
@@ -2074,5 +2078,13 @@ module cnn_core_v2 #(
     assign dbg_data1 = {v_round_l[0][31:0], v_shifted[0][31:0], v_rnd_delta[0][31:0],
                         {w_q[0][3], w_q[0][2], w_q[0][1], w_q[0][0]}};
     assign dbg_lb    = lb_q[31:0];
+
+    // cfg 标量快照（组合直读，供上板确认 RTL 实际收到的层参数）
+    assign dbg_cfg0 = {in_h_reg[11:0], in_w_reg[11:0], k_reg[3:0], type_reg[3:0]};
+    assign dbg_cfg1 = {out_c_reg[11:0], out_w_reg[11:0], act_reg[1:0],
+                       pad_reg[2:0], stride_reg[2:0]};
+    assign dbg_cfg2 = {out_row_tile_reg[11:0], in_row_tile_reg[11:0],
+                       in_cb_reg[7:0]};
+    assign dbg_cfg3 = {out_cb_reg[11:0], base_row_reg[12:0], 7'd0};
 
 endmodule

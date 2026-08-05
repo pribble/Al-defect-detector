@@ -136,6 +136,10 @@ module cnn_top_core (
             8'h2D: as_readdata = dbg_snap_vdelta;  // 0xB4 v_rnd_delta[0] 低 32（round 移位）
             // 0xB8 = {done_cnt, o_evt_cnt}（层完成/输出事件累计）
             8'h2E: as_readdata = {dbg_done_cnt, dbg_o_evt_cnt};
+            8'h2F: as_readdata = core_dbg_cfg0;   // 0xBC {in_h, in_w, k, type}
+            8'h30: as_readdata = core_dbg_cfg1;   // 0xC0 {out_c, out_w, act, pad, stride}
+            8'h31: as_readdata = core_dbg_cfg2;   // 0xC4 {out_row_tile, in_row_tile, in_cb}
+            8'h32: as_readdata = core_dbg_cfg3;   // 0xC8 {out_cb, base_row}
             default: as_readdata = 32'h0;
         endcase
     end
@@ -164,6 +168,8 @@ module cnn_top_core (
         .iw_valid(core_iw_valid), .ow_ready(core_ow_ready), .iw_data(core_iw_data),
         .o_valid(core_o_valid), .o_ready(core_o_ready), .o_data(core_o_data),
         .dbg_ptr0(core_dbg_ptr0), .dbg_ptr1(core_dbg_ptr1),
+        .dbg_cfg0(core_dbg_cfg0), .dbg_cfg1(core_dbg_cfg1),
+        .dbg_cfg2(core_dbg_cfg2), .dbg_cfg3(core_dbg_cfg3),
         .dbg_ptr2(core_dbg_ptr2), .dbg_ptr3(core_dbg_ptr3),
         .dbg_data0(core_dbg_data0), .dbg_data1(core_dbg_data1),
         .dbg_lb(core_dbg_lb)
@@ -175,6 +181,7 @@ module cnn_top_core (
     //（core_done 自动锁存层末值 + 写 0x64 手动冻结 busy 现场）
     //-----------------------------------------------------------------------
     wire [31:0]  core_dbg_ptr0, core_dbg_ptr1, core_dbg_ptr2, core_dbg_ptr3;
+    wire [31:0]  core_dbg_cfg0, core_dbg_cfg1, core_dbg_cfg2, core_dbg_cfg3;
     wire [127:0] core_dbg_data0, core_dbg_data1;
     wire [31:0]  core_dbg_lb;
 
