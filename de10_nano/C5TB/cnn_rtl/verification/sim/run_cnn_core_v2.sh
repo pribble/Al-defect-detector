@@ -9,7 +9,7 @@ echo "== 生成 ${N} 层随机向量 (seed=${SEED}) =="
 rm -rf verification/v2
 python3 tools/gen_cnn_core_v2_vectors.py "$N" "$SEED"
 rm -rf /tmp/cnn_core_v2_vlt
-verilator --binary --timing --public-flat-rw -Wno-lint -Wno-fatal \
+verilator --binary --timing --public-flat-rw -Wno-lint -Wno-fatal -DSIMULATION \
     --Mdir /tmp/cnn_core_v2_vlt -o sim_v2 \
     src/cnn_core_v2.v src/mac8x8_dsp.v src/mac8x8_lut.v verification/tb/tb_cnn_core_v2.v
 cd verification

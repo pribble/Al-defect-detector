@@ -174,6 +174,7 @@ module cnn_core_v2 #(
     // 打拍说明（覆盖旧注释"不可打拍"）：旧设计 rq_raddr 在 requant 首拍才更新会错 1 组；
     // 当前 o_group 在 S_REQ_OUT3 末更新，到 requant 前隔 S_LOAD/ACC_CLR/WEIGHT/MAC 多拍，
     // rq_raddr_q 每拍采样早已稳定为新组，q_* 采样/使用均无错位（tb 多 o_group 层验证）
+`ifdef SIMULATION
     (* ramstyle = "M10K" *) reg signed [31:0] bias_store_0 [0:G_MAX_C-1];
     (* ramstyle = "M10K" *) reg [31:0] rq_m_store_0 [0:G_MAX_C-1];
     (* ramstyle = "M10K" *) reg [7:0]  rq_r_store_0 [0:G_MAX_C-1];
@@ -204,10 +205,77 @@ module cnn_core_v2 #(
         q_mult_0  <= rq_m_store_0[rq_raddr_q];
         q_shift_0 <= rq_r_store_0[rq_raddr_q];
     end
+`else
+    // 综合版：显式 altsyncram，read_during_write_mode_mixed_ports = OLD_DATA
+    // （推断版被 Quartus 选 New data：B 口 pass-through mux 在 wren_reg 传播
+    // 路径上，slack -3.39；OLD_DATA 读口纯同步读，无 wren 依赖）
+    wire signed [31:0] q_bias_0;
+    wire [31:0] q_mult_0;
+    wire [7:0]  q_shift_0;
+    wire signed [31:0] q_rcl6_0;
+    altsyncram #(
+        .operation_mode("DUAL_PORT"),
+        .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
+        .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
+        .read_during_write_mode_mixed_ports("OLD_DATA"),
+        .outdata_reg_b("CLOCK0")
+    ) u_rq_bias_0 (
+        .clock0(clk),
+        .address_a(cfg_addr[9:0]),
+        .wren_a(cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C),
+        .data_a(cfg_wdata),
+        .address_b(rq_raddr_q),
+        .q_b(q_bias_0)
+    );
+    altsyncram #(
+        .operation_mode("DUAL_PORT"),
+        .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
+        .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
+        .read_during_write_mode_mixed_ports("OLD_DATA"),
+        .outdata_reg_b("CLOCK0")
+    ) u_rq_mult_0 (
+        .clock0(clk),
+        .address_a(cfg_addr[9:0]),
+        .wren_a(cfg_we && cfg_sel == 3'd2 && cfg_addr < G_MAX_C),
+        .data_a(cfg_wdata),
+        .address_b(rq_raddr_q),
+        .q_b(q_mult_0)
+    );
+    altsyncram #(
+        .operation_mode("DUAL_PORT"),
+        .width_a(8), .widthad_a(10), .numwords_a(G_MAX_C),
+        .width_b(8), .widthad_b(10), .numwords_b(G_MAX_C),
+        .read_during_write_mode_mixed_ports("OLD_DATA"),
+        .outdata_reg_b("CLOCK0")
+    ) u_rq_shift_0 (
+        .clock0(clk),
+        .address_a(cfg_addr[9:0]),
+        .wren_a(cfg_we && cfg_sel == 3'd3 && cfg_addr < G_MAX_C),
+        .data_a(cfg_wdata[7:0]),
+        .address_b(rq_raddr_q),
+        .q_b(q_shift_0)
+    );
+    altsyncram #(
+        .operation_mode("DUAL_PORT"),
+        .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
+        .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
+        .read_during_write_mode_mixed_ports("OLD_DATA"),
+        .outdata_reg_b("CLOCK0")
+    ) u_rq_rcl6_0 (
+        .clock0(clk),
+        .address_a(cfg_addr[9:0]),
+        .wren_a(cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C),
+        .data_a(cfg_wdata),
+        .address_b(rq_raddr_q),
+        .q_b(q_rcl6_0)
+    );
+`endif
     assign rq_bias_q[0]  = q_bias_0;
     assign rq_mult_q[0]  = q_mult_0;
     assign rq_shift_q[0] = q_shift_0;
     assign rq_rcl6_q[0]  = q_rcl6_0;
+
+`ifdef SIMULATION
     (* ramstyle = "M10K" *) reg signed [31:0] bias_store_1 [0:G_MAX_C-1];
     (* ramstyle = "M10K" *) reg [31:0] rq_m_store_1 [0:G_MAX_C-1];
     (* ramstyle = "M10K" *) reg [7:0]  rq_r_store_1 [0:G_MAX_C-1];
@@ -238,10 +306,77 @@ module cnn_core_v2 #(
         q_mult_1  <= rq_m_store_1[rq_raddr_q + 9'd1];
         q_shift_1 <= rq_r_store_1[rq_raddr_q + 9'd1];
     end
+`else
+    // 综合版：显式 altsyncram，read_during_write_mode_mixed_ports = OLD_DATA
+    // （推断版被 Quartus 选 New data：B 口 pass-through mux 在 wren_reg 传播
+    // 路径上，slack -3.39；OLD_DATA 读口纯同步读，无 wren 依赖）
+    wire signed [31:0] q_bias_1;
+    wire [31:0] q_mult_1;
+    wire [7:0]  q_shift_1;
+    wire signed [31:0] q_rcl6_1;
+    altsyncram #(
+        .operation_mode("DUAL_PORT"),
+        .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
+        .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
+        .read_during_write_mode_mixed_ports("OLD_DATA"),
+        .outdata_reg_b("CLOCK0")
+    ) u_rq_bias_1 (
+        .clock0(clk),
+        .address_a(cfg_addr[9:0]),
+        .wren_a(cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C),
+        .data_a(cfg_wdata),
+        .address_b(rq_raddr_q + 9'd1),
+        .q_b(q_bias_1)
+    );
+    altsyncram #(
+        .operation_mode("DUAL_PORT"),
+        .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
+        .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
+        .read_during_write_mode_mixed_ports("OLD_DATA"),
+        .outdata_reg_b("CLOCK0")
+    ) u_rq_mult_1 (
+        .clock0(clk),
+        .address_a(cfg_addr[9:0]),
+        .wren_a(cfg_we && cfg_sel == 3'd2 && cfg_addr < G_MAX_C),
+        .data_a(cfg_wdata),
+        .address_b(rq_raddr_q + 9'd1),
+        .q_b(q_mult_1)
+    );
+    altsyncram #(
+        .operation_mode("DUAL_PORT"),
+        .width_a(8), .widthad_a(10), .numwords_a(G_MAX_C),
+        .width_b(8), .widthad_b(10), .numwords_b(G_MAX_C),
+        .read_during_write_mode_mixed_ports("OLD_DATA"),
+        .outdata_reg_b("CLOCK0")
+    ) u_rq_shift_1 (
+        .clock0(clk),
+        .address_a(cfg_addr[9:0]),
+        .wren_a(cfg_we && cfg_sel == 3'd3 && cfg_addr < G_MAX_C),
+        .data_a(cfg_wdata[7:0]),
+        .address_b(rq_raddr_q + 9'd1),
+        .q_b(q_shift_1)
+    );
+    altsyncram #(
+        .operation_mode("DUAL_PORT"),
+        .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
+        .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
+        .read_during_write_mode_mixed_ports("OLD_DATA"),
+        .outdata_reg_b("CLOCK0")
+    ) u_rq_rcl6_1 (
+        .clock0(clk),
+        .address_a(cfg_addr[9:0]),
+        .wren_a(cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C),
+        .data_a(cfg_wdata),
+        .address_b(rq_raddr_q + 9'd1),
+        .q_b(q_rcl6_1)
+    );
+`endif
     assign rq_bias_q[1]  = q_bias_1;
     assign rq_mult_q[1]  = q_mult_1;
     assign rq_shift_q[1] = q_shift_1;
     assign rq_rcl6_q[1]  = q_rcl6_1;
+
+`ifdef SIMULATION
     (* ramstyle = "M10K" *) reg signed [31:0] bias_store_2 [0:G_MAX_C-1];
     (* ramstyle = "M10K" *) reg [31:0] rq_m_store_2 [0:G_MAX_C-1];
     (* ramstyle = "M10K" *) reg [7:0]  rq_r_store_2 [0:G_MAX_C-1];
@@ -272,10 +407,77 @@ module cnn_core_v2 #(
         q_mult_2  <= rq_m_store_2[rq_raddr_q + 9'd2];
         q_shift_2 <= rq_r_store_2[rq_raddr_q + 9'd2];
     end
+`else
+    // 综合版：显式 altsyncram，read_during_write_mode_mixed_ports = OLD_DATA
+    // （推断版被 Quartus 选 New data：B 口 pass-through mux 在 wren_reg 传播
+    // 路径上，slack -3.39；OLD_DATA 读口纯同步读，无 wren 依赖）
+    wire signed [31:0] q_bias_2;
+    wire [31:0] q_mult_2;
+    wire [7:0]  q_shift_2;
+    wire signed [31:0] q_rcl6_2;
+    altsyncram #(
+        .operation_mode("DUAL_PORT"),
+        .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
+        .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
+        .read_during_write_mode_mixed_ports("OLD_DATA"),
+        .outdata_reg_b("CLOCK0")
+    ) u_rq_bias_2 (
+        .clock0(clk),
+        .address_a(cfg_addr[9:0]),
+        .wren_a(cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C),
+        .data_a(cfg_wdata),
+        .address_b(rq_raddr_q + 9'd2),
+        .q_b(q_bias_2)
+    );
+    altsyncram #(
+        .operation_mode("DUAL_PORT"),
+        .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
+        .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
+        .read_during_write_mode_mixed_ports("OLD_DATA"),
+        .outdata_reg_b("CLOCK0")
+    ) u_rq_mult_2 (
+        .clock0(clk),
+        .address_a(cfg_addr[9:0]),
+        .wren_a(cfg_we && cfg_sel == 3'd2 && cfg_addr < G_MAX_C),
+        .data_a(cfg_wdata),
+        .address_b(rq_raddr_q + 9'd2),
+        .q_b(q_mult_2)
+    );
+    altsyncram #(
+        .operation_mode("DUAL_PORT"),
+        .width_a(8), .widthad_a(10), .numwords_a(G_MAX_C),
+        .width_b(8), .widthad_b(10), .numwords_b(G_MAX_C),
+        .read_during_write_mode_mixed_ports("OLD_DATA"),
+        .outdata_reg_b("CLOCK0")
+    ) u_rq_shift_2 (
+        .clock0(clk),
+        .address_a(cfg_addr[9:0]),
+        .wren_a(cfg_we && cfg_sel == 3'd3 && cfg_addr < G_MAX_C),
+        .data_a(cfg_wdata[7:0]),
+        .address_b(rq_raddr_q + 9'd2),
+        .q_b(q_shift_2)
+    );
+    altsyncram #(
+        .operation_mode("DUAL_PORT"),
+        .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
+        .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
+        .read_during_write_mode_mixed_ports("OLD_DATA"),
+        .outdata_reg_b("CLOCK0")
+    ) u_rq_rcl6_2 (
+        .clock0(clk),
+        .address_a(cfg_addr[9:0]),
+        .wren_a(cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C),
+        .data_a(cfg_wdata),
+        .address_b(rq_raddr_q + 9'd2),
+        .q_b(q_rcl6_2)
+    );
+`endif
     assign rq_bias_q[2]  = q_bias_2;
     assign rq_mult_q[2]  = q_mult_2;
     assign rq_shift_q[2] = q_shift_2;
     assign rq_rcl6_q[2]  = q_rcl6_2;
+
+`ifdef SIMULATION
     (* ramstyle = "M10K" *) reg signed [31:0] bias_store_3 [0:G_MAX_C-1];
     (* ramstyle = "M10K" *) reg [31:0] rq_m_store_3 [0:G_MAX_C-1];
     (* ramstyle = "M10K" *) reg [7:0]  rq_r_store_3 [0:G_MAX_C-1];
@@ -306,10 +508,77 @@ module cnn_core_v2 #(
         q_mult_3  <= rq_m_store_3[rq_raddr_q + 9'd3];
         q_shift_3 <= rq_r_store_3[rq_raddr_q + 9'd3];
     end
+`else
+    // 综合版：显式 altsyncram，read_during_write_mode_mixed_ports = OLD_DATA
+    // （推断版被 Quartus 选 New data：B 口 pass-through mux 在 wren_reg 传播
+    // 路径上，slack -3.39；OLD_DATA 读口纯同步读，无 wren 依赖）
+    wire signed [31:0] q_bias_3;
+    wire [31:0] q_mult_3;
+    wire [7:0]  q_shift_3;
+    wire signed [31:0] q_rcl6_3;
+    altsyncram #(
+        .operation_mode("DUAL_PORT"),
+        .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
+        .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
+        .read_during_write_mode_mixed_ports("OLD_DATA"),
+        .outdata_reg_b("CLOCK0")
+    ) u_rq_bias_3 (
+        .clock0(clk),
+        .address_a(cfg_addr[9:0]),
+        .wren_a(cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C),
+        .data_a(cfg_wdata),
+        .address_b(rq_raddr_q + 9'd3),
+        .q_b(q_bias_3)
+    );
+    altsyncram #(
+        .operation_mode("DUAL_PORT"),
+        .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
+        .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
+        .read_during_write_mode_mixed_ports("OLD_DATA"),
+        .outdata_reg_b("CLOCK0")
+    ) u_rq_mult_3 (
+        .clock0(clk),
+        .address_a(cfg_addr[9:0]),
+        .wren_a(cfg_we && cfg_sel == 3'd2 && cfg_addr < G_MAX_C),
+        .data_a(cfg_wdata),
+        .address_b(rq_raddr_q + 9'd3),
+        .q_b(q_mult_3)
+    );
+    altsyncram #(
+        .operation_mode("DUAL_PORT"),
+        .width_a(8), .widthad_a(10), .numwords_a(G_MAX_C),
+        .width_b(8), .widthad_b(10), .numwords_b(G_MAX_C),
+        .read_during_write_mode_mixed_ports("OLD_DATA"),
+        .outdata_reg_b("CLOCK0")
+    ) u_rq_shift_3 (
+        .clock0(clk),
+        .address_a(cfg_addr[9:0]),
+        .wren_a(cfg_we && cfg_sel == 3'd3 && cfg_addr < G_MAX_C),
+        .data_a(cfg_wdata[7:0]),
+        .address_b(rq_raddr_q + 9'd3),
+        .q_b(q_shift_3)
+    );
+    altsyncram #(
+        .operation_mode("DUAL_PORT"),
+        .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
+        .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
+        .read_during_write_mode_mixed_ports("OLD_DATA"),
+        .outdata_reg_b("CLOCK0")
+    ) u_rq_rcl6_3 (
+        .clock0(clk),
+        .address_a(cfg_addr[9:0]),
+        .wren_a(cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C),
+        .data_a(cfg_wdata),
+        .address_b(rq_raddr_q + 9'd3),
+        .q_b(q_rcl6_3)
+    );
+`endif
     assign rq_bias_q[3]  = q_bias_3;
     assign rq_mult_q[3]  = q_mult_3;
     assign rq_shift_q[3] = q_shift_3;
     assign rq_rcl6_q[3]  = q_rcl6_3;
+
+`ifdef SIMULATION
     (* ramstyle = "M10K" *) reg signed [31:0] bias_store_4 [0:G_MAX_C-1];
     (* ramstyle = "M10K" *) reg [31:0] rq_m_store_4 [0:G_MAX_C-1];
     (* ramstyle = "M10K" *) reg [7:0]  rq_r_store_4 [0:G_MAX_C-1];
@@ -340,10 +609,77 @@ module cnn_core_v2 #(
         q_mult_4  <= rq_m_store_4[rq_raddr_q + 9'd4];
         q_shift_4 <= rq_r_store_4[rq_raddr_q + 9'd4];
     end
+`else
+    // 综合版：显式 altsyncram，read_during_write_mode_mixed_ports = OLD_DATA
+    // （推断版被 Quartus 选 New data：B 口 pass-through mux 在 wren_reg 传播
+    // 路径上，slack -3.39；OLD_DATA 读口纯同步读，无 wren 依赖）
+    wire signed [31:0] q_bias_4;
+    wire [31:0] q_mult_4;
+    wire [7:0]  q_shift_4;
+    wire signed [31:0] q_rcl6_4;
+    altsyncram #(
+        .operation_mode("DUAL_PORT"),
+        .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
+        .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
+        .read_during_write_mode_mixed_ports("OLD_DATA"),
+        .outdata_reg_b("CLOCK0")
+    ) u_rq_bias_4 (
+        .clock0(clk),
+        .address_a(cfg_addr[9:0]),
+        .wren_a(cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C),
+        .data_a(cfg_wdata),
+        .address_b(rq_raddr_q + 9'd4),
+        .q_b(q_bias_4)
+    );
+    altsyncram #(
+        .operation_mode("DUAL_PORT"),
+        .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
+        .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
+        .read_during_write_mode_mixed_ports("OLD_DATA"),
+        .outdata_reg_b("CLOCK0")
+    ) u_rq_mult_4 (
+        .clock0(clk),
+        .address_a(cfg_addr[9:0]),
+        .wren_a(cfg_we && cfg_sel == 3'd2 && cfg_addr < G_MAX_C),
+        .data_a(cfg_wdata),
+        .address_b(rq_raddr_q + 9'd4),
+        .q_b(q_mult_4)
+    );
+    altsyncram #(
+        .operation_mode("DUAL_PORT"),
+        .width_a(8), .widthad_a(10), .numwords_a(G_MAX_C),
+        .width_b(8), .widthad_b(10), .numwords_b(G_MAX_C),
+        .read_during_write_mode_mixed_ports("OLD_DATA"),
+        .outdata_reg_b("CLOCK0")
+    ) u_rq_shift_4 (
+        .clock0(clk),
+        .address_a(cfg_addr[9:0]),
+        .wren_a(cfg_we && cfg_sel == 3'd3 && cfg_addr < G_MAX_C),
+        .data_a(cfg_wdata[7:0]),
+        .address_b(rq_raddr_q + 9'd4),
+        .q_b(q_shift_4)
+    );
+    altsyncram #(
+        .operation_mode("DUAL_PORT"),
+        .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
+        .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
+        .read_during_write_mode_mixed_ports("OLD_DATA"),
+        .outdata_reg_b("CLOCK0")
+    ) u_rq_rcl6_4 (
+        .clock0(clk),
+        .address_a(cfg_addr[9:0]),
+        .wren_a(cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C),
+        .data_a(cfg_wdata),
+        .address_b(rq_raddr_q + 9'd4),
+        .q_b(q_rcl6_4)
+    );
+`endif
     assign rq_bias_q[4]  = q_bias_4;
     assign rq_mult_q[4]  = q_mult_4;
     assign rq_shift_q[4] = q_shift_4;
     assign rq_rcl6_q[4]  = q_rcl6_4;
+
+`ifdef SIMULATION
     (* ramstyle = "M10K" *) reg signed [31:0] bias_store_5 [0:G_MAX_C-1];
     (* ramstyle = "M10K" *) reg [31:0] rq_m_store_5 [0:G_MAX_C-1];
     (* ramstyle = "M10K" *) reg [7:0]  rq_r_store_5 [0:G_MAX_C-1];
@@ -374,10 +710,77 @@ module cnn_core_v2 #(
         q_mult_5  <= rq_m_store_5[rq_raddr_q + 9'd5];
         q_shift_5 <= rq_r_store_5[rq_raddr_q + 9'd5];
     end
+`else
+    // 综合版：显式 altsyncram，read_during_write_mode_mixed_ports = OLD_DATA
+    // （推断版被 Quartus 选 New data：B 口 pass-through mux 在 wren_reg 传播
+    // 路径上，slack -3.39；OLD_DATA 读口纯同步读，无 wren 依赖）
+    wire signed [31:0] q_bias_5;
+    wire [31:0] q_mult_5;
+    wire [7:0]  q_shift_5;
+    wire signed [31:0] q_rcl6_5;
+    altsyncram #(
+        .operation_mode("DUAL_PORT"),
+        .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
+        .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
+        .read_during_write_mode_mixed_ports("OLD_DATA"),
+        .outdata_reg_b("CLOCK0")
+    ) u_rq_bias_5 (
+        .clock0(clk),
+        .address_a(cfg_addr[9:0]),
+        .wren_a(cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C),
+        .data_a(cfg_wdata),
+        .address_b(rq_raddr_q + 9'd5),
+        .q_b(q_bias_5)
+    );
+    altsyncram #(
+        .operation_mode("DUAL_PORT"),
+        .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
+        .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
+        .read_during_write_mode_mixed_ports("OLD_DATA"),
+        .outdata_reg_b("CLOCK0")
+    ) u_rq_mult_5 (
+        .clock0(clk),
+        .address_a(cfg_addr[9:0]),
+        .wren_a(cfg_we && cfg_sel == 3'd2 && cfg_addr < G_MAX_C),
+        .data_a(cfg_wdata),
+        .address_b(rq_raddr_q + 9'd5),
+        .q_b(q_mult_5)
+    );
+    altsyncram #(
+        .operation_mode("DUAL_PORT"),
+        .width_a(8), .widthad_a(10), .numwords_a(G_MAX_C),
+        .width_b(8), .widthad_b(10), .numwords_b(G_MAX_C),
+        .read_during_write_mode_mixed_ports("OLD_DATA"),
+        .outdata_reg_b("CLOCK0")
+    ) u_rq_shift_5 (
+        .clock0(clk),
+        .address_a(cfg_addr[9:0]),
+        .wren_a(cfg_we && cfg_sel == 3'd3 && cfg_addr < G_MAX_C),
+        .data_a(cfg_wdata[7:0]),
+        .address_b(rq_raddr_q + 9'd5),
+        .q_b(q_shift_5)
+    );
+    altsyncram #(
+        .operation_mode("DUAL_PORT"),
+        .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
+        .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
+        .read_during_write_mode_mixed_ports("OLD_DATA"),
+        .outdata_reg_b("CLOCK0")
+    ) u_rq_rcl6_5 (
+        .clock0(clk),
+        .address_a(cfg_addr[9:0]),
+        .wren_a(cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C),
+        .data_a(cfg_wdata),
+        .address_b(rq_raddr_q + 9'd5),
+        .q_b(q_rcl6_5)
+    );
+`endif
     assign rq_bias_q[5]  = q_bias_5;
     assign rq_mult_q[5]  = q_mult_5;
     assign rq_shift_q[5] = q_shift_5;
     assign rq_rcl6_q[5]  = q_rcl6_5;
+
+`ifdef SIMULATION
     (* ramstyle = "M10K" *) reg signed [31:0] bias_store_6 [0:G_MAX_C-1];
     (* ramstyle = "M10K" *) reg [31:0] rq_m_store_6 [0:G_MAX_C-1];
     (* ramstyle = "M10K" *) reg [7:0]  rq_r_store_6 [0:G_MAX_C-1];
@@ -408,10 +811,77 @@ module cnn_core_v2 #(
         q_mult_6  <= rq_m_store_6[rq_raddr_q + 9'd6];
         q_shift_6 <= rq_r_store_6[rq_raddr_q + 9'd6];
     end
+`else
+    // 综合版：显式 altsyncram，read_during_write_mode_mixed_ports = OLD_DATA
+    // （推断版被 Quartus 选 New data：B 口 pass-through mux 在 wren_reg 传播
+    // 路径上，slack -3.39；OLD_DATA 读口纯同步读，无 wren 依赖）
+    wire signed [31:0] q_bias_6;
+    wire [31:0] q_mult_6;
+    wire [7:0]  q_shift_6;
+    wire signed [31:0] q_rcl6_6;
+    altsyncram #(
+        .operation_mode("DUAL_PORT"),
+        .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
+        .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
+        .read_during_write_mode_mixed_ports("OLD_DATA"),
+        .outdata_reg_b("CLOCK0")
+    ) u_rq_bias_6 (
+        .clock0(clk),
+        .address_a(cfg_addr[9:0]),
+        .wren_a(cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C),
+        .data_a(cfg_wdata),
+        .address_b(rq_raddr_q + 9'd6),
+        .q_b(q_bias_6)
+    );
+    altsyncram #(
+        .operation_mode("DUAL_PORT"),
+        .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
+        .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
+        .read_during_write_mode_mixed_ports("OLD_DATA"),
+        .outdata_reg_b("CLOCK0")
+    ) u_rq_mult_6 (
+        .clock0(clk),
+        .address_a(cfg_addr[9:0]),
+        .wren_a(cfg_we && cfg_sel == 3'd2 && cfg_addr < G_MAX_C),
+        .data_a(cfg_wdata),
+        .address_b(rq_raddr_q + 9'd6),
+        .q_b(q_mult_6)
+    );
+    altsyncram #(
+        .operation_mode("DUAL_PORT"),
+        .width_a(8), .widthad_a(10), .numwords_a(G_MAX_C),
+        .width_b(8), .widthad_b(10), .numwords_b(G_MAX_C),
+        .read_during_write_mode_mixed_ports("OLD_DATA"),
+        .outdata_reg_b("CLOCK0")
+    ) u_rq_shift_6 (
+        .clock0(clk),
+        .address_a(cfg_addr[9:0]),
+        .wren_a(cfg_we && cfg_sel == 3'd3 && cfg_addr < G_MAX_C),
+        .data_a(cfg_wdata[7:0]),
+        .address_b(rq_raddr_q + 9'd6),
+        .q_b(q_shift_6)
+    );
+    altsyncram #(
+        .operation_mode("DUAL_PORT"),
+        .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
+        .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
+        .read_during_write_mode_mixed_ports("OLD_DATA"),
+        .outdata_reg_b("CLOCK0")
+    ) u_rq_rcl6_6 (
+        .clock0(clk),
+        .address_a(cfg_addr[9:0]),
+        .wren_a(cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C),
+        .data_a(cfg_wdata),
+        .address_b(rq_raddr_q + 9'd6),
+        .q_b(q_rcl6_6)
+    );
+`endif
     assign rq_bias_q[6]  = q_bias_6;
     assign rq_mult_q[6]  = q_mult_6;
     assign rq_shift_q[6] = q_shift_6;
     assign rq_rcl6_q[6]  = q_rcl6_6;
+
+`ifdef SIMULATION
     (* ramstyle = "M10K" *) reg signed [31:0] bias_store_7 [0:G_MAX_C-1];
     (* ramstyle = "M10K" *) reg [31:0] rq_m_store_7 [0:G_MAX_C-1];
     (* ramstyle = "M10K" *) reg [7:0]  rq_r_store_7 [0:G_MAX_C-1];
@@ -442,10 +912,76 @@ module cnn_core_v2 #(
         q_mult_7  <= rq_m_store_7[rq_raddr_q + 9'd7];
         q_shift_7 <= rq_r_store_7[rq_raddr_q + 9'd7];
     end
+`else
+    // 综合版：显式 altsyncram，read_during_write_mode_mixed_ports = OLD_DATA
+    // （推断版被 Quartus 选 New data：B 口 pass-through mux 在 wren_reg 传播
+    // 路径上，slack -3.39；OLD_DATA 读口纯同步读，无 wren 依赖）
+    wire signed [31:0] q_bias_7;
+    wire [31:0] q_mult_7;
+    wire [7:0]  q_shift_7;
+    wire signed [31:0] q_rcl6_7;
+    altsyncram #(
+        .operation_mode("DUAL_PORT"),
+        .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
+        .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
+        .read_during_write_mode_mixed_ports("OLD_DATA"),
+        .outdata_reg_b("CLOCK0")
+    ) u_rq_bias_7 (
+        .clock0(clk),
+        .address_a(cfg_addr[9:0]),
+        .wren_a(cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C),
+        .data_a(cfg_wdata),
+        .address_b(rq_raddr_q + 9'd7),
+        .q_b(q_bias_7)
+    );
+    altsyncram #(
+        .operation_mode("DUAL_PORT"),
+        .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
+        .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
+        .read_during_write_mode_mixed_ports("OLD_DATA"),
+        .outdata_reg_b("CLOCK0")
+    ) u_rq_mult_7 (
+        .clock0(clk),
+        .address_a(cfg_addr[9:0]),
+        .wren_a(cfg_we && cfg_sel == 3'd2 && cfg_addr < G_MAX_C),
+        .data_a(cfg_wdata),
+        .address_b(rq_raddr_q + 9'd7),
+        .q_b(q_mult_7)
+    );
+    altsyncram #(
+        .operation_mode("DUAL_PORT"),
+        .width_a(8), .widthad_a(10), .numwords_a(G_MAX_C),
+        .width_b(8), .widthad_b(10), .numwords_b(G_MAX_C),
+        .read_during_write_mode_mixed_ports("OLD_DATA"),
+        .outdata_reg_b("CLOCK0")
+    ) u_rq_shift_7 (
+        .clock0(clk),
+        .address_a(cfg_addr[9:0]),
+        .wren_a(cfg_we && cfg_sel == 3'd3 && cfg_addr < G_MAX_C),
+        .data_a(cfg_wdata[7:0]),
+        .address_b(rq_raddr_q + 9'd7),
+        .q_b(q_shift_7)
+    );
+    altsyncram #(
+        .operation_mode("DUAL_PORT"),
+        .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
+        .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
+        .read_during_write_mode_mixed_ports("OLD_DATA"),
+        .outdata_reg_b("CLOCK0")
+    ) u_rq_rcl6_7 (
+        .clock0(clk),
+        .address_a(cfg_addr[9:0]),
+        .wren_a(cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C),
+        .data_a(cfg_wdata),
+        .address_b(rq_raddr_q + 9'd7),
+        .q_b(q_rcl6_7)
+    );
+`endif
     assign rq_bias_q[7]  = q_bias_7;
     assign rq_mult_q[7]  = q_mult_7;
     assign rq_shift_q[7] = q_shift_7;
     assign rq_rcl6_q[7]  = q_rcl6_7;
+
 
     //-----------------------------------------------------------------------
     // 存储：行缓冲 lb（64-bit 字 = 8 lane，col 0..G_MAX_W-1）
