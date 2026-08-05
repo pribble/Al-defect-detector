@@ -107,9 +107,7 @@ module cnn_core_v2 #(
     output wire [31:0]  dbg_scale3, // ch0 rcl6（cfg_sel 4）
     output wire [31:0]  dbg_in0,    // 输入区首字低 32（S_LOAD 首拍 i_data 锁存）
     output wire [31:0]  dbg_in1,    // 输入区首字高 32
-    output wire [127:0] dbg_data0,  // {acc_q[31:0], v_biased_l[0], v_act_l[0], v_rq64_l[0][31:0]}
-    output wire [127:0] dbg_data1,  // {v_round_l[0], v_shifted[0], v_rnd_delta[0], w_q[0][3:0]}
-    output wire [31:0]  dbg_lb      // lb_q[31:0]
+  // {acc_q[31:0], v_biased_l[0], v_act_l[0], v_rq64_l[0][31:0]}
 );
 
     //-----------------------------------------------------------------------
@@ -2096,10 +2094,6 @@ module cnn_core_v2 #(
     assign dbg_ptr1  = {4'd0, rq_row, 4'd0, rq_col};
     assign dbg_ptr2  = {4'd0, mac_row, 4'd0, mac_col};
     assign dbg_ptr3  = {load_row[9:0], load_col[9:0], wf_cnt[7:0]};
-    assign dbg_data0 = {acc_q[31:0], v_biased_l[0], v_act_l[0], v_rq64_l[0][31:0]};
-    assign dbg_data1 = {v_round_l[0][31:0], v_shifted[0][31:0], v_rnd_delta[0][31:0],
-                        {w_q[0][3], w_q[0][2], w_q[0][1], w_q[0][0]}};
-    assign dbg_lb    = lb_q[31:0];
 
     // cfg 标量快照（组合直读，供上板确认 RTL 实际收到的层参数）
     assign dbg_cfg0 = {in_h_reg[11:0], in_w_reg[11:0], k_reg[3:0], type_reg[3:0]};

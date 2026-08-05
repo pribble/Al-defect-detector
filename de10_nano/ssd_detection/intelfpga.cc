@@ -208,15 +208,6 @@ static void dbg_print_layer_snapshot(uint32_t *ip, const char *name) {
   uint32_t r58 = foo_get(ip, 0x58);
   uint32_t r5c = foo_get(ip, 0x5C);
   uint32_t r60 = foo_get(ip, 0x60);
-  uint32_t r68 = foo_get(ip, 0x90);   // acc
-  uint32_t r6c = foo_get(ip, 0x94);   // v_act_l[0]
-  uint32_t r70 = foo_get(ip, 0x98);   // v_rq64_l[0] 低 32
-  uint32_t r74 = foo_get(ip, 0x9C);   // v_round_l[0] 低 32
-  uint32_t r78 = foo_get(ip, 0xA4);   // v_shifted[0] 低 32
-  uint32_t r7c = foo_get(ip, 0xA8);   // lb_q 低 32
-  uint32_t r80 = foo_get(ip, 0xAC);   // w_q[0][0..3]
-  uint32_t r84 = foo_get(ip, 0xB0);   // v_biased_l[0]
-  uint32_t r88 = foo_get(ip, 0xB4);   // v_rnd_delta[0] 低 32
   uint32_t r8c = foo_get(ip, 0xB8);   // {done_cnt, o_evt_cnt}
   uint32_t rbc = foo_get(ip, 0xBC);   // cfg0 {in_h, in_w, k, type}
   uint32_t rc0 = foo_get(ip, 0xC0);   // cfg1 {out_c, out_w, act, pad, stride}
@@ -224,8 +215,6 @@ static void dbg_print_layer_snapshot(uint32_t *ip, const char *name) {
   uint32_t rc8 = foo_get(ip, 0xC8);   // cfg3 {out_cb, base_row}
   printf("[DBG] %s: core_state=%d og=%d ig=%d cmd_h=%d cmd_c=%d"
          " rq=%d,%d mac=%d,%d t=%d lr=%d,%d wf=%d"
-         " | acc=%08x vact=%08x vrq=%08x vrnd=%08x vshf=%08x"
-         " | lb=%08x wq=%02x%02x%02x%02x vbias=%08x vdelta=%08x"
          " | done=%d oevt=%d"
          " | cfg: in_h=%d in_w=%d k=%d type=%d out_c=%d out_w=%d act=%d pad=%d st=%d"
          " otile=%d itile=%d icb=%d ocb=%d base=%d\n",
@@ -235,9 +224,6 @@ static void dbg_print_layer_snapshot(uint32_t *ip, const char *name) {
          (r58 >> 16) & 0xFFFF, r58 & 0xFFFF,
          (r5c >> 16) & 0xFFFF, r5c & 0xFFFF,
          (r60 >> 28) & 0xF, (r60 >> 18) & 0x3FF, (r60 >> 8) & 0x3FF, r60 & 0xFF,
-         r68, r6c, r70, r74, r78,
-         r7c, (r80 >> 24) & 0xFF, (r80 >> 16) & 0xFF, (r80 >> 8) & 0xFF,
-         r80 & 0xFF, r84, r88,
          (r8c >> 16) & 0xFFFF, r8c & 0xFFFF,
          (rbc >> 20) & 0xFFF, (rbc >> 8) & 0xFFF, (rbc >> 4) & 0xF, rbc & 0xF,
          (rc0 >> 20) & 0xFFF, (rc0 >> 8) & 0xFFF, (rc0 >> 6) & 0x3,
