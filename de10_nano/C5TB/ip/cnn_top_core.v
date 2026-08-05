@@ -115,22 +115,23 @@ module cnn_top_core (
             8'h13: as_readdata = {lr_cmd_cnt, lr_rdv_cnt};   // 0x4C：lr 命令/返回计数
             8'h14: as_readdata = {wr_cmd_cnt, wr_rdv_cnt};   // 0x50：wr 命令/返回计数
             // ---- 观测寄存器（复现核专用，非黑盒协议）----
-            // 0x54 = {core_state[4:0], o_group[10:0], i_group[10:0], cmd_head, cmd_cnt}
-            8'h15: as_readdata = {core_dbg_ptr0[31:27], core_dbg_ptr0[26:16],
-                                  core_dbg_ptr0[15:5], cmd_head, cmd_cnt};
-            // 0x58 = {rq_row, rq_col}（requant 指针）
-            8'h16: as_readdata = core_dbg_ptr1;
-            // 0x5C = {mac_row, mac_col}（MAC 窗口指针）
-            8'h17: as_readdata = core_dbg_ptr2;
+            // 调试版（无 core）：0x54-0x5C 固定 0（core 内部指针不存在）
+            8'h15: as_readdata = {5'd0, cmd_head, cmd_cnt};
+            8'h16: as_readdata = 32'd0;
+            8'h17: as_readdata = 32'd0;
             // 0x60 = {mac_t, load_row, load_col, wf_cnt}（DMA/权重进度）
-            8'h18: as_readdata = core_dbg_ptr3;
+            8'h18: as_readdata = 32'd0;
             // 快照（core_done 或写 0x64 冻结；lane0）——0x90~0xB8：
             // 0xB8 = {done_cnt, o_evt_cnt}（层完成/输出事件累计）
             8'h2E: as_readdata = {dbg_done_cnt, dbg_o_evt_cnt};
-            8'h2F: as_readdata = core_dbg_cfg0;   // 0xBC {in_h, in_w, k, type}
-            8'h30: as_readdata = core_dbg_cfg1;   // 0xC0 {out_c, out_w, act, pad, stride}
-            8'h31: as_readdata = core_dbg_cfg2;   // 0xC4 {out_row_tile, in_row_tile, in_cb}
-            8'h32: as_readdata = core_dbg_cfg3;   // 0xC8 {out_cb, base_row}
+            8'h2F: as_readdata = {cfg_snap[3][11:0], cfg_snap[4][11:0],
+                                  cfg_snap[8][3:0], cfg_snap[0][3:0]};
+            8'h30: as_readdata = {cfg_snap[5][11:0], cfg_snap[7][11:0],
+                                  cfg_snap[1][1:0], cfg_snap[9][2:0],
+                                  cfg_snap[10][2:0]};
+            8'h31: as_readdata = {cfg_snap[11][11:0], cfg_snap[12][11:0],
+                                  cfg_snap[13][7:0]};
+            8'h32: as_readdata = {cfg_snap[14][11:0], cfg_snap[15][12:0], 7'd0};
             // param_buf 原始读回（RTL 从 DDR 读的参数——对比软件写入）
             8'h60: as_readdata = param_buf[0];
             8'h61: as_readdata = param_buf[1];
@@ -153,12 +154,12 @@ module cnn_top_core (
             8'h72: as_readdata = param_buf[18];
             8'h73: as_readdata = param_buf[19];
             // scale 快照 + 输入首字
-            8'h74: as_readdata = core_dbg_scale0;   // 0x1D0 ch0 mult
-            8'h75: as_readdata = core_dbg_scale1;   // 0x1D4 ch0 bias
-            8'h76: as_readdata = core_dbg_scale2;   // 0x1D8 ch0 shift
-            8'h77: as_readdata = core_dbg_scale3;   // 0x1DC ch0 rcl6
-            8'h78: as_readdata = core_dbg_in0;      // 0x1E0 输入首字低
-            8'h79: as_readdata = core_dbg_in1;      // 0x1E4 输入首字高
+            8'h74: as_readdata = scale_snap_mult;    // 0x1D0 ch0 mult
+            8'h75: as_readdata = scale_snap_bias;    // 0x1D4 ch0 bias
+            8'h76: as_readdata = scale_snap_shift;   // 0x1D8 ch0 shift
+            8'h77: as_readdata = scale_snap_rcl6;    // 0x1DC ch0 rcl6
+            8'h78: as_readdata = in_snap[31:0];      // 0x1E0 输入首字低
+            8'h79: as_readdata = in_snap[63:32];     // 0x1E4 输入首字高
             default: as_readdata = 32'h0;
         endcase
     end
@@ -178,32 +179,35 @@ module cnn_top_core (
     wire        core_o_valid, core_o_ready;
     wire [63:0] core_o_data;
 
-    cnn_core_v2 core (
-        .clk(clk), .rst_n(rst_n),
-        .cfg_we(core_cfg_we), .cfg_sel(core_cfg_sel),
-        .cfg_addr(core_cfg_addr), .cfg_wdata(core_cfg_wdata),
-        .start(core_start), .o_done(core_done),
-        .i_valid(core_i_valid), .i_ready(core_i_ready), .i_data(core_i_data),
-        .iw_valid(core_iw_valid), .ow_ready(core_ow_ready), .iw_data(core_iw_data),
-        .o_valid(core_o_valid), .o_ready(core_o_ready), .o_data(core_o_data),
-        .dbg_ptr0(core_dbg_ptr0), .dbg_ptr1(core_dbg_ptr1),
-        .dbg_cfg0(core_dbg_cfg0), .dbg_cfg1(core_dbg_cfg1),
-        .dbg_cfg2(core_dbg_cfg2), .dbg_cfg3(core_dbg_cfg3),
-        .dbg_scale0(core_dbg_scale0), .dbg_scale1(core_dbg_scale1),
-        .dbg_scale2(core_dbg_scale2), .dbg_scale3(core_dbg_scale3),
-        .dbg_in0(core_dbg_in0), .dbg_in1(core_dbg_in1),
-        .dbg_ptr2(core_dbg_ptr2), .dbg_ptr3(core_dbg_ptr3)
-    );
+    // 调试版（查输入）：不例化 cnn_core_v2（无计算逻辑），core 输出固定，
+    // 顶层状态机照常读 param/scale/输入（S_CFG/S_RD_SCALE/S_RUN 的 lr/wr 流），
+    // core_done=1 使行块循环/层完成立即推进（start 自清）。
+    assign core_done    = 1'b1;
+    assign core_i_ready = 1'b1;
+    assign core_ow_ready = 1'b1;
+    assign core_o_valid = 1'b0;
+    assign core_o_data  = 64'd0;
 
     //-----------------------------------------------------------------------
     // 观测探针（cnn_core_v2 输出端口引出；Quartus 不支持跨模块层次引用）
     // 指针类：组合直读（busy 时抓状态机现场）；数据类：快照锁存
     //（core_done 自动锁存层末值 + 写 0x64 手动冻结 busy 现场）
     //-----------------------------------------------------------------------
-    wire [31:0]  core_dbg_ptr0, core_dbg_ptr1, core_dbg_ptr2, core_dbg_ptr3;
-    wire [31:0]  core_dbg_cfg0, core_dbg_cfg1, core_dbg_cfg2, core_dbg_cfg3;
-    wire [31:0]  core_dbg_scale0, core_dbg_scale1, core_dbg_scale2, core_dbg_scale3;
-    wire [31:0]  core_dbg_in0, core_dbg_in1;
+    // 输入快照（顶层自锁存——S_WR_CFG 标量、cfg_sel 1-4 ch0 scale、lr 首笔输入）
+    reg [31:0] cfg_snap [0:15];
+    reg [31:0] scale_snap_mult, scale_snap_bias, scale_snap_shift, scale_snap_rcl6;
+    reg [63:0] in_snap;
+
+    // scale/输入快照锁存（RTL 侧收到的输入值——对比软件写入）
+    always @(posedge clk) begin
+        if (core_cfg_we && core_cfg_addr == 0) begin
+            if (core_cfg_sel == 3'd1) scale_snap_bias  <= core_cfg_wdata;
+            if (core_cfg_sel == 3'd2) scale_snap_mult  <= core_cfg_wdata;
+            if (core_cfg_sel == 3'd3) scale_snap_shift <= core_cfg_wdata;
+            if (core_cfg_sel == 3'd4) scale_snap_rcl6  <= core_cfg_wdata;
+        end
+        if (lr_readdatavalid && dma_ibeat == 0) in_snap <= lr_readdata;
+    end
 
     // 输出事件计数 / 层完成计数（累计，不复位）
     reg [15:0] dbg_o_evt_cnt, dbg_done_cnt;
@@ -602,6 +606,7 @@ module cnn_top_core (
                 S_WR_CFG: begin
                     core_cfg_we <= 1'b1;
                     core_cfg_sel <= 0;
+                    if (cfg_idx < 16) cfg_snap[cfg_idx] <= core_cfg_wdata;
                     case (cfg_idx)
                         0:  begin core_cfg_addr <= 0;  core_cfg_wdata <= p_type; end
                         1:  begin core_cfg_addr <= 1;  core_cfg_wdata <= p_act; end
