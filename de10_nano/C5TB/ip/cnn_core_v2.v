@@ -97,16 +97,6 @@ module cnn_core_v2 #(
     output wire [31:0]  dbg_ptr1,   // {rq_row[15:0], rq_col[15:0]}
     output wire [31:0]  dbg_ptr2,   // {mac_row[15:0], mac_col[15:0]}
     output wire [31:0]  dbg_ptr3,   // {load_row[9:0], load_col[9:0], wf_cnt[7:0]}
-    output wire [31:0]  dbg_cfg0,   // {in_h, in_w, k, type}（cfg 标量快照，定位上板参数错位）
-    output wire [31:0]  dbg_cfg1,   // {out_c, out_w, act, pad, stride}
-    output wire [31:0]  dbg_cfg2,   // {out_row_tile, in_row_tile, in_cb}
-    output wire [31:0]  dbg_cfg3,   // {out_cb, base_row}
-    output wire [31:0]  dbg_scale0, // ch0 mult（cfg_sel 2 写入时锁存——RTL 收到的 scale）
-    output wire [31:0]  dbg_scale1, // ch0 bias（cfg_sel 1）
-    output wire [31:0]  dbg_scale2, // ch0 shift（cfg_sel 3）
-    output wire [31:0]  dbg_scale3, // ch0 rcl6（cfg_sel 4）
-    output wire [31:0]  dbg_in0,    // 输入区首字低 32（S_LOAD 首拍 i_data 锁存）
-    output wire [31:0]  dbg_in1     // 输入区首字高 32
 );
 
     //-----------------------------------------------------------------------
@@ -152,18 +142,6 @@ module cnn_core_v2 #(
                 end
                 default: ;
             endcase
-        end
-    end
-
-    // scale 快照（RTL 收到的 requant 参数——cfg 写入时锁存 ch0，供上板对比）
-    reg [31:0] dbg_scale_mult_q, dbg_scale_bias_q, dbg_scale_shift_q, dbg_scale_rcl6_q;
-    reg [63:0] dbg_in_q;
-    always @(posedge clk) begin
-        if (cfg_we && cfg_addr < G_MAX_C) begin
-            if (cfg_sel == 3'd2 && cfg_addr == 0) dbg_scale_mult_q <= cfg_wdata;
-            if (cfg_sel == 3'd1 && cfg_addr == 0) dbg_scale_bias_q <= cfg_wdata;
-            if (cfg_sel == 3'd3 && cfg_addr == 0) dbg_scale_shift_q <= cfg_wdata;
-            if (cfg_sel == 3'd4 && cfg_addr == 0) dbg_scale_rcl6_q <= cfg_wdata;
         end
     end
 
@@ -1465,10 +1443,6 @@ module cnn_core_v2 #(
                     end
                     if (load_row_valid) begin
                         if (i_valid) begin
-                            // 输入区首字快照（首个 load 拍锁存——RTL 实际从 DDR 读回的输入）
-                            if (load_row == 0 && load_col == 0) begin
-                                dbg_in_q <= i_data;
-                            end
                             lb_wa_q <= lb_waddr[15:0];
                             lb_wd_q <= i_data;
                             if (load_col == in_w_reg - 1) begin
@@ -2095,17 +2069,4 @@ module cnn_core_v2 #(
     assign dbg_ptr3  = {load_row[9:0], load_col[9:0], wf_cnt[7:0]};
 
     // cfg 标量快照（组合直读，供上板确认 RTL 实际收到的层参数）
-    assign dbg_cfg0 = {in_h_reg[11:0], in_w_reg[11:0], k_reg[3:0], type_reg[3:0]};
-    assign dbg_cfg1 = {out_c_reg[11:0], out_w_reg[11:0], act_reg[1:0],
-                       pad_reg[2:0], stride_reg[2:0]};
-    assign dbg_cfg2 = {out_row_tile_reg[11:0], in_row_tile_reg[11:0],
-                       in_cb_reg[7:0]};
-    assign dbg_cfg3 = {out_cb_reg[11:0], base_row_reg[12:0], 7'd0};
-    assign dbg_scale0 = dbg_scale_mult_q;
-    assign dbg_scale1 = dbg_scale_bias_q;
-    assign dbg_scale2 = dbg_scale_shift_q;
-    assign dbg_scale3 = dbg_scale_rcl6_q;
-    assign dbg_in0 = dbg_in_q[31:0];
-    assign dbg_in1 = dbg_in_q[63:32];
-
 endmodule

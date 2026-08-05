@@ -127,38 +127,7 @@ module cnn_top_core (
             // 快照（core_done 或写 0x64 冻结；lane0）——0x90~0xB8：
             // 0xB8 = {done_cnt, o_evt_cnt}（层完成/输出事件累计）
             8'h2E: as_readdata = {dbg_done_cnt, dbg_o_evt_cnt};
-            8'h2F: as_readdata = core_dbg_cfg0;   // 0xBC {in_h, in_w, k, type}
-            8'h30: as_readdata = core_dbg_cfg1;   // 0xC0 {out_c, out_w, act, pad, stride}
-            8'h31: as_readdata = core_dbg_cfg2;   // 0xC4 {out_row_tile, in_row_tile, in_cb}
-            8'h32: as_readdata = core_dbg_cfg3;   // 0xC8 {out_cb, base_row}
-            // param_buf 原始读回（RTL 从 DDR 读的参数——对比软件写入）
-            8'h60: as_readdata = param_buf[0];
-            8'h61: as_readdata = param_buf[1];
-            8'h62: as_readdata = param_buf[2];
-            8'h63: as_readdata = param_buf[3];
-            8'h64: as_readdata = param_buf[4];
-            8'h65: as_readdata = param_buf[5];
-            8'h66: as_readdata = param_buf[6];
-            8'h67: as_readdata = param_buf[7];
-            8'h68: as_readdata = param_buf[8];
-            8'h69: as_readdata = param_buf[9];
-            8'h6A: as_readdata = param_buf[10];
-            8'h6B: as_readdata = param_buf[11];
-            8'h6C: as_readdata = param_buf[12];
-            8'h6D: as_readdata = param_buf[13];
-            8'h6E: as_readdata = param_buf[14];
-            8'h6F: as_readdata = param_buf[15];
-            8'h70: as_readdata = param_buf[16];
-            8'h71: as_readdata = param_buf[17];
-            8'h72: as_readdata = param_buf[18];
-            8'h73: as_readdata = param_buf[19];
             // scale 快照 + 输入首字
-            8'h74: as_readdata = core_dbg_scale0;   // 0x1D0 ch0 mult
-            8'h75: as_readdata = core_dbg_scale1;   // 0x1D4 ch0 bias
-            8'h76: as_readdata = core_dbg_scale2;   // 0x1D8 ch0 shift
-            8'h77: as_readdata = core_dbg_scale3;   // 0x1DC ch0 rcl6
-            8'h78: as_readdata = core_dbg_in0;      // 0x1E0 输入首字低
-            8'h79: as_readdata = core_dbg_in1;      // 0x1E4 输入首字高
             default: as_readdata = 32'h0;
         endcase
     end
@@ -187,11 +156,6 @@ module cnn_top_core (
         .iw_valid(core_iw_valid), .ow_ready(core_ow_ready), .iw_data(core_iw_data),
         .o_valid(core_o_valid), .o_ready(core_o_ready), .o_data(core_o_data),
         .dbg_ptr0(core_dbg_ptr0), .dbg_ptr1(core_dbg_ptr1),
-        .dbg_cfg0(core_dbg_cfg0), .dbg_cfg1(core_dbg_cfg1),
-        .dbg_cfg2(core_dbg_cfg2), .dbg_cfg3(core_dbg_cfg3),
-        .dbg_scale0(core_dbg_scale0), .dbg_scale1(core_dbg_scale1),
-        .dbg_scale2(core_dbg_scale2), .dbg_scale3(core_dbg_scale3),
-        .dbg_in0(core_dbg_in0), .dbg_in1(core_dbg_in1),
         .dbg_ptr2(core_dbg_ptr2), .dbg_ptr3(core_dbg_ptr3)
     );
 
@@ -201,9 +165,6 @@ module cnn_top_core (
     //（core_done 自动锁存层末值 + 写 0x64 手动冻结 busy 现场）
     //-----------------------------------------------------------------------
     wire [31:0]  core_dbg_ptr0, core_dbg_ptr1, core_dbg_ptr2, core_dbg_ptr3;
-    wire [31:0]  core_dbg_cfg0, core_dbg_cfg1, core_dbg_cfg2, core_dbg_cfg3;
-    wire [31:0]  core_dbg_scale0, core_dbg_scale1, core_dbg_scale2, core_dbg_scale3;
-    wire [31:0]  core_dbg_in0, core_dbg_in1;
 
     // 输出事件计数 / 层完成计数（累计，不复位）
     reg [15:0] dbg_o_evt_cnt, dbg_done_cnt;

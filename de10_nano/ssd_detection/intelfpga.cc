@@ -200,8 +200,6 @@ static int fpga_debug = FPGA_DEBUG;
 //   0x54 = {core_state[4:0], o_group[10:0], i_group[10:0], cmd_head, cmd_cnt}
 //   0x58 = {rq_row, rq_col}  0x5C = {mac_row, mac_col}
 //   0x60 = {mac_t, load_row, load_col, wf_cnt}
-//   0x68-0x88 = 快照（core_done 自动锁存 lane0）：acc / v_act_l / v_rq64_l /
-//               v_round_l / v_shifted / lb_q / w_q[0][0..3] / v_biased_l / v_rnd_delta
 //   0x8C = {done_cnt, o_evt_cnt}
 static void dbg_print_layer_snapshot(uint32_t *ip, const char *name) {
   uint32_t r54 = foo_get(ip, 0x54);
@@ -209,62 +207,16 @@ static void dbg_print_layer_snapshot(uint32_t *ip, const char *name) {
   uint32_t r5c = foo_get(ip, 0x5C);
   uint32_t r60 = foo_get(ip, 0x60);
   uint32_t r8c = foo_get(ip, 0xB8);   // {done_cnt, o_evt_cnt}
-  uint32_t rbc = foo_get(ip, 0xBC);   // cfg0 {in_h, in_w, k, type}
-  uint32_t rc0 = foo_get(ip, 0xC0);   // cfg1 {out_c, out_w, act, pad, stride}
-  uint32_t rc4 = foo_get(ip, 0xC4);   // cfg2 {out_row_tile, in_row_tile, in_cb}
-  uint32_t rc8 = foo_get(ip, 0xC8);   // cfg3 {out_cb, base_row}
   printf("[DBG] %s: core_state=%d og=%d ig=%d cmd_h=%d cmd_c=%d"
          " rq=%d,%d mac=%d,%d t=%d lr=%d,%d wf=%d"
-         " | done=%d oevt=%d"
-         " | cfg: in_h=%d in_w=%d k=%d type=%d out_c=%d out_w=%d act=%d pad=%d st=%d"
-         " otile=%d itile=%d icb=%d ocb=%d base=%d\n",
+         " | done=%d oevt=%d\n",
          name ? name : "?",
          (r54 >> 27) & 0x1F, (r54 >> 16) & 0x7FF, (r54 >> 5) & 0x7FF,
          (r54 >> 3) & 0x3, r54 & 0x7,
          (r58 >> 16) & 0xFFFF, r58 & 0xFFFF,
          (r5c >> 16) & 0xFFFF, r5c & 0xFFFF,
          (r60 >> 28) & 0xF, (r60 >> 18) & 0x3FF, (r60 >> 8) & 0x3FF, r60 & 0xFF,
-         (r8c >> 16) & 0xFFFF, r8c & 0xFFFF,
-         (rbc >> 20) & 0xFFF, (rbc >> 8) & 0xFFF, (rbc >> 4) & 0xF, rbc & 0xF,
-         (rc0 >> 20) & 0xFFF, (rc0 >> 8) & 0xFFF, (rc0 >> 6) & 0x3,
-         (rc0 >> 3) & 0x7, rc0 & 0x7,
-         (rc4 >> 20) & 0xFFF, (rc4 >> 8) & 0xFFF, rc4 & 0xFF,
-         (rc8 >> 20) & 0xFFF, rc8 & 0x1FFF);
-  // 软件侧输入快照（对比 RTL 收到的 cfg；慢没关系——调试期全量读）
-  fprintf(stderr,
-          "  | SW param: off_i=%d off_w=%d off_o=%d in_c=%d in_h=%d in_w=%d "
-          "out_c=%d out_h=%d out_w=%d k=%d pad=%d st=%d act=%d type=%d"
-          " otile=%d itile=%d ocb=%d rblk=%d\n",
-          uparam[0], uparam[1], uparam[3], uparam[4], uparam[5], uparam[6],
-          uparam[7], uparam[8], uparam[9], uparam[10], uparam[11], uparam[13],
-          uparam[14], uparam[15], uparam[17], uparam[18], uparam[16], uparam[19]);
-  fprintf(stderr,
-          "  | SW scale[0..7]: mult=%d bias=%d shift=%d rcl6=%d | "
-          "mult=%d bias=%d shift=%d rcl6=%d\n",
-          uscale[0], uscale[1], uscale[2], uscale[3],
-          uscale[4], uscale[5], uscale[6], uscale[7]);
-  fprintf(stderr, "  | SW in[0..15]: %08x %08x %08x %08x %08x %08x %08x %08x "
-          "%08x %08x %08x %08x %08x %08x %08x %08x\n",
-          ((uint32_t *)udata)[0], ((uint32_t *)udata)[1], ((uint32_t *)udata)[2],
-          ((uint32_t *)udata)[3], ((uint32_t *)udata)[4], ((uint32_t *)udata)[5],
-          ((uint32_t *)udata)[6], ((uint32_t *)udata)[7], ((uint32_t *)udata)[8],
-          ((uint32_t *)udata)[9], ((uint32_t *)udata)[10], ((uint32_t *)udata)[11],
-          ((uint32_t *)udata)[12], ((uint32_t *)udata)[13], ((uint32_t *)udata)[14],
-          ((uint32_t *)udata)[15]);
-  // RTL 读回快照（0x180 起 param_buf 原始、0x1D0 scale、0x1E0 输入首字）
-  uint32_t pb[20];
-  for (int i = 0; i < 20; i++) pb[i] = foo_get(ip, 0x180 + i * 4);
-  uint32_t sm0 = foo_get(ip, 0x1D0), sm1 = foo_get(ip, 0x1D4);
-  uint32_t sm2 = foo_get(ip, 0x1D8), sm3 = foo_get(ip, 0x1DC);
-  uint32_t in0 = foo_get(ip, 0x1E0), in1 = foo_get(ip, 0x1E4);
-  uint32_t in2 = foo_get(ip, 0x1E8), in3 = foo_get(ip, 0x1EC);
-  fprintf(stderr,
-          "  | RTL param_buf: %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n",
-          pb[0], pb[1], pb[2], pb[3], pb[4], pb[5], pb[6], pb[7], pb[8], pb[9],
-          pb[10], pb[11], pb[12], pb[13], pb[14], pb[15], pb[16], pb[17], pb[18], pb[19]);
-  fprintf(stderr,
-          "  | RTL scale: mult=%d bias=%d shift=%d rcl6=%d | RTL in[0..3]: %08x %08x %08x %08x\n",
-          sm0, sm1, sm2, sm3, in0, in1, in2, in3);
+         (r8c >> 16) & 0xFFFF, r8c & 0xFFFF);
 }
 
 int start_fpga(uint32_t *ip, uint32_t start_reg_addr) {
