@@ -486,14 +486,14 @@ module cnn_core_v2 #(
                 if (mac_lane_i < 4) begin : u_dsp
                     mac8x8_dsp u_mac (
                         .en(mac_c_valid_r),
-                        .a (lb_q[8*mac_m_i +: 8]),
+                        .a (mac_a_q[8*mac_m_i +: 8]),
                         .b (w_q[mac_lane_i][mac_m_i]),
                         .p (mac_p[mac_lane_i][mac_m_i])
                     );
                 end else begin : u_lut
                     mac8x8_lut u_mac (
                         .en(mac_c_valid_r),
-                        .a (lb_q[8*mac_m_i +: 8]),
+                        .a (mac_a_q[8*mac_m_i +: 8]),
                         .b (w_q[mac_lane_i][mac_m_i]),
                         .p (mac_p[mac_lane_i][mac_m_i])
                     );
@@ -504,6 +504,7 @@ module cnn_core_v2 #(
 
     // 同步读采样寄存器（RAM 读输出，读地址 = 组合函数，晚一拍有效）
     reg [63:0]          lb_q;
+    reg [63:0]          mac_a_q;    // 乘法器 a 输入打拍（S_MAC_MUL 拍寄存 lb_q，拆 lb M10K pass-through 读路径与 DSP 乘法）
     reg signed [255:0]  acc_q;
     reg signed [255:0]  acc_local;   // 窗口内累加（首 tap 用 acc_q 初始化）
     // 读地址寄存（S_MAC_ADDR 拍采样）：lb_raddr/acc_raddr_mac 是 32-bit 常量乘法
@@ -524,6 +525,7 @@ module cnn_core_v2 #(
     localparam S_MAC_RD   = 4'd4;   // 窗口 tap 请求拍（同步采样 lb_q/acc_q）
     localparam S_MAC_MUL  = 4'd11;  // 窗口 tap 乘拍（乘法器 → mac_p_r）
     localparam S_MAC_MUL2 = 4'd12;  // 窗口 tap 加法树拍（mac_p_r → v_sum_r）
+    localparam S_MAC_MUL3 = 5'd21;  // 窗口 tap 加法树拍（mac_p_r → v_sum_r，乘法拆拍后新增）
     localparam S_MAC_ACC  = 4'd5;   // 窗口 tap 累加拍（v_sum_r → acc_local）
     localparam S_REQ_ADDR = 4'd6;   // requant 请求拍（采样 acc_q）
     localparam S_REQ_MUL  = 4'd7;   // requant 乘加拍级 1（acc_q+bias，寄存 v_biased_l）
@@ -691,13 +693,22 @@ module cnn_core_v2 #(
 
                 //---- 窗口 MAC（乘拍）：乘加树 → v_sum_r 寄存（拆开累加，缩短组合链）----
                 S_MAC_MUL: begin
-                    // 乘拍：采样乘法器输出（mac_p → mac_p_r）
-                    for (lane = 0; lane < 8; lane = lane + 1)
-                        for (m = 0; m < 8; m = m + 1)
-                            mac_p_r[lane][m] <= mac_p[lane][m];
+                    // a 输入打拍：lb_q（S_MAC_RD 沿的新值）→ mac_a_q，拆 lb M10K
+                    // pass-through 读路径与 DSP 乘法；b 输入 w_q 已在 S_MAC_RD 沿采样
+                    mac_a_q <= lb_q;
                     state <= S_MAC_MUL2;
                 end
                 S_MAC_MUL2: begin
+                    // 乘拍：mac_a_q × w_q → mac_p → mac_p_r（原 S_MAC_MUL 内容移来）
+                    for (lane = 0; lane < 8; lane = lane + 1)
+                        for (m = 0; m < 8; m = m + 1)
+                            mac_p_r[lane][m] <= mac_p[lane][m];
+                    // 首/末 tap 标志提前寄存（32-bit 比较拆出 S_MAC_ACC 拍）
+                    mac_first_q <= (mac_t == 32'd0);
+                    mac_last_q  <= (mac_t == (k_reg == 1 ? 32'd0 : 32'd8));
+                    state <= S_MAC_MUL3;
+                end
+                S_MAC_MUL3: begin
                     // 加法树拍：mac_p_r（寄存器）→ 8 项加法树 → v_sum_r
                     for (lane = 0; lane < 8; lane = lane + 1)
                         v_sum[lane] =
@@ -705,9 +716,6 @@ module cnn_core_v2 #(
                             mac_p_r[lane][4] + mac_p_r[lane][5] + mac_p_r[lane][6] + mac_p_r[lane][7];
                     for (lane = 0; lane < 8; lane = lane + 1)
                         v_sum_r[lane] <= v_sum[lane];
-                    // 首/末 tap 标志提前寄存（32-bit 比较拆出 S_MAC_ACC 拍）
-                    mac_first_q <= (mac_t == 32'd0);
-                    mac_last_q  <= (mac_t == (k_reg == 1 ? 32'd0 : 32'd8));
                     state <= S_MAC_ACC;
                 end
 
