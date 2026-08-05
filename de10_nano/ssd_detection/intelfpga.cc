@@ -244,6 +244,27 @@ static void dbg_print_layer_snapshot(uint32_t *ip, const char *name) {
          (rc0 >> 3) & 0x7, rc0 & 0x7,
          (rc4 >> 20) & 0xFFF, (rc4 >> 8) & 0xFFF, rc4 & 0xFF,
          (rc8 >> 20) & 0xFFF, rc8 & 0x1FFF);
+  // 软件侧输入快照（对比 RTL 收到的 cfg；慢没关系——调试期全量读）
+  fprintf(stderr,
+          "  | SW param: off_i=%d off_w=%d off_o=%d in_c=%d in_h=%d in_w=%d "
+          "out_c=%d out_h=%d out_w=%d k=%d pad=%d st=%d act=%d type=%d"
+          " otile=%d itile=%d ocb=%d rblk=%d\n",
+          uparam[0], uparam[1], uparam[3], uparam[4], uparam[5], uparam[6],
+          uparam[7], uparam[8], uparam[9], uparam[10], uparam[11], uparam[13],
+          uparam[14], uparam[15], uparam[17], uparam[18], uparam[16], uparam[19]);
+  fprintf(stderr,
+          "  | SW scale[0..7]: mult=%d bias=%d shift=%d rcl6=%d | "
+          "mult=%d bias=%d shift=%d rcl6=%d\n",
+          uscale[0], uscale[1], uscale[2], uscale[3],
+          uscale[4], uscale[5], uscale[6], uscale[7]);
+  fprintf(stderr, "  | SW in[0..15]: %08x %08x %08x %08x %08x %08x %08x %08x "
+          "%08x %08x %08x %08x %08x %08x %08x %08x\n",
+          ((uint32_t *)udata)[0], ((uint32_t *)udata)[1], ((uint32_t *)udata)[2],
+          ((uint32_t *)udata)[3], ((uint32_t *)udata)[4], ((uint32_t *)udata)[5],
+          ((uint32_t *)udata)[6], ((uint32_t *)udata)[7], ((uint32_t *)udata)[8],
+          ((uint32_t *)udata)[9], ((uint32_t *)udata)[10], ((uint32_t *)udata)[11],
+          ((uint32_t *)udata)[12], ((uint32_t *)udata)[13], ((uint32_t *)udata)[14],
+          ((uint32_t *)udata)[15]);
 }
 
 int start_fpga(uint32_t *ip, uint32_t start_reg_addr) {
