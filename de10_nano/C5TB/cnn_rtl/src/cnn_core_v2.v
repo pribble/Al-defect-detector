@@ -464,7 +464,7 @@ module cnn_core_v2 #(
     wire [31:0] acc_waddr_mac = mac_row*G_MAX_OW + mac_col;
     wire [31:0] acc_raddr_clr = rq_row*G_MAX_OW + rq_col;
     wire [31:0] acc_raddr_mac = mac_row*G_MAX_OW + mac_col;
-    reg signed [7:0] wbuf [0:8*9*8-1];
+    reg signed [7:0] wbuf [0:7][0:7][0:8];   // [lane][m][t]：w_q 读 = 9:1 mux（原 [lane*72+t*8+m] 平铺是 72:1，mac_t→w_q 路径 18.95ns）
 
     // MAC 8×8 乘法器：拆成独立子模块（模块级 multstyle 强制 DSP/LUT 分配），
     // lane 0-3 走 DSP（32 个 × ≤2 block = ≤64）、lane 4-7 走 LUT（32 个 ≈2K ALUT）。
@@ -527,7 +527,8 @@ module cnn_core_v2 #(
     localparam S_MAC_ACC  = 4'd5;   // 窗口 tap 累加拍（v_sum_r → acc_local）
     localparam S_REQ_ADDR = 4'd6;   // requant 请求拍（采样 acc_q）
     localparam S_REQ_MUL  = 4'd7;   // requant 乘加拍级 1（acc_q+bias，寄存 v_biased_l）
-    localparam S_REQ_MULB = 5'd19;  // requant 乘加拍级 2（relu/rcl6 比较 → v_act_l）
+    localparam S_REQ_MULB = 5'd19;  // requant 乘加拍级 2（bias 加法 → v_biased_l）
+    localparam S_REQ_MULC = 5'd20;  // requant 乘加拍级 3（relu/rcl6 比较 → v_act_l）
     localparam S_REQ_MUL2 = 4'd8;   // requant 乘法拍级 1（4×16×16 DSP 部分积，寄存 v_p_*/v_shift_l）
     localparam S_REQ_MUL3 = 4'd15;  // requant 乘法拍级 2（两组中间和 → v_sum_lo/v_sum_hi）
     localparam S_REQ_MUL4 = 5'd16;  // requant 乘法拍级 3（中间和相加 → v_rq64_l，每级仅 1 个 64-bit 加法）
@@ -543,6 +544,7 @@ module cnn_core_v2 #(
     reg [31:0] wf_cnt;
     reg [31:0] o_group, i_group;
     reg [31:0] mac_row, mac_col, mac_t;
+    reg        mac_first_q, mac_last_q;   // S_MAC_MUL2 拍寄存首/末 tap 标志（拆 mac_t 32-bit 比较链）
     reg [31:0] rq_row, rq_col;
 
     // 行缓冲行 r 对应输入行 base_row_reg + r；有效 = 输入行 ∈ [0, in_h)
@@ -645,14 +647,14 @@ module cnn_core_v2 #(
                 // 软件布局（conv2d_weight_reorganize）：k=3 slice = 8×9×8B，k=1 slice = 8×1×8B
                 S_WEIGHT: begin
                     if (iw_valid) begin
-                        wbuf[(k_reg == 1 ? wf_cnt*72 : wf_cnt*8) + 0] <= iw_data[7:0];
-                        wbuf[(k_reg == 1 ? wf_cnt*72 : wf_cnt*8) + 1] <= iw_data[15:8];
-                        wbuf[(k_reg == 1 ? wf_cnt*72 : wf_cnt*8) + 2] <= iw_data[23:16];
-                        wbuf[(k_reg == 1 ? wf_cnt*72 : wf_cnt*8) + 3] <= iw_data[31:24];
-                        wbuf[(k_reg == 1 ? wf_cnt*72 : wf_cnt*8) + 4] <= iw_data[39:32];
-                        wbuf[(k_reg == 1 ? wf_cnt*72 : wf_cnt*8) + 5] <= iw_data[47:40];
-                        wbuf[(k_reg == 1 ? wf_cnt*72 : wf_cnt*8) + 6] <= iw_data[55:48];
-                        wbuf[(k_reg == 1 ? wf_cnt*72 : wf_cnt*8) + 7] <= iw_data[63:56];
+                        // 新布局 wbuf[lane][m][t]：k=3 时 wf_cnt = lane*9 + t；k=1 时 wf_cnt = lane（t=0）
+                        if (k_reg == 1) begin
+                            for (m = 0; m < 8; m = m + 1)
+                                wbuf[wf_cnt][m][0] <= iw_data[m*8 +: 8];
+                        end else begin
+                            for (m = 0; m < 8; m = m + 1)
+                                wbuf[wf_cnt/9][m][wf_cnt%9] <= iw_data[m*8 +: 8];
+                        end
                         if (wf_cnt == (k_reg == 1 ? 8*1 - 1 : 8*9 - 1)) begin
                             wf_cnt <= 0;
                             mac_row <= 0; mac_col <= 0; mac_t <= 0;
@@ -692,6 +694,9 @@ module cnn_core_v2 #(
                             mac_p_r[lane][4] + mac_p_r[lane][5] + mac_p_r[lane][6] + mac_p_r[lane][7];
                     for (lane = 0; lane < 8; lane = lane + 1)
                         v_sum_r[lane] <= v_sum[lane];
+                    // 首/末 tap 标志提前寄存（32-bit 比较拆出 S_MAC_ACC 拍）
+                    mac_first_q <= (mac_t == 32'd0);
+                    mac_last_q  <= (mac_t == (k_reg == 1 ? 32'd0 : 32'd8));
                     state <= S_MAC_ACC;
                 end
 
@@ -705,13 +710,13 @@ module cnn_core_v2 #(
                     // 直接 part-select 写（acc[...][32*lane +: 32] <= ...）会阻止
                     // Quartus 把 acc 推断为 M10K，导致 A&S 内存反弹（10+GB）。
                     for (lane = 0; lane < 8; lane = lane + 1) begin
-                        if (mac_t == 0)
+                        if (mac_first_q)
                             acc_next[32*lane +: 32] = acc_q[32*lane +: 32] + v_sum_r[lane];
                         else
                             acc_next[32*lane +: 32] = acc_local[32*lane +: 32] + v_sum_r[lane];
                     end
                     acc_local <= acc_next;
-                    if (mac_t == (k_reg == 1 ? 4'd0 : 4'd8)) begin
+                    if (mac_last_q) begin
                         // 末 tap：写回最终值（acc_local 尚缺本 tap 部分和；
                         // k=1 单 tap 时直接用 acc_q 累加，避免旧 acc_local 串扰）
                         for (lane = 0; lane < 8; lane = lane + 1)
@@ -758,6 +763,9 @@ module cnn_core_v2 #(
 
                 //---- requant 乘加拍级 2：relu/rcl6 比较 → v_act_l（比较+mux 单独一拍）----
                 S_REQ_MULB: begin
+                    state <= S_REQ_MULC;
+                end
+                S_REQ_MULC: begin
                     state <= S_REQ_MUL2;
                 end
 
@@ -881,10 +889,15 @@ module cnn_core_v2 #(
             acc_q <= 256'sd0;
         end else begin
             lb_q <= lb[lb_addr_r];
-            // 权重同拍采样：mac_t 在 S_MAC_ACC 末更新，S_MAC_ADDR/S_MAC_RD 拍稳定
-            for (lane = 0; lane < 8; lane = lane + 1)
-                for (m = 0; m < 8; m = m + 1)
-                    w_q[lane][m] <= wbuf[lane*72 + mac_t*8 + m];
+            // 权重采样（S_MAC_RD 拍）：mac_t 在 S_MAC_ACC 末更新，隔 S_MAC_ADDR 拍到
+            // S_MAC_RD 沿共 2 拍窗口，拆 mac_t→wbuf 72:1 mux 组合链（原每拍采样
+            // 窗口仅 1 拍，w_q 路径 slack -5.189；S_MAC_ADDR/RD 拍不用 w_q，
+            // 乘法仍在 S_MAC_MUL 拍用新值，拍序不变）
+            if (state == S_MAC_RD) begin
+                for (lane = 0; lane < 8; lane = lane + 1)
+                    for (m = 0; m < 8; m = m + 1)
+                        w_q[lane][m] <= wbuf[lane][m][mac_t];
+            end
             if (state == S_REQ_ADDR || state == S_REQ_MUL || state == S_REQ_MUL2)
                 acc_q <= acc[acc_raddr_clr];
             else
@@ -902,8 +915,10 @@ module cnn_core_v2 #(
     reg [255:0] acc_wr_next;   // 末 tap 写回 acc 的整字（每 lane = acc_local + 本 tap 部分和）
 
     //-----------------------------------------------------------------------
-    // requant 流水（拆三段，避免单拍组合链过深）：
-    //   S_REQ_MUL  拍：bias+act → v_act_l（寄存 32-bit）
+    // requant 流水（拆流水，避免单拍组合链过深）：
+    //   S_REQ_MUL  拍：寄存 rq_bias_m/rq_mult_m（RAM 读打拍，断 pass-through 读路径）
+    //   S_REQ_MULB 拍：acc_q + rq_bias_m → v_biased_l（32-bit 加法单独一拍，~3ns）
+    //   S_REQ_MULC 拍：relu/rcl6 比较 → v_act_l（比较+mux 单独一拍，~3ns）
     //   S_REQ_MUL2 拍：4×16×16 部分积（DSP）→ 寄存 v_p_*/v_shift_l
     //   S_REQ_MUL3 拍：部分积移位相加 → v_rq64_l（64-bit 加法树）
     //   S_REQ_OUT  拍：round 加法 → v_round_l（用上拍寄存的积）
@@ -924,6 +939,7 @@ module cnn_core_v2 #(
     (* multstyle = "dsp" *) reg signed [31:0] v_p_hilo [0:7];  // a_hi × m_lo（signed 16 × unsigned 16）
     (* multstyle = "dsp" *) reg signed [31:0] v_p_hihi [0:7];  // a_hi × m_hi（signed 16 × unsigned 16）
     reg [31:0] rq_mult_m [0:7];   // S_REQ_MUL 拍寄存的乘法器 b 输入（拆 RAM 读与 DSP 乘法组合链）
+    reg signed [31:0] rq_bias_m [0:7];  // S_REQ_MUL 拍寄存的 bias RAM 读（拆 RAM 读与 32-bit 加法组合链）
 
     // 16×16 乘法用显式 DSP 例化（模块级 multstyle 最可靠；数组属性曾被 Quartus 忽略）
     wire [31:0] mul_lolo [0:7], mul_lohi [0:7], mul_hilo [0:7], mul_hihi [0:7];
@@ -946,15 +962,12 @@ module cnn_core_v2 #(
     reg [31:0] v_out_ch;
     reg [7:0] v_q [0:7];
 
-    // 乘加拍级 1（S_REQ_MUL）：acc_q + bias → v_biased_l（32-bit 加法单独一拍，~3ns）
+    // 乘加拍级 1（S_REQ_MUL）：bias/mult RAM 读打拍 → rq_bias_m/rq_mult_m
+    // （bias 加法与 DSP 乘法各拆独立一拍，断 M10K pass-through 读路径组合穿透）
     always @(posedge clk) begin
         if (state == S_REQ_MUL) begin
             for (ln = 0; ln < 8; ln = ln + 1) begin
-                v_out_ch = o_group * 8 + ln;
-                if (v_out_ch >= out_c_reg)
-                    v_biased_l[ln] <= 32'sd0;
-                else
-                    v_biased_l[ln] <= acc_q[32*ln +: 32] + rq_bias_q[ln];
+                rq_bias_m[ln] <= rq_bias_q[ln];
                 v_rcl6_l[ln] <= rq_rcl6_q[ln];
             end
         end
@@ -969,9 +982,22 @@ module cnn_core_v2 #(
         end
     end
 
-    // 乘加拍级 2（S_REQ_MULB）：relu/rcl6 比较 → v_act_l（比较+mux 单独一拍，~3ns）
+    // 乘加拍级 2（S_REQ_MULB）：acc_q + rq_bias_m → v_biased_l（32-bit 加法单独一拍，~3ns）
     always @(posedge clk) begin
         if (state == S_REQ_MULB) begin
+            for (ln = 0; ln < 8; ln = ln + 1) begin
+                v_out_ch = o_group * 8 + ln;
+                if (v_out_ch >= out_c_reg)
+                    v_biased_l[ln] <= 32'sd0;
+                else
+                    v_biased_l[ln] <= acc_q[32*ln +: 32] + rq_bias_m[ln];
+            end
+        end
+    end
+
+    // 乘加拍级 3（S_REQ_MULC）：relu/rcl6 比较 → v_act_l（比较+mux 单独一拍，~3ns）
+    always @(posedge clk) begin
+        if (state == S_REQ_MULC) begin
             for (ln = 0; ln < 8; ln = ln + 1) begin
                 v_out_ch = o_group * 8 + ln;
                 if (v_out_ch >= out_c_reg)
