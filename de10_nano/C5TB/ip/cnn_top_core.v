@@ -242,6 +242,7 @@ module cnn_top_core (
     reg signed [31:0] rb_tile_stride_r; // p_out_row_tile * p_stride（rb_base 增量）
     reg [15:0] w_cb_r;                  // p_out_cb * (type==4 ? 1 : p_in_cb)（窄化：实际 ≤1024，乘法树变短）
     reg [23:0] w_rb_beats_r;            // w_cb_r * 72（每行块权重拍数，窄化：≤4.7M）
+    reg [23:0] w_rb_beats_last_q;       // w_rb_beats_r - 1（S_PREP_L 拍 2 预计算，拆 S_RUN 的 24-bit 减法链）
     reg [7:0]  wr_slice_q;              // S_PREP_L 拍 1 寄存 (p_k==1 ? 8 : 72)（拆 p_k 比较与乘法链）
     reg [7:0]  lr_last_cb_r;            // lr 轮末 cb：CONV = p_in_cb-1，DW = 0（单 cb）
     reg [31:0] in_row_w8_r;             // p_in_w * 8
@@ -461,6 +462,7 @@ module cnn_top_core (
             dma_icb <= 0; dma_ibeat <= 0; dma_wbeat <= 0;
             dma_ocb <= 0; dma_obeat <= 0;
             wr_slice_q <= 8'd0;
+            w_rb_beats_last_q <= 24'd0;
         end else begin
             case (state)
                 S_IDLE: begin
@@ -587,6 +589,7 @@ module cnn_top_core (
                         out_cb_stride_r <= out_hw_r << 3;
                         out_rb_stride_r <= (p_out_row_tile * p_out_w) << 3;
                         w_rb_beats_r    <= w_cb_r * wr_slice_q;   // 16×8 乘法（原 32-bit×mux 链）
+                        w_rb_beats_last_q <= w_cb_r * wr_slice_q - 24'd1;   // 末值-1 提前（拆 S_RUN 减法链）
                         state <= S_RD_SCALE;
                     end
                 end
@@ -695,7 +698,7 @@ module cnn_top_core (
                     end
                     // wr：命令接受拍推进（连续，无跳转；行块末 core_done 清 pending）
                     if (wr_read && !wr_waitrequest) begin
-                        if (dma_wbeat < w_rb_beats_r - 1) begin
+                        if (dma_wbeat < w_rb_beats_last_q) begin
                             dma_wbeat <= dma_wbeat + 1;
                             wr_address <= wr_address + 8;
                         end
