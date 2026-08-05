@@ -192,10 +192,10 @@ module cnn_core_v2 #(
         if (cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C)
             rcl6_store_0[cfg_addr[9:0]] <= cfg_wdata;
     end
-    reg signed [31:0] q_bias_0;
-    reg [31:0] q_mult_0;
-    reg [7:0]  q_shift_0;
-    reg signed [31:0] q_rcl6_0;
+    (* preserve *) reg signed [31:0] q_bias_0;
+    (* preserve *) reg [31:0] q_mult_0;
+    (* preserve *) reg [7:0]  q_shift_0;
+    (* preserve *) reg signed [31:0] q_rcl6_0;
     always @(posedge clk) begin
         q_bias_0  <= bias_store_0[rq_raddr];
         q_rcl6_0  <= rcl6_store_0[rq_raddr];
@@ -226,10 +226,10 @@ module cnn_core_v2 #(
         if (cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C)
             rcl6_store_1[cfg_addr[9:0]] <= cfg_wdata;
     end
-    reg signed [31:0] q_bias_1;
-    reg [31:0] q_mult_1;
-    reg [7:0]  q_shift_1;
-    reg signed [31:0] q_rcl6_1;
+    (* preserve *) reg signed [31:0] q_bias_1;
+    (* preserve *) reg [31:0] q_mult_1;
+    (* preserve *) reg [7:0]  q_shift_1;
+    (* preserve *) reg signed [31:0] q_rcl6_1;
     always @(posedge clk) begin
         q_bias_1  <= bias_store_1[rq_raddr + 9'd1];
         q_rcl6_1  <= rcl6_store_1[rq_raddr + 9'd1];
@@ -260,10 +260,10 @@ module cnn_core_v2 #(
         if (cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C)
             rcl6_store_2[cfg_addr[9:0]] <= cfg_wdata;
     end
-    reg signed [31:0] q_bias_2;
-    reg [31:0] q_mult_2;
-    reg [7:0]  q_shift_2;
-    reg signed [31:0] q_rcl6_2;
+    (* preserve *) reg signed [31:0] q_bias_2;
+    (* preserve *) reg [31:0] q_mult_2;
+    (* preserve *) reg [7:0]  q_shift_2;
+    (* preserve *) reg signed [31:0] q_rcl6_2;
     always @(posedge clk) begin
         q_bias_2  <= bias_store_2[rq_raddr + 9'd2];
         q_rcl6_2  <= rcl6_store_2[rq_raddr + 9'd2];
@@ -294,10 +294,10 @@ module cnn_core_v2 #(
         if (cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C)
             rcl6_store_3[cfg_addr[9:0]] <= cfg_wdata;
     end
-    reg signed [31:0] q_bias_3;
-    reg [31:0] q_mult_3;
-    reg [7:0]  q_shift_3;
-    reg signed [31:0] q_rcl6_3;
+    (* preserve *) reg signed [31:0] q_bias_3;
+    (* preserve *) reg [31:0] q_mult_3;
+    (* preserve *) reg [7:0]  q_shift_3;
+    (* preserve *) reg signed [31:0] q_rcl6_3;
     always @(posedge clk) begin
         q_bias_3  <= bias_store_3[rq_raddr + 9'd3];
         q_rcl6_3  <= rcl6_store_3[rq_raddr + 9'd3];
@@ -328,10 +328,10 @@ module cnn_core_v2 #(
         if (cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C)
             rcl6_store_4[cfg_addr[9:0]] <= cfg_wdata;
     end
-    reg signed [31:0] q_bias_4;
-    reg [31:0] q_mult_4;
-    reg [7:0]  q_shift_4;
-    reg signed [31:0] q_rcl6_4;
+    (* preserve *) reg signed [31:0] q_bias_4;
+    (* preserve *) reg [31:0] q_mult_4;
+    (* preserve *) reg [7:0]  q_shift_4;
+    (* preserve *) reg signed [31:0] q_rcl6_4;
     always @(posedge clk) begin
         q_bias_4  <= bias_store_4[rq_raddr + 9'd4];
         q_rcl6_4  <= rcl6_store_4[rq_raddr + 9'd4];
@@ -362,10 +362,10 @@ module cnn_core_v2 #(
         if (cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C)
             rcl6_store_5[cfg_addr[9:0]] <= cfg_wdata;
     end
-    reg signed [31:0] q_bias_5;
-    reg [31:0] q_mult_5;
-    reg [7:0]  q_shift_5;
-    reg signed [31:0] q_rcl6_5;
+    (* preserve *) reg signed [31:0] q_bias_5;
+    (* preserve *) reg [31:0] q_mult_5;
+    (* preserve *) reg [7:0]  q_shift_5;
+    (* preserve *) reg signed [31:0] q_rcl6_5;
     always @(posedge clk) begin
         q_bias_5  <= bias_store_5[rq_raddr + 9'd5];
         q_rcl6_5  <= rcl6_store_5[rq_raddr + 9'd5];
@@ -396,10 +396,10 @@ module cnn_core_v2 #(
         if (cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C)
             rcl6_store_6[cfg_addr[9:0]] <= cfg_wdata;
     end
-    reg signed [31:0] q_bias_6;
-    reg [31:0] q_mult_6;
-    reg [7:0]  q_shift_6;
-    reg signed [31:0] q_rcl6_6;
+    (* preserve *) reg signed [31:0] q_bias_6;
+    (* preserve *) reg [31:0] q_mult_6;
+    (* preserve *) reg [7:0]  q_shift_6;
+    (* preserve *) reg signed [31:0] q_rcl6_6;
     always @(posedge clk) begin
         q_bias_6  <= bias_store_6[rq_raddr + 9'd6];
         q_rcl6_6  <= rcl6_store_6[rq_raddr + 9'd6];
@@ -430,10 +430,10 @@ module cnn_core_v2 #(
         if (cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C)
             rcl6_store_7[cfg_addr[9:0]] <= cfg_wdata;
     end
-    reg signed [31:0] q_bias_7;
-    reg [31:0] q_mult_7;
-    reg [7:0]  q_shift_7;
-    reg signed [31:0] q_rcl6_7;
+    (* preserve *) reg signed [31:0] q_bias_7;
+    (* preserve *) reg [31:0] q_mult_7;
+    (* preserve *) reg [7:0]  q_shift_7;
+    (* preserve *) reg signed [31:0] q_rcl6_7;
     always @(posedge clk) begin
         q_bias_7  <= bias_store_7[rq_raddr + 9'd7];
         q_rcl6_7  <= rcl6_store_7[rq_raddr + 9'd7];
