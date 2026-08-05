@@ -520,9 +520,11 @@ module cnn_core_v2 #(
     (* preserve *) reg [15:0]       acc_clr_wa;       // acc 清零地址（S_ACC_CLR 沿前 = 上拍寄存的推进后地址，断 rq_row→porta 组合链 P1）
 
     // lb 写（流水打拍）：S_LOAD 收拍寄存地址/数据、下一拍写入；退出 S_LOAD 后
-    // S_ACC_CLR 首拍补写最后位置（后续拍重复写同位置，数据相同无害）
+    // 由下一状态补写最后位置（S_ACC_CLR：首轮；S_WEIGHT：多 i_group 重装轮
+    // load_first=0 直接进 S_WEIGHT 无 S_ACC_CLR，最后 1 字必须在此补写；
+    // 后续拍重复写同位置，数据相同无害）
     always @(posedge clk) begin
-        if (state == S_LOAD || state == S_ACC_CLR)
+        if (state == S_LOAD || state == S_ACC_CLR || state == S_WEIGHT)
             lb[lb_wa_q] <= lb_wd_q;
     end
 
