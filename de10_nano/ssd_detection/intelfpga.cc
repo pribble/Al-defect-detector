@@ -189,26 +189,35 @@ int fpga_init() {
   return 0;
 }
 
-// FPGA 调试开关：编译期默认开（FPGA_DEBUG 宏，-DFPGA_DEBUG=0 可关）；
-// 运行时可用环境变量 FPGA_DEBUG 覆盖（>0 开、=0 关）
-#ifndef FPGA_DEBUG
-#define FPGA_DEBUG 1
-#endif
-static int fpga_debug = FPGA_DEBUG;
+// FPGA 调试开关：FPGA_DEBUG=1 时每层完成后打印观测寄存器快照
+static int fpga_debug = -1;
 
 // 层完成快照（观测寄存器 0x54-0x8C，复现核专用；位布局见 cnn_top_core.v）：
 //   0x54 = {core_state[4:0], o_group[10:0], i_group[10:0], cmd_head, cmd_cnt}
 //   0x58 = {rq_row, rq_col}  0x5C = {mac_row, mac_col}
 //   0x60 = {mac_t, load_row, load_col, wf_cnt}
+//   0x68-0x88 = 快照（core_done 自动锁存 lane0）：acc / v_act_l / v_rq64_l /
+//               v_round_l / v_shifted / lb_q / w_q[0][0..3] / v_biased_l / v_rnd_delta
 //   0x8C = {done_cnt, o_evt_cnt}
 static void dbg_print_layer_snapshot(uint32_t *ip, const char *name) {
   uint32_t r54 = foo_get(ip, 0x54);
   uint32_t r58 = foo_get(ip, 0x58);
   uint32_t r5c = foo_get(ip, 0x5C);
   uint32_t r60 = foo_get(ip, 0x60);
+  uint32_t r68 = foo_get(ip, 0x90);   // acc
+  uint32_t r6c = foo_get(ip, 0x94);   // v_act_l[0]
+  uint32_t r70 = foo_get(ip, 0x98);   // v_rq64_l[0] 低 32
+  uint32_t r74 = foo_get(ip, 0x9C);   // v_round_l[0] 低 32
+  uint32_t r78 = foo_get(ip, 0xA4);   // v_shifted[0] 低 32
+  uint32_t r7c = foo_get(ip, 0xA8);   // lb_q 低 32
+  uint32_t r80 = foo_get(ip, 0xAC);   // w_q[0][0..3]
+  uint32_t r84 = foo_get(ip, 0xB0);   // v_biased_l[0]
+  uint32_t r88 = foo_get(ip, 0xB4);   // v_rnd_delta[0] 低 32
   uint32_t r8c = foo_get(ip, 0xB8);   // {done_cnt, o_evt_cnt}
   printf("[DBG] %s: core_state=%d og=%d ig=%d cmd_h=%d cmd_c=%d"
          " rq=%d,%d mac=%d,%d t=%d lr=%d,%d wf=%d"
+         " | acc=%08x vact=%08x vrq=%08x vrnd=%08x vshf=%08x"
+         " | lb=%08x wq=%02x%02x%02x%02x vbias=%08x vdelta=%08x"
          " | done=%d oevt=%d\n",
          name ? name : "?",
          (r54 >> 27) & 0x1F, (r54 >> 16) & 0x7FF, (r54 >> 5) & 0x7FF,
@@ -216,6 +225,9 @@ static void dbg_print_layer_snapshot(uint32_t *ip, const char *name) {
          (r58 >> 16) & 0xFFFF, r58 & 0xFFFF,
          (r5c >> 16) & 0xFFFF, r5c & 0xFFFF,
          (r60 >> 28) & 0xF, (r60 >> 18) & 0x3FF, (r60 >> 8) & 0x3FF, r60 & 0xFF,
+         r68, r6c, r70, r74, r78,
+         r7c, (r80 >> 24) & 0xFF, (r80 >> 16) & 0xFF, (r80 >> 8) & 0xFF,
+         r80 & 0xFF, r84, r88,
          (r8c >> 16) & 0xFFFF, r8c & 0xFFFF);
 }
 
@@ -577,12 +589,9 @@ struct device_weight_config dw_conv2d_weight_reorganize(
 }
 
 int intelfpga_subgraph(struct DeviceGraphNode *node) {
-  // 日志即时输出（无缓冲），避免管道/重定向下 [DBG] 滞留不显示
-  setvbuf(stdout, nullptr, _IONBF, 0);
   fpga_init();
-  // 环境变量存在时覆盖编译期默认（部署环境不便设变量时编译期已默认开）
-  if (getenv("FPGA_DEBUG"))
-    fpga_debug = atoi(getenv("FPGA_DEBUG"));
+  if (fpga_debug < 0)
+    fpga_debug = getenv("FPGA_DEBUG") ? atoi(getenv("FPGA_DEBUG")) : 0;
   struct timespec hw_start, hw_end;
   long long input_organize_time = 0, output_organize_time = 0;
   long long fpga_time = 0;
