@@ -1032,6 +1032,96 @@
   <parameter name="USE_RESPONSE" value="0" />
  </module>
  <module
+   name="pipe_load"
+   kind="altera_avalon_mm_bridge"
+   version="23.1"
+   enabled="1">
+  <parameter name="ADDRESS_UNITS" value="SYMBOLS" />
+  <parameter name="ADDRESS_WIDTH" value="32" />
+  <parameter name="DATA_WIDTH" value="64" />
+  <parameter name="LINEWRAPBURSTS" value="0" />
+  <parameter name="MAX_BURST_SIZE" value="16" />
+  <parameter name="MAX_PENDING_RESPONSES" value="4" />
+  <parameter name="PIPELINE_COMMAND" value="1" />
+  <parameter name="PIPELINE_RESPONSE" value="1" />
+  <parameter name="SYMBOL_WIDTH" value="8" />
+  <parameter name="SYSINFO_ADDR_WIDTH" value="32" />
+  <parameter name="USE_AUTO_ADDRESS_WIDTH" value="0" />
+  <parameter name="USE_RESPONSE" value="0" />
+ </module>
+ <module
+   name="pipe_output"
+   kind="altera_avalon_mm_bridge"
+   version="23.1"
+   enabled="1">
+  <parameter name="ADDRESS_UNITS" value="SYMBOLS" />
+  <parameter name="ADDRESS_WIDTH" value="32" />
+  <parameter name="DATA_WIDTH" value="64" />
+  <parameter name="LINEWRAPBURSTS" value="0" />
+  <parameter name="MAX_BURST_SIZE" value="16" />
+  <parameter name="MAX_PENDING_RESPONSES" value="4" />
+  <parameter name="PIPELINE_COMMAND" value="1" />
+  <parameter name="PIPELINE_RESPONSE" value="1" />
+  <parameter name="SYMBOL_WIDTH" value="8" />
+  <parameter name="SYSINFO_ADDR_WIDTH" value="32" />
+  <parameter name="USE_AUTO_ADDRESS_WIDTH" value="0" />
+  <parameter name="USE_RESPONSE" value="0" />
+ </module>
+ <module
+   name="pipe_param"
+   kind="altera_avalon_mm_bridge"
+   version="23.1"
+   enabled="1">
+  <parameter name="ADDRESS_UNITS" value="SYMBOLS" />
+  <parameter name="ADDRESS_WIDTH" value="32" />
+  <parameter name="DATA_WIDTH" value="32" />
+  <parameter name="LINEWRAPBURSTS" value="0" />
+  <parameter name="MAX_BURST_SIZE" value="16" />
+  <parameter name="MAX_PENDING_RESPONSES" value="4" />
+  <parameter name="PIPELINE_COMMAND" value="1" />
+  <parameter name="PIPELINE_RESPONSE" value="1" />
+  <parameter name="SYMBOL_WIDTH" value="8" />
+  <parameter name="SYSINFO_ADDR_WIDTH" value="32" />
+  <parameter name="USE_AUTO_ADDRESS_WIDTH" value="0" />
+  <parameter name="USE_RESPONSE" value="0" />
+ </module>
+ <module
+   name="pipe_scale"
+   kind="altera_avalon_mm_bridge"
+   version="23.1"
+   enabled="1">
+  <parameter name="ADDRESS_UNITS" value="SYMBOLS" />
+  <parameter name="ADDRESS_WIDTH" value="32" />
+  <parameter name="DATA_WIDTH" value="32" />
+  <parameter name="LINEWRAPBURSTS" value="0" />
+  <parameter name="MAX_BURST_SIZE" value="16" />
+  <parameter name="MAX_PENDING_RESPONSES" value="4" />
+  <parameter name="PIPELINE_COMMAND" value="1" />
+  <parameter name="PIPELINE_RESPONSE" value="1" />
+  <parameter name="SYMBOL_WIDTH" value="8" />
+  <parameter name="SYSINFO_ADDR_WIDTH" value="32" />
+  <parameter name="USE_AUTO_ADDRESS_WIDTH" value="0" />
+  <parameter name="USE_RESPONSE" value="0" />
+ </module>
+ <module
+   name="pipe_sdram"
+   kind="altera_avalon_mm_bridge"
+   version="23.1"
+   enabled="1">
+  <parameter name="ADDRESS_UNITS" value="SYMBOLS" />
+  <parameter name="ADDRESS_WIDTH" value="32" />
+  <parameter name="DATA_WIDTH" value="128" />
+  <parameter name="LINEWRAPBURSTS" value="0" />
+  <parameter name="MAX_BURST_SIZE" value="16" />
+  <parameter name="MAX_PENDING_RESPONSES" value="4" />
+  <parameter name="PIPELINE_COMMAND" value="1" />
+  <parameter name="PIPELINE_RESPONSE" value="1" />
+  <parameter name="SYMBOL_WIDTH" value="8" />
+  <parameter name="SYSINFO_ADDR_WIDTH" value="32" />
+  <parameter name="USE_AUTO_ADDRESS_WIDTH" value="0" />
+  <parameter name="USE_RESPONSE" value="0" />
+ </module>
+ <module
    name="sysid_qsys"
    kind="altera_avalon_sysid_qsys"
    version="23.1"
@@ -1051,7 +1141,7 @@
    kind="avalon"
    version="23.1"
    start="cnn_top_0.load_read_avalon"
-   end="mm_bridge_sdram0.s0">
+   end="pipe_load.s0">
   <parameter name="arbitrationPriority" value="1" />
   <parameter name="baseAddress" value="0x0000" />
   <parameter name="defaultConnection" value="false" />
@@ -1087,7 +1177,7 @@
    kind="avalon"
    version="23.1"
    start="cnn_top_0.output_read_avalon"
-   end="mm_bridge_sdram0.s0">
+   end="pipe_output.s0">
   <parameter name="arbitrationPriority" value="1" />
   <parameter name="baseAddress" value="0x0000" />
   <parameter name="defaultConnection" value="false" />
@@ -1096,7 +1186,7 @@
    kind="avalon"
    version="23.1"
    start="cnn_top_0.param_read_avalon"
-   end="mm_bridge_sdram0.s0">
+   end="pipe_param.s0">
   <parameter name="arbitrationPriority" value="1" />
   <parameter name="baseAddress" value="0x0000" />
   <parameter name="defaultConnection" value="false" />
@@ -1105,6 +1195,51 @@
    kind="avalon"
    version="23.1"
    start="cnn_top_0.scale_avm_avalon"
+   end="pipe_scale.s0">
+  <parameter name="arbitrationPriority" value="1" />
+  <parameter name="baseAddress" value="0x0000" />
+  <parameter name="defaultConnection" value="false" />
+ </connection>
+ <connection
+   kind="avalon"
+   version="23.1"
+   start="pipe_load.m0"
+   end="pipe_sdram.s0">
+  <parameter name="arbitrationPriority" value="1" />
+  <parameter name="baseAddress" value="0x0000" />
+  <parameter name="defaultConnection" value="false" />
+ </connection>
+ <connection
+   kind="avalon"
+   version="23.1"
+   start="pipe_output.m0"
+   end="pipe_sdram.s0">
+  <parameter name="arbitrationPriority" value="1" />
+  <parameter name="baseAddress" value="0x0000" />
+  <parameter name="defaultConnection" value="false" />
+ </connection>
+ <connection
+   kind="avalon"
+   version="23.1"
+   start="pipe_param.m0"
+   end="pipe_sdram.s0">
+  <parameter name="arbitrationPriority" value="1" />
+  <parameter name="baseAddress" value="0x0000" />
+  <parameter name="defaultConnection" value="false" />
+ </connection>
+ <connection
+   kind="avalon"
+   version="23.1"
+   start="pipe_scale.m0"
+   end="pipe_sdram.s0">
+  <parameter name="arbitrationPriority" value="1" />
+  <parameter name="baseAddress" value="0x0000" />
+  <parameter name="defaultConnection" value="false" />
+ </connection>
+ <connection
+   kind="avalon"
+   version="23.1"
+   start="pipe_sdram.m0"
    end="mm_bridge_sdram0.s0">
   <parameter name="arbitrationPriority" value="1" />
   <parameter name="baseAddress" value="0x0000" />
@@ -1166,6 +1301,16 @@
    version="23.1"
    start="clk_cnn.clk_reset"
    end="cnn_top_0.reset" />
+ <connection kind="clock" version="23.1" start="clk_cnn.clk" end="pipe_load.clk" />
+ <connection kind="clock" version="23.1" start="clk_cnn.clk" end="pipe_output.clk" />
+ <connection kind="clock" version="23.1" start="clk_cnn.clk" end="pipe_param.clk" />
+ <connection kind="clock" version="23.1" start="clk_cnn.clk" end="pipe_scale.clk" />
+ <connection kind="clock" version="23.1" start="clk_cnn.clk" end="pipe_sdram.clk" />
+ <connection kind="reset" version="23.1" start="clk_cnn.clk_reset" end="pipe_load.reset" />
+ <connection kind="reset" version="23.1" start="clk_cnn.clk_reset" end="pipe_output.reset" />
+ <connection kind="reset" version="23.1" start="clk_cnn.clk_reset" end="pipe_param.reset" />
+ <connection kind="reset" version="23.1" start="clk_cnn.clk_reset" end="pipe_scale.reset" />
+ <connection kind="reset" version="23.1" start="clk_cnn.clk_reset" end="pipe_sdram.reset" />
  <interconnectRequirement for="$system" name="qsys_mm.clockCrossingAdapter" value="HANDSHAKE" />
  <interconnectRequirement for="$system" name="qsys_mm.maxAdditionalLatency" value="1" />
 </system>
