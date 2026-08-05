@@ -265,6 +265,18 @@ static void dbg_print_layer_snapshot(uint32_t *ip, const char *name) {
           ((uint32_t *)udata)[9], ((uint32_t *)udata)[10], ((uint32_t *)udata)[11],
           ((uint32_t *)udata)[12], ((uint32_t *)udata)[13], ((uint32_t *)udata)[14],
           ((uint32_t *)udata)[15]);
+  // RTL 读回快照（0x180 起 param_buf 原始、0x1D0 scale、0x1E0 输入首字）
+  uint32_t pb[20];
+  for (int i = 0; i < 20; i++) pb[i] = foo_get(ip, 0x180 + i * 4);
+  uint32_t sm0 = foo_get(ip, 0x1D0), sm1 = foo_get(ip, 0x1D4);
+  uint32_t sm2 = foo_get(ip, 0x1D8), sm3 = foo_get(ip, 0x1DC);
+  uint32_t in0 = foo_get(ip, 0x1E0), in1 = foo_get(ip, 0x1E4);
+  fprintf(stderr,
+          "  | RTL param_buf: %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n",
+          pb[0], pb[1], pb[2], pb[3], pb[4], pb[5], pb[6], pb[7], pb[8], pb[9],
+          pb[10], pb[11], pb[12], pb[13], pb[14], pb[15], pb[16], pb[17], pb[18], pb[19]);
+  fprintf(stderr, "  | RTL scale: mult=%d bias=%d shift=%d rcl6=%d | RTL in0: %08x %08x\n",
+          sm0, sm1, sm2, sm3, in0, in1);
 }
 
 int start_fpga(uint32_t *ip, uint32_t start_reg_addr) {
