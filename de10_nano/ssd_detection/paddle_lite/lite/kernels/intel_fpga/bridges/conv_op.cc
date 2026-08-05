@@ -139,10 +139,20 @@ int ConvConverter(void *ctx, OpLite *op, KernelBase *kernel) {
             const double ws = scale ? (double)scale[i] : 1.0;
             const double b  = ba    ? (double)ba[i]    : 0.0;
             const double f  = ws * is_ / os_;
-            device_param->scale[i] = rnd(f * (double)(1 << 30));
-            device_param->scale[o_dims[1] + i] = rnd(b / (ws * is_));
+            const double denom = ws * is_;
+            if (denom < 1e-12) {
+                // ws 极小（量化权重≈0 的通道）：b/(ws*is) 与 6*os/(ws*is) 溢出 int32
+                // （实测 INT_MIN/INT_MAX）。近似黑盒 float 行为——该通道输出≈0
+                // （bias 主导后 relu/relu6 钳 0）：mult/bias 保底 0、rcl6 保底 INT_MAX。
+                device_param->scale[i] = 0;
+                device_param->scale[o_dims[1] + i] = 0;
+                device_param->scale[3 * o_dims[1] + i] = INT_MAX;
+            } else {
+                device_param->scale[i] = rnd(f * (double)(1 << 30));
+                device_param->scale[o_dims[1] + i] = rnd(b / denom);
+                device_param->scale[3 * o_dims[1] + i] = rnd(6.0 * os_ / denom);
+            }
             device_param->scale[2 * o_dims[1] + i] = 30;
-            device_param->scale[3 * o_dims[1] + i] = rnd(6.0 * os_ / (ws * is_));
             // 上板调试：打印 scale 计算过程（前 4 通道），确认第一层下溢/溢出
             if (i < 4)
                 fprintf(stderr,
