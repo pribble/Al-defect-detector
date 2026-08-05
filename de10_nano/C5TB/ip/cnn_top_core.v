@@ -155,7 +155,8 @@ module cnn_top_core (
                         if (cnt == 8'd3) begin
                             state <= S_RD_IN;
                             cnt <= 0;
-                            rd_addr <= reg_ddrin;
+                            // 本层输入 = 输入区基址 + input_offset×8（param_buf[0] 为字偏移）
+                            rd_addr <= reg_ddrin + param_buf[0] * 8;
                             lr_busy <= 1;
                         end else begin
                             cnt <= cnt + 1;
