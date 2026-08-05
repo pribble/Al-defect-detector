@@ -172,10 +172,10 @@ module cnn_core_v2 #(
     wire [9:0] rq_raddr = {o_group[6:0], 3'd0};   // 组合地址，直接驱动读端口（链短）
     // 注意：不可打拍（rq_raddr_r）——S_REQ_ADDR 拍采新组地址、S_REQ_MUL 拍
     // 就要用 q_bias；打拍 + M10K 同步读 = 2 拍延迟，bias/rcl6 错 1 组
-    (* ramstyle = "M10K, no_rw_check" *) reg signed [31:0] bias_store_0 [0:G_MAX_C-1];
-    (* ramstyle = "M10K, no_rw_check" *) reg [31:0] rq_m_store_0 [0:G_MAX_C-1];
-    (* ramstyle = "M10K, no_rw_check" *) reg [7:0]  rq_r_store_0 [0:G_MAX_C-1];
-    (* ramstyle = "M10K, no_rw_check" *) reg signed [31:0] rcl6_store_0 [0:G_MAX_C-1];
+    (* ramstyle = "M10K" *) reg signed [31:0] bias_store_0 [0:G_MAX_C-1];
+    (* ramstyle = "M10K" *) reg [31:0] rq_m_store_0 [0:G_MAX_C-1];
+    (* ramstyle = "M10K" *) reg [7:0]  rq_r_store_0 [0:G_MAX_C-1];
+    (* ramstyle = "M10K" *) reg signed [31:0] rcl6_store_0 [0:G_MAX_C-1];
     always @(posedge clk) begin
         if (cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C)
             bias_store_0[cfg_addr[9:0]] <= cfg_wdata;
@@ -192,10 +192,10 @@ module cnn_core_v2 #(
         if (cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C)
             rcl6_store_0[cfg_addr[9:0]] <= cfg_wdata;
     end
-    (* preserve *) reg signed [31:0] q_bias_0;
-    (* preserve *) reg [31:0] q_mult_0;
-    (* preserve *) reg [7:0]  q_shift_0;
-    (* preserve *) reg signed [31:0] q_rcl6_0;
+    reg signed [31:0] q_bias_0;
+    reg [31:0] q_mult_0;
+    reg [7:0]  q_shift_0;
+    reg signed [31:0] q_rcl6_0;
     always @(posedge clk) begin
         q_bias_0  <= bias_store_0[rq_raddr];
         q_rcl6_0  <= rcl6_store_0[rq_raddr];
@@ -206,10 +206,10 @@ module cnn_core_v2 #(
     assign rq_mult_q[0]  = q_mult_0;
     assign rq_shift_q[0] = q_shift_0;
     assign rq_rcl6_q[0]  = q_rcl6_0;
-    (* ramstyle = "M10K, no_rw_check" *) reg signed [31:0] bias_store_1 [0:G_MAX_C-1];
-    (* ramstyle = "M10K, no_rw_check" *) reg [31:0] rq_m_store_1 [0:G_MAX_C-1];
-    (* ramstyle = "M10K, no_rw_check" *) reg [7:0]  rq_r_store_1 [0:G_MAX_C-1];
-    (* ramstyle = "M10K, no_rw_check" *) reg signed [31:0] rcl6_store_1 [0:G_MAX_C-1];
+    (* ramstyle = "M10K" *) reg signed [31:0] bias_store_1 [0:G_MAX_C-1];
+    (* ramstyle = "M10K" *) reg [31:0] rq_m_store_1 [0:G_MAX_C-1];
+    (* ramstyle = "M10K" *) reg [7:0]  rq_r_store_1 [0:G_MAX_C-1];
+    (* ramstyle = "M10K" *) reg signed [31:0] rcl6_store_1 [0:G_MAX_C-1];
     always @(posedge clk) begin
         if (cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C)
             bias_store_1[cfg_addr[9:0]] <= cfg_wdata;
@@ -226,10 +226,10 @@ module cnn_core_v2 #(
         if (cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C)
             rcl6_store_1[cfg_addr[9:0]] <= cfg_wdata;
     end
-    (* preserve *) reg signed [31:0] q_bias_1;
-    (* preserve *) reg [31:0] q_mult_1;
-    (* preserve *) reg [7:0]  q_shift_1;
-    (* preserve *) reg signed [31:0] q_rcl6_1;
+    reg signed [31:0] q_bias_1;
+    reg [31:0] q_mult_1;
+    reg [7:0]  q_shift_1;
+    reg signed [31:0] q_rcl6_1;
     always @(posedge clk) begin
         q_bias_1  <= bias_store_1[rq_raddr + 9'd1];
         q_rcl6_1  <= rcl6_store_1[rq_raddr + 9'd1];
@@ -240,10 +240,10 @@ module cnn_core_v2 #(
     assign rq_mult_q[1]  = q_mult_1;
     assign rq_shift_q[1] = q_shift_1;
     assign rq_rcl6_q[1]  = q_rcl6_1;
-    (* ramstyle = "M10K, no_rw_check" *) reg signed [31:0] bias_store_2 [0:G_MAX_C-1];
-    (* ramstyle = "M10K, no_rw_check" *) reg [31:0] rq_m_store_2 [0:G_MAX_C-1];
-    (* ramstyle = "M10K, no_rw_check" *) reg [7:0]  rq_r_store_2 [0:G_MAX_C-1];
-    (* ramstyle = "M10K, no_rw_check" *) reg signed [31:0] rcl6_store_2 [0:G_MAX_C-1];
+    (* ramstyle = "M10K" *) reg signed [31:0] bias_store_2 [0:G_MAX_C-1];
+    (* ramstyle = "M10K" *) reg [31:0] rq_m_store_2 [0:G_MAX_C-1];
+    (* ramstyle = "M10K" *) reg [7:0]  rq_r_store_2 [0:G_MAX_C-1];
+    (* ramstyle = "M10K" *) reg signed [31:0] rcl6_store_2 [0:G_MAX_C-1];
     always @(posedge clk) begin
         if (cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C)
             bias_store_2[cfg_addr[9:0]] <= cfg_wdata;
@@ -260,10 +260,10 @@ module cnn_core_v2 #(
         if (cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C)
             rcl6_store_2[cfg_addr[9:0]] <= cfg_wdata;
     end
-    (* preserve *) reg signed [31:0] q_bias_2;
-    (* preserve *) reg [31:0] q_mult_2;
-    (* preserve *) reg [7:0]  q_shift_2;
-    (* preserve *) reg signed [31:0] q_rcl6_2;
+    reg signed [31:0] q_bias_2;
+    reg [31:0] q_mult_2;
+    reg [7:0]  q_shift_2;
+    reg signed [31:0] q_rcl6_2;
     always @(posedge clk) begin
         q_bias_2  <= bias_store_2[rq_raddr + 9'd2];
         q_rcl6_2  <= rcl6_store_2[rq_raddr + 9'd2];
@@ -274,10 +274,10 @@ module cnn_core_v2 #(
     assign rq_mult_q[2]  = q_mult_2;
     assign rq_shift_q[2] = q_shift_2;
     assign rq_rcl6_q[2]  = q_rcl6_2;
-    (* ramstyle = "M10K, no_rw_check" *) reg signed [31:0] bias_store_3 [0:G_MAX_C-1];
-    (* ramstyle = "M10K, no_rw_check" *) reg [31:0] rq_m_store_3 [0:G_MAX_C-1];
-    (* ramstyle = "M10K, no_rw_check" *) reg [7:0]  rq_r_store_3 [0:G_MAX_C-1];
-    (* ramstyle = "M10K, no_rw_check" *) reg signed [31:0] rcl6_store_3 [0:G_MAX_C-1];
+    (* ramstyle = "M10K" *) reg signed [31:0] bias_store_3 [0:G_MAX_C-1];
+    (* ramstyle = "M10K" *) reg [31:0] rq_m_store_3 [0:G_MAX_C-1];
+    (* ramstyle = "M10K" *) reg [7:0]  rq_r_store_3 [0:G_MAX_C-1];
+    (* ramstyle = "M10K" *) reg signed [31:0] rcl6_store_3 [0:G_MAX_C-1];
     always @(posedge clk) begin
         if (cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C)
             bias_store_3[cfg_addr[9:0]] <= cfg_wdata;
@@ -294,10 +294,10 @@ module cnn_core_v2 #(
         if (cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C)
             rcl6_store_3[cfg_addr[9:0]] <= cfg_wdata;
     end
-    (* preserve *) reg signed [31:0] q_bias_3;
-    (* preserve *) reg [31:0] q_mult_3;
-    (* preserve *) reg [7:0]  q_shift_3;
-    (* preserve *) reg signed [31:0] q_rcl6_3;
+    reg signed [31:0] q_bias_3;
+    reg [31:0] q_mult_3;
+    reg [7:0]  q_shift_3;
+    reg signed [31:0] q_rcl6_3;
     always @(posedge clk) begin
         q_bias_3  <= bias_store_3[rq_raddr + 9'd3];
         q_rcl6_3  <= rcl6_store_3[rq_raddr + 9'd3];
@@ -308,10 +308,10 @@ module cnn_core_v2 #(
     assign rq_mult_q[3]  = q_mult_3;
     assign rq_shift_q[3] = q_shift_3;
     assign rq_rcl6_q[3]  = q_rcl6_3;
-    (* ramstyle = "M10K, no_rw_check" *) reg signed [31:0] bias_store_4 [0:G_MAX_C-1];
-    (* ramstyle = "M10K, no_rw_check" *) reg [31:0] rq_m_store_4 [0:G_MAX_C-1];
-    (* ramstyle = "M10K, no_rw_check" *) reg [7:0]  rq_r_store_4 [0:G_MAX_C-1];
-    (* ramstyle = "M10K, no_rw_check" *) reg signed [31:0] rcl6_store_4 [0:G_MAX_C-1];
+    (* ramstyle = "M10K" *) reg signed [31:0] bias_store_4 [0:G_MAX_C-1];
+    (* ramstyle = "M10K" *) reg [31:0] rq_m_store_4 [0:G_MAX_C-1];
+    (* ramstyle = "M10K" *) reg [7:0]  rq_r_store_4 [0:G_MAX_C-1];
+    (* ramstyle = "M10K" *) reg signed [31:0] rcl6_store_4 [0:G_MAX_C-1];
     always @(posedge clk) begin
         if (cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C)
             bias_store_4[cfg_addr[9:0]] <= cfg_wdata;
@@ -328,10 +328,10 @@ module cnn_core_v2 #(
         if (cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C)
             rcl6_store_4[cfg_addr[9:0]] <= cfg_wdata;
     end
-    (* preserve *) reg signed [31:0] q_bias_4;
-    (* preserve *) reg [31:0] q_mult_4;
-    (* preserve *) reg [7:0]  q_shift_4;
-    (* preserve *) reg signed [31:0] q_rcl6_4;
+    reg signed [31:0] q_bias_4;
+    reg [31:0] q_mult_4;
+    reg [7:0]  q_shift_4;
+    reg signed [31:0] q_rcl6_4;
     always @(posedge clk) begin
         q_bias_4  <= bias_store_4[rq_raddr + 9'd4];
         q_rcl6_4  <= rcl6_store_4[rq_raddr + 9'd4];
@@ -342,10 +342,10 @@ module cnn_core_v2 #(
     assign rq_mult_q[4]  = q_mult_4;
     assign rq_shift_q[4] = q_shift_4;
     assign rq_rcl6_q[4]  = q_rcl6_4;
-    (* ramstyle = "M10K, no_rw_check" *) reg signed [31:0] bias_store_5 [0:G_MAX_C-1];
-    (* ramstyle = "M10K, no_rw_check" *) reg [31:0] rq_m_store_5 [0:G_MAX_C-1];
-    (* ramstyle = "M10K, no_rw_check" *) reg [7:0]  rq_r_store_5 [0:G_MAX_C-1];
-    (* ramstyle = "M10K, no_rw_check" *) reg signed [31:0] rcl6_store_5 [0:G_MAX_C-1];
+    (* ramstyle = "M10K" *) reg signed [31:0] bias_store_5 [0:G_MAX_C-1];
+    (* ramstyle = "M10K" *) reg [31:0] rq_m_store_5 [0:G_MAX_C-1];
+    (* ramstyle = "M10K" *) reg [7:0]  rq_r_store_5 [0:G_MAX_C-1];
+    (* ramstyle = "M10K" *) reg signed [31:0] rcl6_store_5 [0:G_MAX_C-1];
     always @(posedge clk) begin
         if (cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C)
             bias_store_5[cfg_addr[9:0]] <= cfg_wdata;
@@ -362,10 +362,10 @@ module cnn_core_v2 #(
         if (cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C)
             rcl6_store_5[cfg_addr[9:0]] <= cfg_wdata;
     end
-    (* preserve *) reg signed [31:0] q_bias_5;
-    (* preserve *) reg [31:0] q_mult_5;
-    (* preserve *) reg [7:0]  q_shift_5;
-    (* preserve *) reg signed [31:0] q_rcl6_5;
+    reg signed [31:0] q_bias_5;
+    reg [31:0] q_mult_5;
+    reg [7:0]  q_shift_5;
+    reg signed [31:0] q_rcl6_5;
     always @(posedge clk) begin
         q_bias_5  <= bias_store_5[rq_raddr + 9'd5];
         q_rcl6_5  <= rcl6_store_5[rq_raddr + 9'd5];
@@ -376,10 +376,10 @@ module cnn_core_v2 #(
     assign rq_mult_q[5]  = q_mult_5;
     assign rq_shift_q[5] = q_shift_5;
     assign rq_rcl6_q[5]  = q_rcl6_5;
-    (* ramstyle = "M10K, no_rw_check" *) reg signed [31:0] bias_store_6 [0:G_MAX_C-1];
-    (* ramstyle = "M10K, no_rw_check" *) reg [31:0] rq_m_store_6 [0:G_MAX_C-1];
-    (* ramstyle = "M10K, no_rw_check" *) reg [7:0]  rq_r_store_6 [0:G_MAX_C-1];
-    (* ramstyle = "M10K, no_rw_check" *) reg signed [31:0] rcl6_store_6 [0:G_MAX_C-1];
+    (* ramstyle = "M10K" *) reg signed [31:0] bias_store_6 [0:G_MAX_C-1];
+    (* ramstyle = "M10K" *) reg [31:0] rq_m_store_6 [0:G_MAX_C-1];
+    (* ramstyle = "M10K" *) reg [7:0]  rq_r_store_6 [0:G_MAX_C-1];
+    (* ramstyle = "M10K" *) reg signed [31:0] rcl6_store_6 [0:G_MAX_C-1];
     always @(posedge clk) begin
         if (cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C)
             bias_store_6[cfg_addr[9:0]] <= cfg_wdata;
@@ -396,10 +396,10 @@ module cnn_core_v2 #(
         if (cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C)
             rcl6_store_6[cfg_addr[9:0]] <= cfg_wdata;
     end
-    (* preserve *) reg signed [31:0] q_bias_6;
-    (* preserve *) reg [31:0] q_mult_6;
-    (* preserve *) reg [7:0]  q_shift_6;
-    (* preserve *) reg signed [31:0] q_rcl6_6;
+    reg signed [31:0] q_bias_6;
+    reg [31:0] q_mult_6;
+    reg [7:0]  q_shift_6;
+    reg signed [31:0] q_rcl6_6;
     always @(posedge clk) begin
         q_bias_6  <= bias_store_6[rq_raddr + 9'd6];
         q_rcl6_6  <= rcl6_store_6[rq_raddr + 9'd6];
@@ -410,10 +410,10 @@ module cnn_core_v2 #(
     assign rq_mult_q[6]  = q_mult_6;
     assign rq_shift_q[6] = q_shift_6;
     assign rq_rcl6_q[6]  = q_rcl6_6;
-    (* ramstyle = "M10K, no_rw_check" *) reg signed [31:0] bias_store_7 [0:G_MAX_C-1];
-    (* ramstyle = "M10K, no_rw_check" *) reg [31:0] rq_m_store_7 [0:G_MAX_C-1];
-    (* ramstyle = "M10K, no_rw_check" *) reg [7:0]  rq_r_store_7 [0:G_MAX_C-1];
-    (* ramstyle = "M10K, no_rw_check" *) reg signed [31:0] rcl6_store_7 [0:G_MAX_C-1];
+    (* ramstyle = "M10K" *) reg signed [31:0] bias_store_7 [0:G_MAX_C-1];
+    (* ramstyle = "M10K" *) reg [31:0] rq_m_store_7 [0:G_MAX_C-1];
+    (* ramstyle = "M10K" *) reg [7:0]  rq_r_store_7 [0:G_MAX_C-1];
+    (* ramstyle = "M10K" *) reg signed [31:0] rcl6_store_7 [0:G_MAX_C-1];
     always @(posedge clk) begin
         if (cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C)
             bias_store_7[cfg_addr[9:0]] <= cfg_wdata;
@@ -430,10 +430,10 @@ module cnn_core_v2 #(
         if (cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C)
             rcl6_store_7[cfg_addr[9:0]] <= cfg_wdata;
     end
-    (* preserve *) reg signed [31:0] q_bias_7;
-    (* preserve *) reg [31:0] q_mult_7;
-    (* preserve *) reg [7:0]  q_shift_7;
-    (* preserve *) reg signed [31:0] q_rcl6_7;
+    reg signed [31:0] q_bias_7;
+    reg [31:0] q_mult_7;
+    reg [7:0]  q_shift_7;
+    reg signed [31:0] q_rcl6_7;
     always @(posedge clk) begin
         q_bias_7  <= bias_store_7[rq_raddr + 9'd7];
         q_rcl6_7  <= rcl6_store_7[rq_raddr + 9'd7];
