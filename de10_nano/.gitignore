@@ -12,7 +12,7 @@ Thumbs.db
 
 # Logs
 *.log
-log/
+/log/   # 仅忽略仓库根日志目录（`log/` 会误伤 paddle_lite/lite/utils/log/ 源码）
 
 # Deployment timestamp
 ssd_detection/deploy/.last_time
