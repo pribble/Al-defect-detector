@@ -248,7 +248,7 @@ module cnn_top_core (
     reg [31:0] in_row_w8_r;             // p_in_w * 8
     reg signed [15:0] r0_in_r;          // max(rb_base_r, 0)，≤in_h
     reg signed [15:0] r1_in_r;          // min(rb_base_r + in_row_tile, in_h)
-    reg [7:0]  load_rows_r;             // max(r1_in_r - r0_in_r, 0)，≤in_row_tile
+    reg [15:0] load_rows_r;             // max(r1_in_r - r0_in_r, 0)，≤in_row_tile
     reg [31:0] in_rb_base_r;            // r0_in_r * p_in_w * 8（输入行块内偏移）
     reg [31:0] in_seg_words_r;          // load_rows_r * p_in_w（每输入块段拍数）
     reg [31:0] in_seg_tail_r;           // (in_seg_words_r - 1) * 8（段尾地址回退）
@@ -648,7 +648,7 @@ module cnn_top_core (
                         out_row_prod_r <= rb * p_out_row_tile;
                     end else if (rd_cnt == 1) begin
                         rd_cnt <= 2;
-                        load_rows_r  <= (r1_in_r > r0_in_r) ? (r1_in_r - r0_in_r) : 32'sd0;
+                        load_rows_r  <= (r1_in_r > r0_in_r) ? (r1_in_r - r0_in_r) : 16'sd0;
                         in_rb_base_r <= r0_in_r * in_row_w8_r;
                     end else if (rd_cnt == 2) begin
                         rd_cnt <= 3;
@@ -675,7 +675,7 @@ module cnn_top_core (
                     core_cfg_we <= 1'b1;
                     core_cfg_sel <= 3'd0;
                     core_cfg_addr <= 20'd11;
-                    core_cfg_wdata <= rb_out_rows_r[31:0];
+                    core_cfg_wdata <= {16'd0, rb_out_rows_r};   // cfg 11：本行块实际输出行数
                     state <= S_START;
                 end
 
