@@ -1940,10 +1940,20 @@ module cnn_core_v2 #(
         end
     end
 
-    // 乘加拍级 3（S_REQ_MULC）：乘后 bias 加法（64-bit，单独一拍）：
-    //   v_rq64_l += bias_mul<<8（bias_mul 为 q22 缩放，左移 8 对齐 2^30 域）
+    // 乘法级 3（S_REQ_MUL4）→ 乘后 bias（S_REQ_MULC）→ act mux（S_REQ_ACT）：
+    // v_rq64_l 单一 always 驱动（Quartus 10028 多驱动——verilator 容忍多块赋值、
+    // Quartus 报 constant driver 冲突；合并后每 state 分支仍只含单拍操作）
     always @(posedge clk) begin
-        if (state == S_REQ_MULC) begin
+        if (state == S_REQ_MUL4) begin
+            for (ln = 0; ln < 8; ln = ln + 1) begin
+                v_out_ch = o_group * 8 + ln;
+                if (v_out_ch >= out_c_reg)
+                    v_rq64_l[ln] <= 64'sd0;
+                else
+                    v_rq64_l[ln] <= v_sum_lo[ln] + v_sum_hi[ln];
+            end
+        end else if (state == S_REQ_MULC) begin
+            // 乘后 bias 加法：v_rq64_l += bias_mul<<8（q22 左移 8 对齐 q30 域）
             for (ln = 0; ln < 8; ln = ln + 1) begin
                 v_out_ch = o_group * 8 + ln;
                 if (v_out_ch >= out_c_reg)
@@ -1951,6 +1961,21 @@ module cnn_core_v2 #(
                 else
                     v_rq64_l[ln] <= v_rq64_l[ln] +
                                     {{32{rq_bias_m[ln][31]}}, rq_bias_m[ln], 8'd0};
+            end
+        end else if (state == S_REQ_ACT) begin
+            // relu/rcl6 mux（乘后域，64-bit）
+            for (ln = 0; ln < 8; ln = ln + 1) begin
+                v_out_ch = o_group * 8 + ln;
+                if (v_out_ch >= out_c_reg) begin
+                    v_rq64_l[ln] <= 64'sd0;
+                end else if (act_reg == 2'd1) begin
+                    v_rq64_l[ln] <= v_rq64_l[ln][63] ? 64'sd0 : v_rq64_l[ln];
+                end else if (act_reg == 2'd2) begin
+                    if (v_rq64_l[ln][63])
+                        v_rq64_l[ln] <= 64'sd0;
+                    else if (v_rcl6_cmp_q[ln])
+                        v_rq64_l[ln] <= {{32{v_rcl6_l[ln][31]}}, v_rcl6_l[ln], 8'd0};
+                end
             end
         end
     end
@@ -1969,24 +1994,8 @@ module cnn_core_v2 #(
         end
     end
 
-    // 乘加拍级 3c（S_REQ_ACT）：relu/rcl6 mux → v_rq64_l（乘后域，64-bit mux 单独一拍）
-    always @(posedge clk) begin
-        if (state == S_REQ_ACT) begin
-            for (ln = 0; ln < 8; ln = ln + 1) begin
-                v_out_ch = o_group * 8 + ln;
-                if (v_out_ch >= out_c_reg) begin
-                    v_rq64_l[ln] <= 64'sd0;
-                end else if (act_reg == 2'd1) begin
-                    v_rq64_l[ln] <= v_rq64_l[ln][63] ? 64'sd0 : v_rq64_l[ln];
-                end else if (act_reg == 2'd2) begin
-                    if (v_rq64_l[ln][63])
-                        v_rq64_l[ln] <= 64'sd0;
-                    else if (v_rcl6_cmp_q[ln])
-                        v_rq64_l[ln] <= {{32{v_rcl6_l[ln][31]}}, v_rcl6_l[ln], 8'd0};
-                end
-            end
-        end
-    end
+    // 乘加拍级 3c（S_REQ_ACT）的 relu/rcl6 mux 已并入乘法级 3 的单一 always
+    //（v_rq64_l 单驱动，Quartus 10028）
 
     // 乘法级 1（S_REQ_MUL2）：v_act_l × rq_mult_q 拆 4 个 16×16 部分积（DSP 18×18，~4ns）；
     // 同时把 RAM 读出的 shift 值寄存为 v_shift_l——断开 M10K q 输出到输出拍组合链的长路径
@@ -2030,18 +2039,9 @@ module cnn_core_v2 #(
         end
     end
 
-    // 乘法级 3（S_REQ_MUL4）：两组中间和相加 → v_rq64_l（单个 64-bit 加法，~3ns）
-    always @(posedge clk) begin
-        if (state == S_REQ_MUL4) begin
-            for (ln = 0; ln < 8; ln = ln + 1) begin
-                v_out_ch = o_group * 8 + ln;
-                if (v_out_ch >= out_c_reg)
-                    v_rq64_l[ln] <= 64'sd0;
-                else
-                    v_rq64_l[ln] <= v_sum_lo[ln] + v_sum_hi[ln];
-            end
-        end
-    end
+    //（v_rq64_l 的赋值已并入乘法级 3 的单一 always——见上）
+    // 乘加拍级 3（S_REQ_MUL4 分支）：两组中间和相加 → v_rq64_l（单个 64-bit 加法，~3ns）
+    // 注意：MUL4/MULC/ACT 三个 state 分支共用此 always（v_rq64_l 单驱动）
 
     // round 拍级 1（S_REQ_OUT）：round 桶形移位单独一拍（1<<(shift-1)，~5ns）
     always @(posedge clk) begin
