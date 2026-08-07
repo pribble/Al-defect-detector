@@ -11,11 +11,13 @@ module tb_cnn_top;
 
     localparam MEM_WORDS = 1 << 20;   // 8MB
     // 基址间距按最大层需求（in 最大 38×38×2cb×8B≈0x5A40；w≈0x0D80；out≈0x8760）
+    // DDR 段布局（2026-08 扩大：随机层 in_h 到 75 → in_bytes 最大 16×75×75=90000B，
+    // 原 DDRIN 8KB 段溢出污染 DDRW 权重段——layer_02 FAIL 根因）
     localparam PARAM_BASE  = 32'h000000;
     localparam SCALE_BASE  = 32'h001000;
-    localparam DDRIN_BASE  = 32'h002000;
-    localparam DDRW_BASE   = 32'h010000;
-    localparam DDROUT_BASE = 32'h020000;
+    localparam DDRIN_BASE  = 32'h020000;   // 128KB（≥ in_bytes 最大 90000B）
+    localparam DDRW_BASE   = 32'h040000;   // 128KB
+    localparam DDROUT_BASE = 32'h080000;   // 256KB（out 最大 24×75×75=135000B）
 
     reg clk = 0;
     always #5 clk = ~clk;

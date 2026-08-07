@@ -32,7 +32,7 @@ def gen_layer(idx, rng, out_dir):
     k, s, p = 3, rng.choice([1, 2]), 1
     act = rng.choice([0, 1, 2])
     while True:
-        in_h = rng.choice([8, 10, 12, 16, 38])
+        in_h = rng.choice([8, 10, 12, 16, 38, 45, 55, 75])   # 含非 tile 整数倍（覆盖 S_WR_TILE 最后行块裁剪）
         in_w = in_h
         out_h = (in_h + 2 * p - k) // s + 1
         out_w = out_h

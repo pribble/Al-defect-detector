@@ -229,6 +229,7 @@ module cnn_top_core (
     localparam S_WR_BASE   = 4'd5;
     localparam S_PREP      = 4'd10;   // 行块派生量预计算（每行块一次）
     localparam S_START     = 4'd6;
+    localparam S_WR_TILE   = 4'd12;   // 每行块写 core cfg 11（实际输出行数，最后行块裁剪）
     localparam S_RUN       = 4'd7;
     localparam S_NEXT_RB   = 4'd8;
     localparam S_CLEAR     = 4'd9;
@@ -615,8 +616,22 @@ module cnn_top_core (
                     end else begin
                         rd_cnt <= 0;
                         out_seg_tail_r <= (out_seg_words_r - 1) * 8;
-                        state <= S_START;
+                        state <= S_WR_TILE;
                     end
+                end
+
+                //---- 每行块写 core cfg 11（out_row_tile）= 本行块实际输出行数 ----
+                // 核心修复：core 的 requant/MAC 行循环按 cfg 11 固定输出 tile 行，
+                // 最后行块（out_h 非 tile 整数倍）实际行数 < tile，若不改写 cfg 11，
+                // core 多算的行会写穿 DMA 段尾（ow 地址停在段尾 → 数据覆盖错乱）。
+                // rb_out_rows_r 在 S_PREP rd_cnt==2 拍已算好（= min(tile, out_h - rb*tile)）。
+                //（与 ip/ 版一致：c36fb6d 只改了 ip/，此处同步保证仿真=上板行为）
+                S_WR_TILE: begin
+                    core_cfg_we <= 1'b1;
+                    core_cfg_sel <= 3'd0;
+                    core_cfg_addr <= 20'd11;
+                    core_cfg_wdata <= {16'd0, rb_out_rows_r};   // cfg 11：本行块实际输出行数
+                    state <= S_START;
                 end
 
                 S_START: begin
