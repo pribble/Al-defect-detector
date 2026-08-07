@@ -9,7 +9,7 @@
 ```
 S_IDLE → S_LOAD(流式,每拍1字) → S_ACC_CLR(清acc,循环) → S_WEIGHT(72/8拍)
   → [S_MAC_ADDR→RD→MUL→MUL2→MUL3→ACC] × 9tap(或1tap, k=1) × N位置
-  → S_REQ_ADDR→MUL→MULB→MULC→MUL2→MUL3→MUL4→OUT→ROUND2→OUT2→OUT3（requant 11 级）
+  → S_REQ_ADDR→MUL→MULB→MUL2→MUL3→MUL4→MULC→MULC2→ACT→OUT→ROUND2→OUT2→OUT3（requant 12 级，乘后域）
   → S_DONE
 ```
 
@@ -122,9 +122,13 @@ S_IDLE → S_LOAD(流式,每拍1字) → S_ACC_CLR(清acc,循环) → S_WEIGHT(7
 - `rq_bias_m/rq_mult_m/v_rcl6_l <= rq_bias_q/rq_mult_q/rq_rcl6_q`——**q_\* 现在是 altsyncram q_b 输出（寄存器，综合版）/ 推断读（仿真版）**——纯连线
 - 预估：✓（altsyncram OLD_DATA 后无 wren 依赖，Top1-3 -3.394 已结构消除）
 
-### S_REQ_MULB / S_REQ_MULC（各 1 拍）
-- MULB：`v_biased_l <= acc_q + rq_bias_m`（32-bit 加法 ≈2-3ns）✓
-- MULC：`v_act_l <= relu/rcl6 比较 + mux`（≈3-4ns）✓
+### S_REQ_MULB（1 拍，乘后域：bias 已移除）
+- MULB：`v_act_l <= acc_q`（乘法输入打拍；bias 移到乘后 MULC 拍）✓
+
+### S_REQ_MULC / S_REQ_MULC2 / S_REQ_ACT（乘后域，各 1 拍）
+- MULC：`v_rq64_l <= v_rq64_l + {{32{bias_mul[31]}}, bias_mul, 8'd0}`（乘后 bias，q22 左移 8 对齐 q30，64-bit 加法 ≈3ns）✓
+- MULC2：`v_rcl6_cmp_q <= 符号位 & (v_rq64_l > {rcl6<<8})`（64-bit 比较 ≈3-4ns）✓
+- ACT：relu/rcl6 mux → `v_rq64_l`（64-bit mux，新增拍）✓
 
 ### S_REQ_MUL2（DSP 乘法级）
 - `v_p_lolo/lohi/hilo/hihi <= mul16x16_dsp(v_act_l, rq_mult_m)`（4×16×16 DSP，32 个并行）

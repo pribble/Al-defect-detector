@@ -97,7 +97,7 @@ module cnn_core_v2 #(
     output wire [31:0]  dbg_ptr1,   // {rq_row[15:0], rq_col[15:0]}
     output wire [31:0]  dbg_ptr2,   // {mac_row[15:0], mac_col[15:0]}
     output wire [31:0]  dbg_ptr3,   // {load_row[9:0], load_col[9:0], wf_cnt[7:0]}
-    output wire [127:0] dbg_data0,  // {acc_q[31:0], v_biased_l[0], v_act_l[0], v_rq64_l[0][31:0]}
+    output wire [127:0] dbg_data0,  // {acc_q[31:0], v_act_l[0], v_act_l[0], v_rq64_l[0][31:0]}（乘后域）
     output wire [127:0] dbg_data1,  // {v_round_l[0], v_shifted[0], v_rnd_delta[0], w_q[0][3:0]}
     output wire [31:0]  dbg_lb      // lb_q[31:0]
 );
@@ -1368,10 +1368,11 @@ module cnn_core_v2 #(
     localparam S_MAC_MUL3 = 5'd21;  // 窗口 tap 加法树拍（mac_p_r → v_sum_r，乘法拆拍后新增）
     localparam S_MAC_ACC  = 4'd5;   // 窗口 tap 累加拍（v_sum_r → acc_local）
     localparam S_REQ_ADDR = 4'd6;   // requant 请求拍（采样 acc_q）
-    localparam S_REQ_MUL  = 4'd7;   // requant 乘加拍级 1（acc_q+bias，寄存 v_biased_l）
-    localparam S_REQ_MULB = 5'd19;  // requant 乘加拍级 2（bias 加法 → v_biased_l）
+    localparam S_REQ_MUL  = 4'd7;   // requant 乘加拍级 1（参数打拍，乘后域）
+    localparam S_REQ_MULB = 5'd19;  // requant 乘加拍级 2（acc 打拍 → v_act_l，乘后域）
     localparam S_REQ_MULC = 5'd20;  // requant 乘加拍级 3（relu/rcl6 比较 → v_rcl6_cmp_q）
-    localparam S_REQ_MULC2 = 5'd22; // requant 乘加拍级 3b（relu/rcl6 mux → v_act_l，拆比较+mux 链）
+    localparam S_REQ_MULC2 = 5'd22; // requant 乘加拍级 3b（relu/rcl6 比较 → v_rcl6_cmp_q，64-bit）
+    localparam S_REQ_ACT  = 5'd23;  // requant 乘加拍级 3c（relu/rcl6 mux → v_rq64_l，乘后域）
     localparam S_REQ_MUL2 = 4'd8;   // requant 乘法拍级 1（4×16×16 DSP 部分积，寄存 v_p_*/v_shift_l）
     localparam S_REQ_MUL3 = 4'd15;  // requant 乘法拍级 2（两组中间和 → v_sum_lo/v_sum_hi）
     localparam S_REQ_MUL4 = 5'd16;  // requant 乘法拍级 3（中间和相加 → v_rq64_l，每级仅 1 个 64-bit 加法）
@@ -1661,13 +1662,19 @@ module cnn_core_v2 #(
 
                 //---- requant 乘加拍级 2：relu/rcl6 比较 → v_act_l（比较+mux 单独一拍）----
                 S_REQ_MULB: begin
-                    state <= S_REQ_MULC;
+                    state <= S_REQ_MUL2;   // 乘后域：acc 打拍后直接乘法（bias 移到乘后）
+                end
+                S_REQ_MUL4: begin
+                    state <= S_REQ_MULC;   // 乘后 bias 加法拍
                 end
                 S_REQ_MULC: begin
                     state <= S_REQ_MULC2;
                 end
                 S_REQ_MULC2: begin
-                    state <= S_REQ_MUL2;
+                    state <= S_REQ_ACT;    // relu/rcl6 mux 拍
+                end
+                S_REQ_ACT: begin
+                    state <= S_REQ_OUT;
                 end
 
                 //---- requant 乘法拍级 1：16×16 部分积（4 个 DSP 乘法，见独立 always）----
@@ -1681,9 +1688,7 @@ module cnn_core_v2 #(
                 end
 
                 //---- requant 乘法拍级 3：中间和相加 → v_rq64_l（见独立 always）----
-                S_REQ_MUL4: begin
-                    state <= S_REQ_OUT;
-                end
+                // 注意：S_REQ_MUL4 的转移在上面（MUL4 → MULC 乘后 bias）
 
                 //---- requant round 拍级 1：round 桶形移位（1<<(shift-1)，单独一拍）----
                 S_REQ_OUT: begin
@@ -1834,7 +1839,7 @@ module cnn_core_v2 #(
     //-----------------------------------------------------------------------
     // requant 流水（拆流水，避免单拍组合链过深）：
     //   S_REQ_MUL  拍：寄存 rq_bias_m/rq_mult_m（RAM 读打拍，断 pass-through 读路径）
-    //   S_REQ_MULB 拍：acc_q + rq_bias_m → v_biased_l（32-bit 加法单独一拍，~3ns）
+    //   S_REQ_MULB 拍：acc_q → v_act_l（乘法输入打拍；bias 移到乘后 MULC 拍）
     //   S_REQ_MULC 拍：relu/rcl6 比较 → v_act_l（比较+mux 单独一拍，~3ns）
     //   S_REQ_MUL2 拍：4×16×16 部分积（DSP）→ 寄存 v_p_*/v_shift_l
     //   S_REQ_MUL3 拍：部分积移位相加 → v_rq64_l（64-bit 加法树）
@@ -1842,10 +1847,8 @@ module cnn_core_v2 #(
     // 拆流水后功能/事件序列不变（tb 按事件对拍，不测周期数）。
     //-----------------------------------------------------------------------
     integer ln;
-    reg signed [31:0] v_act;
     reg signed [63:0] v_rq64;
     reg signed [31:0] v_act_l [0:7];   // 每 lane 的 act 后值（流水级 2）
-    reg signed [31:0] v_biased_l [0:7]; // 每 lane 的 bias 后值（流水级 1，拆加法/比较链）
     reg        v_rcl6_cmp_q [0:7];  // 每 lane 的 v_biased > v_rcl6 比较结果（S_REQ_MULC 拍寄存，拆比较+mux 链）
     reg signed [31:0] v_rcl6_l [0:7];   // 每 lane 的 rcl6 上限（S_REQ_MUL 拍寄存 RAM 读，断组合读链）
     // 乘法拆三级（150MHz 单级 32×33 组合乘法 slack -10.1ns；64-bit 加法树 2 级仍紧）：
@@ -1900,48 +1903,63 @@ module cnn_core_v2 #(
         end
     end
 
-    // 乘加拍级 2（S_REQ_MULB）：acc_q + rq_bias_m → v_biased_l（32-bit 加法单独一拍，~3ns）
+    // 乘加拍级 2（S_REQ_MULB）：acc_q → v_act_l（乘法输入打拍；bias 已移到乘后域，
+    // 与 CPU cvt_kernel 语义 round(acc·ws·is/os + bias/os) 对齐）
     always @(posedge clk) begin
         if (state == S_REQ_MULB) begin
             for (ln = 0; ln < 8; ln = ln + 1) begin
                 v_out_ch = o_group * 8 + ln;
                 if (v_out_ch >= out_c_reg)
-                    v_biased_l[ln] <= 32'sd0;
+                    v_act_l[ln] <= 32'sd0;
                 else
-                    v_biased_l[ln] <= acc_q[32*ln +: 32] + rq_bias_m[ln];
+                    v_act_l[ln] <= acc_q[32*ln +: 32];
             end
         end
     end
 
-    // 乘加拍级 3（S_REQ_MULC）：relu/rcl6 的 32-bit 比较单独一拍（拆比较+mux 链，-2.54 路径）
+    // 乘加拍级 3（S_REQ_MULC）：乘后 bias 加法（64-bit，单独一拍）：
+    //   v_rq64_l += bias_mul<<8（bias_mul 为 q22 缩放，左移 8 对齐 2^30 域）
     always @(posedge clk) begin
         if (state == S_REQ_MULC) begin
             for (ln = 0; ln < 8; ln = ln + 1) begin
                 v_out_ch = o_group * 8 + ln;
-                // 与原语义一致：仅正值才可能被 rcl6 截断（relu 后 0 恒 ≤ rcl6）
-                v_rcl6_cmp_q[ln] <= (v_out_ch < out_c_reg) &&
-                                    !v_biased_l[ln][31] &&
-                                    (v_biased_l[ln] > v_rcl6_l[ln]);
+                if (v_out_ch >= out_c_reg)
+                    v_rq64_l[ln] <= 64'sd0;
+                else
+                    v_rq64_l[ln] <= v_rq64_l[ln] +
+                                    {{32{rq_bias_m[ln][31]}}, rq_bias_m[ln], 8'd0};
             end
         end
     end
 
-    // 乘加拍级 3b（S_REQ_MULC2）：relu/rcl6 mux → v_act_l（mux 单独一拍）
+    // 乘加拍级 3b（S_REQ_MULC2）：relu/rcl6 的 64-bit 比较单独一拍（拆比较+mux 链）：
+    //   仅正值才可能被 rcl6 截断（relu 后 0 恒 ≤ rcl6）；rcl6 上限 = rcl6_mul<<8（q22 对齐）
     always @(posedge clk) begin
         if (state == S_REQ_MULC2) begin
             for (ln = 0; ln < 8; ln = ln + 1) begin
                 v_out_ch = o_group * 8 + ln;
-                if (v_out_ch >= out_c_reg)
-                    v_act_l[ln] <= 32'sd0;
-                else begin
-                    v_act = v_biased_l[ln];
-                    if (act_reg == 2'd1) begin
-                        v_act = v_biased_l[ln][31] ? 32'sd0 : v_biased_l[ln];
-                    end else if (act_reg == 2'd2) begin
-                        v_act = v_biased_l[ln][31] ? 32'sd0 : v_biased_l[ln];
-                        if (v_rcl6_cmp_q[ln]) v_act = v_rcl6_l[ln];
-                    end
-                    v_act_l[ln] <= v_act;
+                v_rcl6_cmp_q[ln] <= (v_out_ch < out_c_reg) &&
+                                    !v_rq64_l[ln][63] &&
+                                    (v_rq64_l[ln] >
+                                     {{32{v_rcl6_l[ln][31]}}, v_rcl6_l[ln], 8'd0});
+            end
+        end
+    end
+
+    // 乘加拍级 3c（S_REQ_ACT）：relu/rcl6 mux → v_rq64_l（乘后域，64-bit mux 单独一拍）
+    always @(posedge clk) begin
+        if (state == S_REQ_ACT) begin
+            for (ln = 0; ln < 8; ln = ln + 1) begin
+                v_out_ch = o_group * 8 + ln;
+                if (v_out_ch >= out_c_reg) begin
+                    v_rq64_l[ln] <= 64'sd0;
+                end else if (act_reg == 2'd1) begin
+                    v_rq64_l[ln] <= v_rq64_l[ln][63] ? 64'sd0 : v_rq64_l[ln];
+                end else if (act_reg == 2'd2) begin
+                    if (v_rq64_l[ln][63])
+                        v_rq64_l[ln] <= 64'sd0;
+                    else if (v_rcl6_cmp_q[ln])
+                        v_rq64_l[ln] <= {{32{v_rcl6_l[ln][31]}}, v_rcl6_l[ln], 8'd0};
                 end
             end
         end
@@ -2067,7 +2085,7 @@ module cnn_core_v2 #(
     assign dbg_ptr1  = {4'd0, rq_row, 4'd0, rq_col};
     assign dbg_ptr2  = {4'd0, mac_row, 4'd0, mac_col};
     assign dbg_ptr3  = {load_row[9:0], load_col[9:0], wf_cnt[7:0]};
-    assign dbg_data0 = {acc_q[31:0], v_biased_l[0], v_act_l[0], v_rq64_l[0][31:0]};
+    assign dbg_data0 = {acc_q[31:0], v_act_l[0], v_act_l[0], v_rq64_l[0][31:0]};
     assign dbg_data1 = {v_round_l[0][31:0], v_shifted[0][31:0], v_rnd_delta[0][31:0],
                         {w_q[0][3], w_q[0][2], w_q[0][1], w_q[0][0]}};
     assign dbg_lb    = lb_q[31:0];

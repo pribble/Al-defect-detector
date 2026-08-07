@@ -26,35 +26,25 @@
 ```
 cnn_rtl/
 ├── README.md                    # 本文件：差距矩阵 + 改造路线图
-└── upstream/                    # 上游原样文件（MIT）
-    ├── LICENSE
-    ├── hardware/rtl/layers/conv_layer.vhd   # 卷积数据通路底子（726 行，独立可综合）
-    │                            #  + conv_layer.md（架构文档）+ State_Machine_conv.svg
-    └── verification/            # GHDL 验证框架
-        ├── sim/                 # run_conv.sh / run_conv_traversal.sh / run_layers.sh
-        ├── tb/conv/             # 10 个定向测试（行缓冲/MAC/量化/背压/遍历）
-        ├── tb/layers/           # 真实模型向量对拍 tb_conv_layer.vhd
-        ├── generate/dump_vectors.py
-        └── fixtures/            # 测试向量
+├── src/                         # 仿真版 RTL（verilator 回归用）
+├── tools/                       # numpy 行为模型（ref_cnn_top/ref_int8）+ 向量生成器
+├── verification/                # tb + 回归脚本（run_cnn_core_v2.sh）
+├── cpu_ref/                     # CPU 同源算子参考（Paddle-Lite ARM int8 conv）
+├── REPRODUCTION_FIX.md          # 黑盒实测 → 乘后域修复完整分析文档
+└── BLACKBOX_NUMERICS.md         # 黑盒 IP 数值语义速查
 ```
 
-## 上游 `conv_layer.vhd` 是什么
+## 设计来源（历史）
 
-单层流式卷积数据通路（generic 可配置），内部包含：
-
-- **行缓冲**：3+1 行（3×3 kernel），逻辑行旋转、虚拟 padding 行（行有效标志）
-- **MAC**：`G_C_PAR` 个输出通道并行 × 3×3 × C_IN，int32 累加
-- **量化链**：raw acc → 加 int32 bias → ReLU → 定点乘移位 requant
-  （uint64×uint32 乘 + round-half-up 右移）→ 饱和 → uint8 输出
-- **控制**：FSM（IDLE→初始行填充→prime 行→计算/滑窗→流式行填充→行旋转），
-  自动帧重启；valid/ready 流接口 + cfg 端口（bias/requant 参数加载）
-
-已通过 GHDL 位精确验证（5 层真实模型向量全过）。**这是"数值语义已确定"的可信底子**，
-与 cnn_top 规格书 §7 的量化链（int32 累加 → bias → relu → requant → 饱和）同构。
+本分支数值/架构底子源自 Intel intelfpga 开源卷积数据通路
+（`conv_layer.vhd`，MIT 协议）：单层流式卷积（行缓冲 3+1 行、int32 累加、
+定点乘移位 requant、valid/ready 流控）。2026-08 已完全重写为自研 Verilog
+（`src/cnn_core_v2.v` / `ip/cnn_core_v2.v`，NHWC8 块序流 + 乘后域定点），
+上游 VHDL 源码及其 GHDL 验证框架已从分支移除（历史见 git）。
 
 ## 差距矩阵（上游 → cnn_top 规格）
 
-| 维度 | 上游 conv_layer.vhd | cnn_top（[spec](../cnn_top_spec.md)） | 改造动作 |
+| 维度 | 上游 conv_layer.vhd（历史参考） | cnn_top（[spec](../cnn_top_spec.md)） | 改造动作 |
 |---|---|---|---|
 | 数值符号 | uint8 激活 / int8 权重 / uint8 输出 | **int8 输入/输出** | 数据通路改 signed |
 | 量化 | 定点乘移位（uint32 乘 + shift） | per-channel float scale（`scale[2*out_c]`，含 bias/output_scale） | 软件把 float scale 预转定点乘移位（RTL 改动最小），或 RTL 加 float 乘 |
@@ -101,7 +91,7 @@ cnn_rtl/
 | 2 ✅ | `tools/ref_cnn_top.py`（numpy 行为模型，裁判） | 80 随机层 + 真实 47 层 ALL PASS |
 | 3 ✅ | `src/cnn_core.v`（参数驱动单层执行器，k=3 子集）——**2026-08 清理删除**（历史见 git） | `verification/sim/run_cnn_core.sh` 24 层 bit-exact |
 | 4 ✅ | `src/cnn_core_v2.v`（**NHWC8 块序流**：slice 权重、行块 acc 缓冲、单行块执行供 DMA 调度） | `verification/sim/run_cnn_core_v2.sh` 24 层 bit-exact（**均为 k=3**；k=1 层 2026-08 权重布局修复后未重新对拍） |
-| 5 ✅ | `cnn_top.v` Avalon 顶层（从接口 + 6 寄存器 + param/scale 解析 + DMA + 行块调度）；requant 定点参数**软件侧预转**（`conv_op.cc` scale 区每通道 4 字：mult/bias_int/shift/rcl6，RTL 无浮点） | 端到端 tb：**6/6 层 bit-exact**（单块/多块/多组、38 高长层） |
+| 5 ✅ | `cnn_top.v` Avalon 顶层（从接口 + 6 寄存器 + param/scale 解析 + DMA + 行块调度）；requant 定点参数**软件侧预转**（`conv_op.cc` scale 区每通道 4 字：mult/bias_mul(q22)/shift/rcl6(q22)，乘后域，RTL 无浮点） | 端到端 tb：**6/6 层 bit-exact**（单块/多块/多组、38 高长层） |
 | 6 ✅ | depthwise（type=4）：权重对角化 + MAC 复用 | v2 回归覆盖 dw 层 |
 | 7 ✅ | 打包 QSys IP 上板替换（黑盒 `cnn_top.qxp` 已删除） | 上板 `test.sh` 全链路运行；**检测正确性验证中**（见下节调试历史） |
 
@@ -121,7 +111,7 @@ cnn_rtl/
 - 适配要点：burstcount 固定 1、byteenable 全 1；**读完成以 `readdatavalid` 为准**（2026-08 起，见调试历史；早期实现曾错误地以 `read && !waitrequest` 判完成）；lr/wr 共用 load master（黑盒无独立权重 master），多笔在途独立计数
 
 **阶段 5 关键设计**：
-- requant 定点参数**软件侧预转**（量化优先、RTL 无浮点）：`conv_op.cc` 把 float scale（ws/bias/os）转成每通道 4 个 int32（mult/bias_int/shift/rcl6）写入 scale 区，公式与舍入（away-from-zero）对齐 `ref_int8.quantize_params`（500 轮随机验证一致）；`intelfpga.cc` memcpy 4×out_c 字
+- requant 定点参数**软件侧预转**（量化优先、RTL 无浮点）：`conv_op.cc` 把 float scale（ws/bias/os）转成每通道 4 个 int32（mult/bias_mul/shift/rcl6）写入 scale 区，**乘后域**（`v = acc·mult + bias_mul<<8`，与 float 公式 `round(acc·ws·is/os + bias/os)` 对齐；bias/rcl6 用 q22 缩放避免 int32 溢出），公式与舍入（away-from-zero）对齐 `ref_int8.quantize_params`（随机回归 bit-exact 一致）；`intelfpga.cc` memcpy 4×out_c 字
 - `cnn_top.v` 端到端：寄存器（START=0x00/DDRIN=0x10/DDRW=0x1C/DDROUT=0x28/PARAM=0x34/SCALE=0x40）→ param 块 27 字解析 → scale 读取 → cfg 配 cnn_core_v2 → 行块循环（base_row 重定位 + DMA 跟随 core 流握手）
 - **DMA 关键修复**（对拍暴露）：地址预取（避免组合读重复）、`lr_read/wr_read/ow_write` 组合直连 core 握手（避免 1 拍残留导致段边界偏移）、cfg 最后一项写入时序（cfg_we 提前拉低丢 rcl6 末通道）
 - **阶段 5 收尾（缺口已关闭）**：长层 1 LSB 差异根因 = **tb DDR 基址重叠**（DDRIN_BASE=0x2000 需 11552B 到 0x4D20，与 DDRW_BASE=0x4000 冲突；rb1 输入段拍 340 起读到 w.hex 数据）——tb 布局问题，非 RTL bug。基址拉开（DDRW=0x10000/DDROUT=0x20000）后 6/6 层 bit-exact；core 24 层回归仍全绿。真实软件内存由 CmaMem 连续分配不重叠，无此问题
@@ -167,8 +157,9 @@ PLL outclk_1 恢复 150MHz（`e49c95c`）后，综合报告逐条拆流水直至
 | 3 | round/输出路径（同批） | 64-bit 桶形移位 + 加法/比较串行 | `a94f74a`：移位各占一拍（S_REQ_OUT→v_rnd_delta、S_REQ_ROUND2(5'd17) 加法、S_REQ_OUT2→v_shifted、S_REQ_OUT3(5'd18) 饱和） |
 | 4 | `bias_store_3 → v_act_l`（-8.6ns） | acc_q+bias 加法 + relu/rcl6 比较单级 | `7cce245`：S_REQ_MUL 加法→v_biased_l、S_REQ_MULB(5'd19) 比较→v_act_l |
 
-requant 现为 9 拍单操作流水（S_REQ_ADDR → MUL → MULB → MUL2 → MUL3 → MUL4 → OUT → ROUND2 → OUT2 → OUT3），
-每拍仅加法/移位/比较之一（≤~5ns）；state 扩 5-bit；事件级对拍不受拍数影响（v2 16/16 + cnn_top 6/6 PASS）。
+requant 现为 12 拍单操作流水（S_REQ_ADDR → MUL → MULB → MUL2 → MUL3 → MUL4 → MULC → MULC2 → ACT → OUT → ROUND2 → OUT2 → OUT3），
+**乘后域**（bias 在乘后加、relu/rcl6 在乘后施加，新增 S_REQ_ACT 拍）；
+每拍仅加法/移位/比较之一（≤~5ns）；state 扩 5-bit；事件级对拍不受拍数影响（v2 24/24 随机层 PASS）。
 
 **部署注意**：Quartus 综合读的是 QSys 生成物 `soc_system/synthesis/submodules/` 里的 RTL 拷贝
 （.gitignore 忽略、git pull 不更新）——更新 `ip/` 后需重新 Generate QSys，或手动拷 5 个 .v 到 submodules/。

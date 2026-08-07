@@ -95,7 +95,7 @@ def gen_layer(idx, rng, out_dir):
     cfg = [pack_cfg(0, a, v) for a, v in scalars]
     # requant 参数直接用 ref（LayerParam.quantize_params）生成的，保证与期望一致
     for ch in range(out_c):
-        cfg.append(pack_cfg(1, ch, lp.bias_int[ch] & 0xFFFFFFFF))
+        cfg.append(pack_cfg(1, ch, lp.bias_mul[ch] & 0xFFFFFFFF))
         cfg.append(pack_cfg(2, ch, lp.mult[ch] & 0xFFFFFFFF))
         cfg.append(pack_cfg(3, ch, lp.shift))
         cfg.append(pack_cfg(4, ch, lp.rcl6[ch] & 0xFFFFFFFF))

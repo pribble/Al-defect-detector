@@ -103,7 +103,7 @@ def nhwc8_bytes(c, h, w):
 
 
 # ---------------------------------------------------------------------------
-# 层参数（含量化参数：每输出通道 mult/bias_int/shift + raw_clamp6）
+# 层参数（含量化参数：每输出通道 mult/bias_mul/shift + rcl6_mul，乘后域）
 # ---------------------------------------------------------------------------
 class LayerParam:
     def __init__(self, typ, in_c, in_h, in_w, out_c, out_h, out_w,
@@ -118,7 +118,7 @@ class LayerParam:
         is_ = 10 ** rng.uniform(-2.5, -1.5)
         os_ = 10 ** rng.uniform(-1.5, 0.0)
         b = [rng.uniform(-5.0, 5.0) for _ in range(out_c)]
-        self.mult, self.bias_int, self.rcl6, self.shift = quantize_params(
+        self.mult, self.bias_mul, self.rcl6, self.shift = quantize_params(
             ws, is_, os_, b, SHIFT)
         self.out_row_tile = output_row_tile(out_h, out_w)
         self.in_row_tile = input_row_tile(self.out_row_tile, s, 1, k)
@@ -195,16 +195,16 @@ def conv_tile_np(p, in_hw, w_np):
 def post_np(p, acc, co0):
     """raw+bias → act → requant → 饱和 int8。acc: [Ho,Wo,Co] int32"""
     out_c = min(8, p.out_c - co0)
-    bias = np.array(p.bias_int[co0:co0 + out_c], dtype=np.int64)
+    bias = np.array(p.bias_mul[co0:co0 + out_c], dtype=np.int64)
     mult = np.array(p.mult[co0:co0 + out_c], dtype=np.int64)
     acc = acc[:, :, :out_c]  # 块末不足 8 通道：截取有效通道
-    raw = acc.astype(np.int64) + bias[None, None, :]
+    v = acc.astype(np.int64) * mult[None, None, :] + (bias[None, None, :] << 8)  # 乘后域 q30 对齐（bias_mul 为 q22）
     if p.act == 1:
-        raw = np.maximum(raw, 0)
+        v = np.maximum(v, 0)
     elif p.act == 2:
         rcl6 = np.array(p.rcl6[co0:co0 + out_c], dtype=np.int64)
-        raw = np.clip(raw, 0, rcl6[None, None, :])
-    v = (raw * mult[None, None, :] + (1 << (p.shift - 1))) >> p.shift
+        v = np.clip(v, 0, rcl6[None, None, :] << 8)
+    v = (v + (1 << (p.shift - 1))) >> p.shift
     return np.clip(v, -128, 127).astype(np.int8)
 
 

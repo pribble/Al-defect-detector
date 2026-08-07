@@ -118,10 +118,13 @@ int ConvConverter(void *ctx, OpLite *op, KernelBase *kernel) {
         break;
     }
     // init scale：每输出通道 4 个 int32 定点 requant 参数（FPGA 侧量化优先，无浮点）
-    //   scale[0..out_c)          = mult   = round_half_away((ws*is/os)*2^30)
-    //   scale[out_c..2*out_c)    = bias_int = round_half_away(bias/(ws*is))
-    //   scale[2*out_c..3*out_c)  = shift  = 30
-    //   scale[3*out_c..4*out_c)  = rcl6   = round_half_away(6*os/(ws*is))
+    //   乘后域（CPU cvt_kernel 语义，与黑盒 float 公式 round(acc·ws·is/os + bias/os) 对齐）：
+    //   scale[0..out_c)          = mult      = round_half_away((ws*is/os)*2^30)
+    //   scale[out_c..2*out_c)    = bias_mul  = round_half_away(bias/os * 2^22)   ← q22（int32 安全）
+    //   scale[2*out_c..3*out_c)  = shift     = 30
+    //   scale[3*out_c..4*out_c)  = rcl6      = round_half_away(6/os * 2^22)      ← q22（relu6 上限，int8 域）
+    // 硬件侧（cnn_core_v2 requant S_REQ_MULC/S_REQ_MULC2）把 bias_mul/rcl6 左移 8 位
+    // 对齐 q30 乘后域（v = acc·mult + bias_mul<<8；relu6 钳 v ≤ rcl6<<8）。
     // 公式与舍入（away-from-zero）对齐 tools/ref_int8.py quantize_params，已验证 500 轮一致
     device_param->scale = new int32_t[4*o_dims[1]];
     device_param->param.input_scale = param.input_scale;
@@ -140,17 +143,16 @@ int ConvConverter(void *ctx, OpLite *op, KernelBase *kernel) {
             const double b  = ba    ? (double)ba[i]    : 0.0;
             const double f  = ws * is_ / os_;
             const double denom = ws * is_;
-            if (denom < 1e-12) {
-                // ws 极小（量化权重≈0 的通道）：b/(ws*is) 与 6*os/(ws*is) 溢出 int32
-                // （实测 INT_MIN/INT_MAX）。近似黑盒 float 行为——该通道输出≈0
-                // （bias 主导后 relu/relu6 钳 0）：mult/bias 保底 0、rcl6 保底 INT_MAX。
+            if (fabs(denom) < 1e-12) {
+                // ws 极小（量化权重≈0 的通道）：输出≈0（bias 主导后 relu 钳 0）。
+                // mult/bias_mul 保底 0、rcl6 保底 INT_MAX（硬件比较恒不成立=无上限）。
                 device_param->scale[i] = 0;
                 device_param->scale[o_dims[1] + i] = 0;
                 device_param->scale[3 * o_dims[1] + i] = INT_MAX;
             } else {
                 device_param->scale[i] = rnd(f * (double)(1 << 30));
-                device_param->scale[o_dims[1] + i] = rnd(b / denom);
-                device_param->scale[3 * o_dims[1] + i] = rnd(6.0 * os_ / denom);
+                device_param->scale[o_dims[1] + i] = rnd(b / os_ * (double)(1 << 22));
+                device_param->scale[3 * o_dims[1] + i] = rnd(6.0 / os_ * (double)(1 << 22));
             }
             device_param->scale[2 * o_dims[1] + i] = 30;
         }

@@ -132,7 +132,7 @@ module cnn_top_core (
             8'h29: as_readdata = dbg_snap_vshf;    // 0xA4 v_shifted[0] 低 32（右移后）
             8'h2A: as_readdata = dbg_snap_lb;      // 0xA8 lb_q 低 32（输入采样）
             8'h2B: as_readdata = dbg_snap_wq;      // 0xAC w_q[0][0..3]（权重采样）
-            8'h2C: as_readdata = dbg_snap_vbias;   // 0xB0 v_biased_l[0]（bias 后）
+            8'h2C: as_readdata = dbg_snap_vbias;   // 0xB0 v_act_l[0]（乘法输入）
             8'h2D: as_readdata = dbg_snap_vdelta;  // 0xB4 v_rnd_delta[0] 低 32（round 移位）
             // 0xB8 = {done_cnt, o_evt_cnt}（层完成/输出事件累计）
             8'h2E: as_readdata = {dbg_done_cnt, dbg_o_evt_cnt};
@@ -190,7 +190,7 @@ module cnn_top_core (
             dbg_freeze <= as_write && as_address == 8'h19;   // 写 0x64：冻结一拍
             if (core_done || dbg_freeze) begin
                 dbg_snap_acc    <= core_dbg_data0[31:0];    // acc_q lane0
-                dbg_snap_vbias  <= core_dbg_data0[63:32];   // v_biased_l[0]
+                dbg_snap_vbias  <= core_dbg_data0[63:32];   // v_act_l[0]（乘后域：乘法输入）
                 dbg_snap_vact   <= core_dbg_data0[95:64];   // v_act_l[0]
                 dbg_snap_vrq    <= core_dbg_data0[127:96];  // v_rq64_l[0] 低 32
                 dbg_snap_vrnd   <= core_dbg_data1[31:0];    // v_round_l[0] 低 32

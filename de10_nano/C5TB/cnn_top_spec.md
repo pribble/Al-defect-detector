@@ -188,15 +188,17 @@ Paddle 张量（`global_mem_cfg` 拷贝逻辑，`intelfpga.cc:640/667`）。
 （`conv_op.cc:120-147` 生成，`intelfpga.cc:638` 整块 memcpy）：
 
 ```
-scale[0..out_c)          = mult      = round_half_away((ws·is/os)·2^30)  // uint32 乘数
-scale[out_c..2·out_c)    = bias_int  = round_half_away(b/(ws·is))        // raw 域 int32
+scale[0..out_c)          = mult      = round_half_away((ws·is/os)·2^30)  // 乘数（q30）
+scale[out_c..2·out_c)    = bias_mul  = round_half_away(b/os·2^22)        // 乘后域 bias（q22，int32 安全）
 scale[2·out_c..3·out_c)  = shift     = 30                                // 右移位数
-scale[3·out_c..4·out_c)  = rcl6      = round_half_away(6·os/(ws·is))     // relu6 raw 域上限
+scale[3·out_c..4·out_c)  = rcl6      = round_half_away(6/os·2^22)        // relu6 上限（q22，int8 域）
 ```
 
 公式与舍入（away-from-zero）对齐 `cnn_rtl/tools/ref_int8.py` 的 `quantize_params`
-（500 轮随机验证一致）。RTL 侧 `S_RD_SCALE` 按此布局边读边写 core requant 数组，
-顺序即 mult/bias_int/shift/rcl6。
+（随机回归 bit-exact 验证一致）。RTL 侧 `S_RD_SCALE` 按此布局边读边写 core requant 数组，
+顺序即 mult/bias_mul/shift/rcl6。**乘后域语义**：硬件把 bias_mul/rcl6 左移 8 位对齐
+q30 乘后域（`v = acc·mult + bias_mul<<8`；relu6 钳 `v ≤ rcl6<<8`），
+与 float 公式 `round(acc·ws·is/os + bias/os)` 一致——黑盒实测 47 层主干位匹配 100%。
 
 > 黑盒时代为每通道 2 个 float（`scale[i]=ws`、`scale[out_c+i]=bias/os`），已被定点化取代，
 > 仅作历史参考。
@@ -207,22 +209,25 @@ scale[3·out_c..4·out_c)  = rcl6      = round_half_away(6·os/(ws·is))     // 
 
 ```
 acc_int32 = Σ (input_int8 × weight_int8)            // 64 MAC/周期，kernel=3×3
-v_biased  = acc_int32 + bias_int                     // bias_int = round(b/(ws·is))，raw 域
-v_rq64    = v_biased × mult                          // mult = round((ws·is/os)·2^30)
-out_int8  = saturate((v_rq64 + 2^(shift-1)) >> shift)  // shift=30，round-half-up + 算术右移
-           （可选 relu / relu6（上限 rcl6）/ leakyrelu 在乘加后施加）
+v_rq64    = acc_int32 × mult + (bias_mul << 8)      // 乘后域：mult = round((ws·is/os)·2^30)，
+                                                    // bias_mul = round(b/os·2^22)（q22 左移 8 对齐）
+act（可选，乘后施加）：
+  relu        v = max(v, 0)
+  relu6       v = min(max(v, 0), rcl6 << 8)         // rcl6 = round(6/os·2^22)
+out_int8  = saturate((v + 2^(shift-1)) >> shift)    // shift=30，round-half-up + 算术右移
 ```
 
 - `ws`/`b` 为模型 per-channel weight_scale/bias，`is`/`os` 为 input/output scale；
-  mult/bias_int/shift/rcl6 由 `conv_op.cc` 预转（§6.5），公式与舍入
-  （away-from-zero）对齐 `cnn_rtl/tools/ref_int8.py`（500 轮随机验证一致）。
-- RTL 实现（2026-08 时序收敛后为 9 拍单操作流水，每拍仅加法/移位/比较之一，
-  150 MHz 收敛）：`S_REQ_MUL`（acc+bias）→ `S_REQ_MULB`（relu/rcl6）→
+  mult/bias_mul/shift/rcl6 由 `conv_op.cc` 预转（§6.5），公式与舍入
+  （away-from-zero）对齐 `cnn_rtl/tools/ref_int8.py`（随机回归 bit-exact 一致）。
+- RTL 实现（2026-08 乘后域重排后为 10 拍单操作流水，每拍仅加法/移位/比较之一，
+  150 MHz 收敛）：`S_REQ_MUL`（参数打拍）→ `S_REQ_MULB`（acc 打拍）→
   `S_REQ_MUL2`（4×16×16 DSP 部分积）→ `S_REQ_MUL3`（两组中间和）→
-  `S_REQ_MUL4`（中间和相加）→ `S_REQ_OUT`（round 桶形移位）→
-  `S_REQ_ROUND2`（round 加法）→ `S_REQ_OUT2`（算术右移）→ `S_REQ_OUT3`
-  （饱和 [-128,127] + 输出）。事件序列/数值语义与旧 3 拍实现完全一致
-  （tb 按事件对拍，不测周期数）。
+  `S_REQ_MUL4`（中间和相加）→ `S_REQ_MULC`（+bias_mul<<8，64-bit 加法）→
+  `S_REQ_MULC2`（relu/rcl6 64-bit 比较）→ `S_REQ_ACT`（relu/rcl6 mux）→
+  `S_REQ_OUT`（round 桶形移位）→ `S_REQ_ROUND2`（round 加法）→
+  `S_REQ_OUT2`（算术右移）→ `S_REQ_OUT3`（饱和 [-128,127] + 输出）。
+  数值语义与 float 公式（CPU cvt_kernel 同源）完全一致（tb 按事件对拍）。
 
 ## 8. 执行时序与分块
 

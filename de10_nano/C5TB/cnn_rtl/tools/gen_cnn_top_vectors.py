@@ -3,7 +3,7 @@
 
 输出 vec_cnn_top/layer_NN/：
   param.hex    27 个 32-bit struct parameter（每行 16 hex，低 32 位有效）
-  scale.hex    4×out_c 个 32-bit 定点 requant（mult/bias_int/shift/rcl6）
+  scale.hex    4×out_c 个 32-bit 定点 requant（mult/bias_mul/shift/rcl6）
   in.hex       完整 NHWC8 全图输入（64-bit/行）
   w.hex        权重 slice 序（64-bit/行）
   expect.hex   完整 NHWC8 全图输出期望（64-bit/行）
@@ -95,12 +95,12 @@ def gen_layer(idx, rng, out_dir):
     ]
     assert len(param) == 27
 
-    # ---- scale 区：4×out_c 定点（mult/bias_int/shift/rcl6）----
+    # ---- scale 区：4×out_c 定点（mult/bias_mul/shift/rcl6）----
     scale = []
     for ch in range(out_c):
         scale.append(lp.mult[ch] & 0xFFFFFFFF)
     for ch in range(out_c):
-        scale.append(lp.bias_int[ch] & 0xFFFFFFFF)
+        scale.append(lp.bias_mul[ch] & 0xFFFFFFFF)
     for ch in range(out_c):
         scale.append(lp.shift)
     for ch in range(out_c):

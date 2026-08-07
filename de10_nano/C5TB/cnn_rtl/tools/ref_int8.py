@@ -7,7 +7,7 @@
 
 运算顺序严格对应 RTL：
   raw      = Σ(signed in × signed w)                     # int32
-  biased   = raw + bias_int                              # bias_int = round(b·ws·is/os)
+  v        = acc·mult + bias_mul                          # 乘后域（CPU cvt_kernel 语义）
   act      = none / relu / relu6(clamp RAW_CLAMP6)
   rq       = act · mult                                  # mult = round(ws·is/os·2^shift)
   rq      += (1 << (shift-1))                            # round-half-up
@@ -26,19 +26,24 @@ def round_half_away(x):
 
 
 def quantize_params(ws, is_, os_, b, shift=30):
-    """float 模型参数 → 定点参数（per-channel）。
+    """float 模型参数 → 定点参数（per-channel），**乘后域**（CPU cvt_kernel 语义）。
 
     ws   : list[float] per-channel weight_scale
     is_  : float input_scale
     os_  : float output_scale
     b    : list[float] per-channel bias
-    返回 (mult, bias_int, raw_clamp6, shift)
+    返回 (mult, bias_mul, rcl6_mul, shift)
+
+    定点等价：y = round(acc·(ws·is/os) + bias/os)（float）
+           →  v = acc·mult + bias_mul；y = (v + 2^(shift-1)) >> shift
     """
     mult = [round_half_away((w * is_ / os_) * (1 << shift)) for w in ws]
-    # bias_int 加在 raw 域，须满足 bias_int·s = b/os（s = ws·is/os）→ bias_int = b/(ws·is)
-    bias_int = [round_half_away(bi / (w * is_)) for bi, w in zip(b, ws)]
-    raw_clamp6 = [round_half_away(6.0 * os_ / (w * is_)) for w in ws]
-    return mult, bias_int, raw_clamp6, shift
+    # bias_mul/rcl6_mul 用 **q22 缩放**（int32 安全：|bias/os·2^22| < 2^31）；
+    # 硬件侧左移 8 位对齐 q30 乘后域（见 RTL requant S_REQ_MULC）
+    bias_mul = [round_half_away((bi / os_) * (1 << 22)) for bi in b]
+    # rcl6_mul：relu6 上限 6.0（真实值）→ int8 域 6/os（CPU alpha = Relu_clipped_coef/output_scale）
+    rcl6_mul = [round_half_away((6.0 / os_) * (1 << 22)) for _ in ws]
+    return mult, bias_mul, rcl6_mul, shift
 
 
 def act_s8(x, act, clamp6):
@@ -51,7 +56,7 @@ def act_s8(x, act, clamp6):
     raise ValueError(f"unsupported act={act}")
 
 
-def conv_s8(x, w, bias_int, mult, shift, act=1, raw_clamp6=None, pad=1, stride=1):
+def conv_s8(x, w, bias_mul, mult, shift, act=1, rcl6_mul=None, pad=1, stride=1):
     """与 RTL 同构的 int8 卷积。
 
     x : numpy-free list [Ci][Hi][Wi]（int8 值）
@@ -79,10 +84,10 @@ def conv_s8(x, w, bias_int, mult, shift, act=1, raw_clamp6=None, pad=1, stride=1
                             wj = wo * stride + kj - pad
                             if 0 <= hi < Hi and 0 <= wj < Wi:
                                 raw += x[ci][hi][wj] * w[co][ci][ki][kj]
-                biased = raw + bias_int[co]
-                a = act_s8(biased, act,
-                           raw_clamp6[co] if raw_clamp6 is not None else (1 << 40))
-                rq = a * mult[co]
+                v = raw * mult[co] + (bias_mul[co] << 8)  # 乘后域 q30 对齐（bias_mul 为 q22）
+                a = act_s8(v, act,
+                           rcl6_mul[co] if rcl6_mul is not None else (1 << 40))
+                rq = a
                 if shift > 0:
                     rq += 1 << (shift - 1)
                 rq >>= shift
@@ -138,8 +143,8 @@ def self_test(seed=0, rounds=2000, act=1):
         b = [rng.uniform(-5.0, 5.0) for _ in range(Co)]
         shift = rng.choice([15, 20, 25, 30])
 
-        mult, bias_int, rcl6, sh = quantize_params(ws, is_, os_, b, shift)
-        out_i, _ = conv_s8(x, w, bias_int, mult, sh, act=act, raw_clamp6=rcl6,
+        mult, bias_mul, rcl6, sh = quantize_params(ws, is_, os_, b, shift)
+        out_i, _ = conv_s8(x, w, bias_mul, mult, sh, act=act, rcl6_mul=rcl6,
                            pad=pad, stride=stride)
         out_f = conv_float(x, w, ws, is_, os_, b, act=act, pad=pad, stride=stride)
 
