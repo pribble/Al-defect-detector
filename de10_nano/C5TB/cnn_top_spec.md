@@ -226,8 +226,12 @@ out_int8  = saturate((v + 2^(shift-1)) >> shift)    // shift=30，round-half-up 
   `S_REQ_MUL4`（中间和相加）→ `S_REQ_MULC`（+bias_mul<<8，64-bit 加法）→
   `S_REQ_MULC2`（relu/rcl6 64-bit 比较）→ `S_REQ_ACT`（relu/rcl6 mux）→
   `S_REQ_OUT`（round 桶形移位）→ `S_REQ_ROUND2`（round 加法）→
-  `S_REQ_OUT2`（算术右移）→ `S_REQ_OUT3`（饱和 [-128,127] + 输出）。
+  `S_REQ_OUT2`（算术右移）→ `S_REQ_OUT3`（8 位截断 wrap `y = r & 0xFF` + 输出）。
   数值语义与 float 公式（CPU cvt_kernel 同源）完全一致（tb 按事件对拍）。
+  **输出为 8 位截断（wrap）而非饱和**：黑盒实测（BLACKBOX_NUMERICS.md）为
+  `y = r & 0xFF`；饱和会把 box 头（act=0）超界 logits 全部钳成 ±127，抹平
+  softmax 区分度 → 上板实测几百个高 score 误检框（2026-08-09 修复，`cnn_core_v2.v`
+  S_REQ_OUT3 饱和改截断）。relu 层输出值域 [0,127] 不受影响。
 
 ## 8. 执行时序与分块
 

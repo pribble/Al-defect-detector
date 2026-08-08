@@ -91,7 +91,11 @@ def conv_s8(x, w, bias_mul, mult, shift, act=1, rcl6_mul=None, pad=1, stride=1):
                 if shift > 0:
                     rq += 1 << (shift - 1)
                 rq >>= shift
-                out[co][ho][wo] = max(-128, min(127, rq))
+                # 8 位截断（wrap）——黑盒语义 y = r & 0xFF（非饱和！）；
+                # 字节按 int8 解释（软件 OutputRearrange 读回）
+                out[co][ho][wo] = rq & 0xFF
+                if out[co][ho][wo] >= 128:
+                    out[co][ho][wo] -= 256
                 raw_out[co][ho][wo] = raw
     return out, raw_out
 

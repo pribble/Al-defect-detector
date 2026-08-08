@@ -193,7 +193,8 @@ def conv_tile_np(p, in_hw, w_np):
 
 
 def post_np(p, acc, co0):
-    """raw+bias → act → requant → 饱和 int8。acc: [Ho,Wo,Co] int32"""
+    """raw+bias → act → requant → 8 位截断（wrap）int8。acc: [Ho,Wo,Co] int32
+    wrap 为黑盒语义（y = r & 0xFF，非饱和）；字节按 int8 解释"""
     out_c = min(8, p.out_c - co0)
     bias = np.array(p.bias_mul[co0:co0 + out_c], dtype=np.int64)
     mult = np.array(p.mult[co0:co0 + out_c], dtype=np.int64)
@@ -205,7 +206,9 @@ def post_np(p, acc, co0):
         rcl6 = np.array(p.rcl6[co0:co0 + out_c], dtype=np.int64)
         v = np.clip(v, 0, rcl6[None, None, :] << 8)
     v = (v + (1 << (p.shift - 1))) >> p.shift
-    return np.clip(v, -128, 127).astype(np.int8)
+    v = v & 0xFF                        # 8 位截断（wrap）
+    v = np.where(v >= 128, v - 256, v)  # 字节按 int8 解释
+    return v.astype(np.int8)
 
 
 def load_input_block(p, mem, cb_in, h0, h1):

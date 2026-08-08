@@ -152,7 +152,12 @@ int ConvConverter(void *ctx, OpLite *op, KernelBase *kernel) {
             } else {
                 device_param->scale[i] = rnd(f * (double)(1 << 30));
                 device_param->scale[o_dims[1] + i] = rnd(b / os_ * (double)(1 << 22));
-                device_param->scale[3 * o_dims[1] + i] = rnd(6.0 / os_ * (double)(1 << 22));
+                // rcl6 溢出保底：6/os·2^22 在 os 很小时超 int32（回绕成负值会让
+                // 硬件 relu6 比较恒成立 → 该层输出全错）。超限给 INT_MAX =
+                // 硬件比较恒不成立（无上限），同时对齐黑盒实测 relu6 无 min(6)。
+                const double rcl6 = 6.0 / os_ * (double)(1 << 22);
+                device_param->scale[3 * o_dims[1] + i] =
+                    (rcl6 >= 2147483647.0) ? INT_MAX : rnd(rcl6);
             }
             device_param->scale[2 * o_dims[1] + i] = 30;
         }

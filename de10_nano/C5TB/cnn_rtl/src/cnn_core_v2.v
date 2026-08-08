@@ -2084,19 +2084,19 @@ module cnn_core_v2 #(
         end
     end
 
-    // 输出拍（S_REQ_OUT3）：移位值饱和 → o_data（64-bit 比较 + mux，~3ns）
+    // 输出拍（S_REQ_OUT3）：移位值 8 位截断（wrap）→ o_data
+    // 黑盒语义（BLACKBOX_NUMERICS.md 实测）：y = r & 0xFF，非饱和！
+    // 饱和会把 box 头（act=0）超出 int8 范围的 logits 全部钳成 ±127，
+    // 抹平 softmax 区分度 → 全图高 score 误检框（上板实测几百框）。
+    // wrap 保留字节差异（超出部分翻转为对端符号，与黑盒位模式一致）。
     always @(posedge clk) begin
         if (state == S_REQ_OUT3) begin
             for (ln = 0; ln < 8; ln = ln + 1) begin
                 v_out_ch = o_group * 8 + ln;
-                if (v_out_ch >= out_c_reg) begin
+                if (v_out_ch >= out_c_reg)
                     v_q[ln] = 8'd0;
-                end else begin
-                v_rq64 = v_shifted[ln];
-                if (v_rq64 > 64'sd127)      v_q[ln] = 8'sd127;
-                else if (v_rq64 < -64'sd128) v_q[ln] = 8'h80;   // -128（8'sd128 字面量溢出）
-                else                         v_q[ln] = v_rq64[7:0];
-                end
+                else
+                    v_q[ln] = v_shifted[ln][7:0];   // 8 位截断（wrap）
             end
             o_data <= {v_q[7], v_q[6], v_q[5], v_q[4],
                        v_q[3], v_q[2], v_q[1], v_q[0]};
