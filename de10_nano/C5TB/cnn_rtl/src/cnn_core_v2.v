@@ -1330,14 +1330,12 @@ module cnn_core_v2 #(
             for (mac_m_i = 0; mac_m_i < 8; mac_m_i = mac_m_i + 1) begin : mac_mul_g
                 if (mac_lane_i < 4) begin : u_dsp
                     mac8x8_dsp u_mac (
-                        .en(mac_c_valid_r),
                         .a (mac_a_q[8*mac_m_i +: 8]),
                         .b (w_q[mac_m_i][mac_lane_i]),
                         .p (mac_p[mac_lane_i][mac_m_i])
                     );
                 end else begin : u_lut
                     mac8x8_lut u_mac (
-                        .en(mac_c_valid_r),
                         .a (mac_a_q[8*mac_m_i +: 8]),
                         .b (w_q[mac_m_i][mac_lane_i]),
                         .p (mac_p[mac_lane_i][mac_m_i])
@@ -1587,7 +1585,7 @@ module cnn_core_v2 #(
                 S_MAC_MUL: begin
                     // a 输入打拍：lb_q（S_MAC_RD 沿的新值）→ mac_a_q，拆 lb M10K
                     // pass-through 读路径与 DSP 乘法；b 输入 w_q 已在 S_MAC_RD 沿采样
-                    mac_a_q <= lb_q;
+                    mac_a_q <= mac_c_valid_r ? lb_q : 64'sd0;
                     state <= S_MAC_MUL2;
                 end
                 S_MAC_MUL2: begin

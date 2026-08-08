@@ -1316,19 +1316,21 @@ module cnn_core_v2 #(
     // 输出 lane 的正确累加（黑盒实测 100% 匹配，见 verify_rtl_vs_blackbox.py）。
     // tb 未暴露此 bug：tb 权重向量按 ref 布局 [mo][k][mi]（mo 主序）生成，
     // 与软件真实布局 [mi][k][mo]（mi 主序）字节序不同，恰好自洽。
+    // 2026-08-10 时序优化：乘法器去掉 en（mac8x8_dsp/lut 无 en 端口），
+    // pad 列清零移到 S_MAC_MUL 采样处（mac_a_q <= mac_c_valid_r ? lb_q : 0），
+    // mac_c_valid_r → 乘法器内部 mux → 乘法的单拍路径（-0.167ns）消失，
+    // 退化为纯乘法器路径。
     generate
         for (mac_lane_i = 0; mac_lane_i < 8; mac_lane_i = mac_lane_i + 1) begin : mac_lane_g
             for (mac_m_i = 0; mac_m_i < 8; mac_m_i = mac_m_i + 1) begin : mac_mul_g
                 if (mac_lane_i < 4) begin : u_dsp
                     mac8x8_dsp u_mac (
-                        .en(mac_c_valid_r),
                         .a (mac_a_q[8*mac_m_i +: 8]),
                         .b (w_q[mac_m_i][mac_lane_i]),
                         .p (mac_p[mac_lane_i][mac_m_i])
                     );
                 end else begin : u_lut
                     mac8x8_lut u_mac (
-                        .en(mac_c_valid_r),
                         .a (mac_a_q[8*mac_m_i +: 8]),
                         .b (w_q[mac_m_i][mac_lane_i]),
                         .p (mac_p[mac_lane_i][mac_m_i])
@@ -1574,7 +1576,11 @@ module cnn_core_v2 #(
                 S_MAC_MUL: begin
                     // a 输入打拍：lb_q（S_MAC_RD 沿的新值）→ mac_a_q，拆 lb M10K
                     // pass-through 读路径与 DSP 乘法；b 输入 w_q 已在 S_MAC_RD 沿采样
-                    mac_a_q <= lb_q;
+                    // 2026-08-10：pad 列清零提前到此处（原在乘法器 en 内）——
+                    // mac_c_valid_r → 乘法器内部 mux → 乘法的单拍路径超限
+                    // （Quartus -0.167ns），改为 mac_a_q 采样门控（0×b=0 等价），
+                    // 乘法器退化为纯 a×b。
+                    mac_a_q <= mac_c_valid_r ? lb_q : 64'sd0;
                     state <= S_MAC_MUL2;
                 end
                 S_MAC_MUL2: begin

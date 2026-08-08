@@ -60,6 +60,7 @@ QSys 系统中 `cnn_top_0` 的关键参数（`soc_system.qsys`）：`IMAGE_MAX_W
 |------|------|------|------|
 | 2026-08-10 | 上板检测结果错（几百框），与 main 分支（黑盒 qxp）不符 | `cnn_core_v2.v` MAC 乘法器 **b 输入索引交叉错位**：`w_q[mac_lane_i][mac_m_i]`（= W[输入 lane][输出 m]）乘 `a[m]`（输入通道 m），实际算成 `acc[lane]=Σ_m 输入[m]·W[输入 lane][输出 m]`，正确应为 `acc[o]=Σ_i 输入[i]·W[输入 i][输出 o]`。tb 未暴露：`gen_*_vectors.py` 权重流按 ref 布局 `[mo][k][mi]`（mo 主序）生成，与软件真实布局 `[mi][k][mo]`（mi 主序）字节序不同，tb 恰好自洽 | 乘法器 b 改为 `w_q[mac_m_i][mac_lane_i]`；`gen_cnn_core_v2_vectors.py` / `gen_cnn_top_vectors.py` 权重流改软件布局字节序（`[mi][k][mo]`，每 8 字节 = mo）。修复后主干与黑盒 100% 一致 |
 | 2026-08-10 | box 头（conv2d_69-80，act=0）与黑盒仍有 30-55% 差异 | requant 输出缺**负值 -1 修正**：黑盒实测语义是 `round_half_away(fv)` 后负值再 -1（floor 除法特性），RTL 只做 `(v+2^29)>>30`，所有负 logits 偏大 1-2 LSB | `S_REQ_OUT3` 输出截断前加 `v_shifted<0 → v_shifted-1`（`& 64'hFF` 截断）；同步 `ref_int8.py conv_s8` / `ref_cnn_top.py post_np`。修复后 47 层黑盒 log 对比：主干 100%、box 头 97-100%（= float 公式同精度） |
+| 2026-08-10 | Quartus 时序失败（换 seed 无法解决）：`mac_c_valid_r → mac_p_r` slack -0.167ns | pad 列清零在**乘法器内部**（`mac8x8_dsp/lut` 的 `en` 选择 a），路径 = `mac_c_valid_r → mux → 乘法 → mac_p_r` 穿乘法器，单拍超限 | 乘法器去掉 `en` 端口（纯 `a×b`）；pad 列清零提前到 `S_MAC_MUL` 采样处（`mac_a_q <= mac_c_valid_r ? lb_q : 0`，0×b=0 等价）。关键路径退化为纯乘法器；verilator 对拍 16/16 + 6/6 保持 PASS |
 
 > **修改 `ip/cnn_top/*.v` 后必须重新 QSys Generate**（Qsys 把 HDL 复制到
 > `soc_system/synthesis/` 后才参与编译），再全编译 + 重新烧录 `.rbf`。
