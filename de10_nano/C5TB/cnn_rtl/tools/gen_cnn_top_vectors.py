@@ -115,13 +115,15 @@ def gen_layer(idx, rng, out_dir):
                 in_words.append(struct.unpack('<Q', by)[0])
 
     # ---- 权重 slice 序（64-bit）----
+    # 2026-08-10：同 gen_cnn_core_v2_vectors.py——改软件布局字节序
+    # [mi][k][mo]（mi 主序，每 8 字节 = mo），与 conv_op.cc / RTL 装载一致
     w_words = []
     for cb_out in range(lp.chn_block):
         for cb_in in ([cb_out] if typ == 4 else range(lp.in_cb)):
-            for mo in range(8):
+            for mi in range(8):
                 for kk in range(k * k):
                     by = bytes(wm.buf[w_addr(lp, cb_out, cb_in, mo, kk, mi)]
-                               for mi in range(8))
+                               for mo in range(8))
                     w_words.append(struct.unpack('<Q', by)[0])
 
     # ---- 期望输出全图（64-bit NHWC8）----

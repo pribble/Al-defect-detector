@@ -54,6 +54,16 @@ QSys 系统中 `cnn_top_0` 的关键参数（`soc_system.qsys`）：`IMAGE_MAX_W
 > `sof_to_rbf.bat` 与 `gen_dtb.bat` 是 Windows 批处理，需要 Windows 上的
 > Quartus（及 embedded tools）环境；`generate_hps_qsys_header.sh` 可在 Linux 上运行。
 
+## 已知问题 / 调试记录（重要）
+
+| 日期 | 问题 | 根因 | 修复 |
+|------|------|------|------|
+| 2026-08-10 | 上板检测结果错（几百框），与 main 分支（黑盒 qxp）不符 | `cnn_core_v2.v` MAC 乘法器 **b 输入索引交叉错位**：`w_q[mac_lane_i][mac_m_i]`（= W[输入 lane][输出 m]）乘 `a[m]`（输入通道 m），实际算成 `acc[lane]=Σ_m 输入[m]·W[输入 lane][输出 m]`，正确应为 `acc[o]=Σ_i 输入[i]·W[输入 i][输出 o]`。tb 未暴露：`gen_*_vectors.py` 权重流按 ref 布局 `[mo][k][mi]`（mo 主序）生成，与软件真实布局 `[mi][k][mo]`（mi 主序）字节序不同，tb 恰好自洽 | 乘法器 b 改为 `w_q[mac_m_i][mac_lane_i]`；`gen_cnn_core_v2_vectors.py` / `gen_cnn_top_vectors.py` 权重流改软件布局字节序（`[mi][k][mo]`，每 8 字节 = mo）。修复后主干与黑盒 100% 一致 |
+| 2026-08-10 | box 头（conv2d_69-80，act=0）与黑盒仍有 30-55% 差异 | requant 输出缺**负值 -1 修正**：黑盒实测语义是 `round_half_away(fv)` 后负值再 -1（floor 除法特性），RTL 只做 `(v+2^29)>>30`，所有负 logits 偏大 1-2 LSB | `S_REQ_OUT3` 输出截断前加 `v_shifted<0 → v_shifted-1`（`& 64'hFF` 截断）；同步 `ref_int8.py conv_s8` / `ref_cnn_top.py post_np`。修复后 47 层黑盒 log 对比：主干 100%、box 头 97-100%（= float 公式同精度） |
+
+> **修改 `ip/cnn_top/*.v` 后必须重新 QSys Generate**（Qsys 把 HDL 复制到
+> `soc_system/synthesis/` 后才参与编译），再全编译 + 重新烧录 `.rbf`。
+
 ## 构建流程
 
 ```text

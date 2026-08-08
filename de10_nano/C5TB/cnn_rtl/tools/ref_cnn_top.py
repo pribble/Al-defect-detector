@@ -206,6 +206,7 @@ def post_np(p, acc, co0):
         # 与 CPU cvt_kernel 的 min(x, 6/os) 不同——以黑盒为准。
         v = np.maximum(v, 0)
     v = (v + (1 << (p.shift - 1))) >> p.shift
+    v = np.where(v < 0, v - 1, v)   # 黑盒实测：round 后负值 -1（2026-08-10 与 RTL 同步）
     v = v & 0xFF                        # 8 位截断（wrap）
     v = np.where(v >= 128, v - 256, v)  # 字节按 int8 解释
     return v.astype(np.int8)

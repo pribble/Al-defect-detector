@@ -127,13 +127,18 @@ def gen_layer(idx, rng, out_dir):
                     exp_words.append(struct.unpack('<Q', by)[0])
 
     # ---- 权重 slice 序列（单行块）----
+    # 2026-08-10：改为软件布局字节序 [cb_out][cb_in][mi][k][mo]（mi 主序，
+    # 每 8 字节 = mo=0..7，conv_op.cc 的 conv2d_weight_reorganize 布局）。
+    # 原为 ref 布局 [mo][k][mi]（mo 主序，每 8 字节 = mi）——与软件/RTL 装载
+    # 语义（iw_data 字节 = mo）不符，导致 tb 与上板输入权重字节序不同，
+    # 掩盖了 cnn_core_v2 MAC 乘法器 b 索引交叉错位（2026-08-10 已修复）。
     w_words = []
     for cb_out in range(lp.chn_block):
         for cb_in in ([cb_out] if typ == 4 else range(lp.in_cb)):
-            for mo in range(8):
+            for mi in range(8):
                 for kk in range(k * k):
                     by = bytes(wm.buf[w_addr(lp, cb_out, cb_in, mo, kk, mi)]
-                               for mi in range(8))
+                               for mo in range(8))
                     w_words.append(struct.unpack('<Q', by)[0])
 
     d = os.path.join(out_dir, f"layer_{idx:02d}")

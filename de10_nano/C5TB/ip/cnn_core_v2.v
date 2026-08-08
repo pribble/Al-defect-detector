@@ -1306,6 +1306,16 @@ module cnn_core_v2 #(
     // .en 端口）之前声明为 reg，否则 Verilog 隐式声明为 wire，实例 en 悬空（z）
     reg mac_c_valid_r;
     genvar mac_lane_i, mac_m_i;
+    // 2026-08-10 关键修复：乘法器 b 输入索引交换（w_q[mac_m_i][mac_lane_i]）。
+    // 软件权重布局（conv_op.cc）为 [cb_out][cb_in][mi][k][mo]（mi 主序），
+    // wbuf[mi][mo][k] 装载语义 = W[输入 mi][输出 mo]。
+    // 原代码用 w_q[mac_lane_i][mac_m_i]（W[输入 lane][输出 m]）乘 a[m]（输入通道 m）
+    // → 输入/输出通道索引交叉错位：acc[lane] = Σ_m 输入[m]·W[输入 lane][输出 m]，
+    // 正确应为 acc[o] = Σ_i 输入[i]·W[输入 i][输出 o]。
+    // 交换后 p[lane][m] = 输入[m]·W[输入 m][输出 lane]，v_sum[lane] 按 m 求和 =
+    // 输出 lane 的正确累加（黑盒实测 100% 匹配，见 verify_rtl_vs_blackbox.py）。
+    // tb 未暴露此 bug：tb 权重向量按 ref 布局 [mo][k][mi]（mo 主序）生成，
+    // 与软件真实布局 [mi][k][mo]（mi 主序）字节序不同，恰好自洽。
     generate
         for (mac_lane_i = 0; mac_lane_i < 8; mac_lane_i = mac_lane_i + 1) begin : mac_lane_g
             for (mac_m_i = 0; mac_m_i < 8; mac_m_i = mac_m_i + 1) begin : mac_mul_g
@@ -1313,14 +1323,14 @@ module cnn_core_v2 #(
                     mac8x8_dsp u_mac (
                         .en(mac_c_valid_r),
                         .a (mac_a_q[8*mac_m_i +: 8]),
-                        .b (w_q[mac_lane_i][mac_m_i]),
+                        .b (w_q[mac_m_i][mac_lane_i]),
                         .p (mac_p[mac_lane_i][mac_m_i])
                     );
                 end else begin : u_lut
                     mac8x8_lut u_mac (
                         .en(mac_c_valid_r),
                         .a (mac_a_q[8*mac_m_i +: 8]),
-                        .b (w_q[mac_lane_i][mac_m_i]),
+                        .b (w_q[mac_m_i][mac_lane_i]),
                         .p (mac_p[mac_lane_i][mac_m_i])
                     );
                 end
@@ -2057,6 +2067,11 @@ module cnn_core_v2 #(
     // 饱和会把 box 头（act=0）超出 int8 范围的 logits 全部钳成 ±127，
     // 抹平 softmax 区分度 → 全图高 score 误检框（上板实测几百框）。
     // wrap 保留字节差异（超出部分翻转为对端符号，与黑盒位模式一致）。
+    // 2026-08-10 追加：round 后负值 -1（黑盒实测"floor 除法特性"）。
+    // box 头（act=0）一半输出为负，无此修正时负 logits 系统性偏大
+    // 1-2 LSB（v_shifted = floor(fv+0.5) vs 黑盒 round_half_away(fv)-1），
+    // 黑盒 log 对比 conv2d_69-76 匹配率仅 30-55%（修正后 95.8-100%）。
+    // 主干 relu/relu6 层输出 ≥0 不受影响。
     always @(posedge clk) begin
         if (state == S_REQ_OUT3) begin
             for (ln = 0; ln < 8; ln = ln + 1) begin
@@ -2064,7 +2079,9 @@ module cnn_core_v2 #(
                 if (v_out_ch >= out_c_reg)
                     v_q[ln] = 8'd0;
                 else
-                    v_q[ln] = v_shifted[ln][7:0];   // 8 位截断（wrap）
+                    // 黑盒实测（BLACKBOX_NUMERICS.md）：round 后负值 -1（floor 除法特性）。
+                    // box 头（act=0）负 logits 无此修正会偏大 1-2 LSB（2026-08-10）
+                    v_q[ln] = (v_shifted[ln] - {63'd0, v_shifted[ln][63]}) & 64'hFF;
             end
             o_data <= {v_q[7], v_q[6], v_q[5], v_q[4],
                        v_q[3], v_q[2], v_q[1], v_q[0]};

@@ -91,6 +91,8 @@ def conv_s8(x, w, bias_mul, mult, shift, act=1, rcl6_mul=None, pad=1, stride=1):
                 if shift > 0:
                     rq += 1 << (shift - 1)
                 rq >>= shift
+                if rq < 0:
+                    rq -= 1   # 黑盒实测：round 后负值 -1（floor 除法特性，2026-08-10 与 RTL 同步）
                 # 8 位截断（wrap）——黑盒语义 y = r & 0xFF（非饱和！）；
                 # 字节按 int8 解释（软件 OutputRearrange 读回）
                 out[co][ho][wo] = rq & 0xFF

@@ -19,6 +19,7 @@
 #include <string>
 #include <vector>
 #include <chrono>
+#include <cstdio>
 
 #include "common.h"
 #include "arm_neon.h"
@@ -26,6 +27,32 @@
 using namespace std;
 
 #define SDK_EMULATE 0
+
+// ---- DUMP_LAYER_OUT：逐层 dump 输出区（NHWC8 原始布局）到 rtl_layers.log，
+// 与黑盒 blackbox_layers2.log（_cnn_rtl_debug/ssd_main_copy/，47 层 × 2 次
+// 推理：warm up + 4.jpg）逐层对比，定位 RTL 与黑盒的数值差异层。
+// 只 dump 第 2 次推理（g_pass==2，即 warm up 后的第一张真实图 4.jpg），
+// 与黑盒 log 的 4.jpg 段对齐（data/ 共 10 张图 + warm up = 11 次推理，
+// 全 dump 会达数百 MB 且对比错位）（2026-08-10 诊断用）----
+static FILE *g_dump_f = nullptr;
+static int g_pass = 0;   // 推理序号：warm up=1，4.jpg=2，后续图片 3..11
+static void dbg_dump_layer_output(const char *name, const int8_t *base,
+                                  int byte_off, int nbytes) {
+  if (!g_dump_f) {
+    g_dump_f = fopen("rtl_layers.log", "wb");
+    if (!g_dump_f) return;
+  }
+  fprintf(g_dump_f, "[LOUTD] %s off=%d n=%d\n",
+          name ? name : "?", byte_off, nbytes);
+  const uint8_t *p = (const uint8_t *)base + byte_off;
+  for (int i = 0; i < nbytes; i += 32) {
+    fprintf(g_dump_f, "%08x:", i);
+    int jmax = (nbytes - i < 32) ? (nbytes - i) : 32;
+    for (int j = 0; j < jmax; j++) fprintf(g_dump_f, " %02x", p[i + j]);
+    fprintf(g_dump_f, "\n");
+  }
+  fflush(g_dump_f);
+}
 
 static int fpga_fd = -1;
 static bool fpga_init_status = false;
@@ -592,6 +619,7 @@ int intelfpga_subgraph(struct DeviceGraphNode *node) {
   fpga_init();
   if (fpga_debug < 0)
     fpga_debug = getenv("FPGA_DEBUG") ? atoi(getenv("FPGA_DEBUG")) : 0;
+  if (node->is_input) g_pass++;   // 每次推理的图输入节点只出现一次
   struct timespec hw_start, hw_end;
   long long input_organize_time = 0, output_organize_time = 0;
   long long fpga_time = 0;
@@ -637,6 +665,48 @@ int intelfpga_subgraph(struct DeviceGraphNode *node) {
       start_fpga(foo, FPGAREG_CNN_START);
       if (fpga_debug)
         dbg_print_layer_snapshot(foo, node->name_.c_str());
+      // scale 溢出诊断（2026-08-10）：box 头 output_scale 极小，
+      // mult=round(ws·is/os·2^30)、bias_mul=round(bias/os·2^22) 可能超
+      // int32 回绕成负值 → 该通道 logits 系统性错误 → softmax 类别概率
+      // 全偏 → 上板几百框。黑盒时代 scale 是 float 无此问题（定点化新引入）。
+      if (fpga_debug && argp && argp->scale) {
+        const int32_t *sc = argp->scale;
+        const int oc = argp->param.output_c;
+        long long min_m = 0, max_m = 0, min_b = 0, max_b = 0, min_r = 0, max_r = 0;
+        for (int i = 0; i < oc; i++) {
+          long long m = sc[i], b = sc[oc + i], r = sc[3 * oc + i];
+          if (i == 0) {
+            min_m = max_m = m;
+            min_b = max_b = b;
+            min_r = max_r = r;
+          } else {
+            if (m < min_m) min_m = m;
+            if (m > max_m) max_m = m;
+            if (b < min_b) min_b = b;
+            if (b > max_b) max_b = b;
+            if (r < min_r) min_r = r;
+            if (r > max_r) max_r = r;
+          }
+        }
+        const bool ovf =
+            (max_m > 2147483647LL || min_m < -2147483648LL ||
+             max_b > 2147483647LL || min_b < -2147483648LL);
+        printf("[SCALE] %s out_c=%d mult[%lld,%lld] bias_mul[%lld,%lld]"
+               " rcl6[%lld,%lld]%s\n",
+               node->name_.c_str(), oc, min_m, max_m, min_b, max_b,
+               min_r, max_r, ovf ? "  *** int32 OVERFLOW ***" : "");
+      }
+      // DUMP_LAYER_OUT=1：dump 本层输出区（NHWC8 原始布局，未做
+      // OutputRearrange），与黑盒 blackbox_layers2.log 逐层对比。
+      // 只 dump g_pass==2（4.jpg），与黑盒 log 的 4.jpg 段对齐
+      if (getenv("DUMP_LAYER_OUT") && g_pass == 2) {
+        const int oc = argp->param.output_c;
+        const int oh = argp->param.output_h;
+        const int ow = argp->param.output_w;
+        const int obytes = ((oc + 7) / 8) * oh * ow * 8;
+        dbg_dump_layer_output(node->name_.c_str(), (const int8_t *)udata,
+                              argp->param.output_offset * 8, obytes);
+      }
 
       clock_gettime(CLOCK_MONOTONIC, &hw_end);
       fpga_time +=

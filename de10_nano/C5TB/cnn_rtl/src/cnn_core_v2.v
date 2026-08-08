@@ -1332,14 +1332,14 @@ module cnn_core_v2 #(
                     mac8x8_dsp u_mac (
                         .en(mac_c_valid_r),
                         .a (mac_a_q[8*mac_m_i +: 8]),
-                        .b (w_q[mac_lane_i][mac_m_i]),
+                        .b (w_q[mac_m_i][mac_lane_i]),
                         .p (mac_p[mac_lane_i][mac_m_i])
                     );
                 end else begin : u_lut
                     mac8x8_lut u_mac (
                         .en(mac_c_valid_r),
                         .a (mac_a_q[8*mac_m_i +: 8]),
-                        .b (w_q[mac_lane_i][mac_m_i]),
+                        .b (w_q[mac_m_i][mac_lane_i]),
                         .p (mac_p[mac_lane_i][mac_m_i])
                     );
                 end
@@ -2087,7 +2087,9 @@ module cnn_core_v2 #(
                 if (v_out_ch >= out_c_reg)
                     v_q[ln] = 8'd0;
                 else
-                    v_q[ln] = v_shifted[ln][7:0];   // 8 位截断（wrap）
+                    // 黑盒实测（BLACKBOX_NUMERICS.md）：round 后负值 -1（floor 除法特性）。
+                    // box 头（act=0）负 logits 无此修正会偏大 1-2 LSB（2026-08-10）
+                    v_q[ln] = (v_shifted[ln] - {63'd0, v_shifted[ln][63]}) & 64'hFF;
             end
             o_data <= {v_q[7], v_q[6], v_q[5], v_q[4],
                        v_q[3], v_q[2], v_q[1], v_q[0]};

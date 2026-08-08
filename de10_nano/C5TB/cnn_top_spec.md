@@ -209,6 +209,12 @@ q30 乘后域（`v = acc·mult + bias_mul<<8`；relu6 钳 `v ≤ rcl6<<8`），
 
 ```
 acc_int32 = Σ (input_int8 × weight_int8)            // 64 MAC/周期，kernel=3×3
+                                                    // 2026-08-10 修复：乘法器 b 索引交换
+                                                    // （w_q[mac_m_i][mac_lane_i]）——原
+                                                    // w_q[mac_lane_i][mac_m_i] 使输入/输出
+                                                    // 通道索引交叉（acc[lane]=Σ_m 输入[m]·W[输入 lane][输出 m]），
+                                                    // 上板实测与黑盒逐层不符；修复后 = 正确卷积
+                                                    // acc[o]=Σ_i 输入[i]·W[输入 i][输出 o]（黑盒 100% 匹配）
 v_rq64    = acc_int32 × mult + (bias_mul << 8)      // 乘后域：mult = round((ws·is/os)·2^30)，
                                                     // bias_mul = round(b/os·2^22)（q22 左移 8 对齐）
 act（可选，乘后施加）：
@@ -217,7 +223,9 @@ act（可选，乘后施加）：
                                                       // 2026-08-10 移除 rcl6 钳位（原 min(v, rcl6<<8)）——
                                                       // box 头输入直接来自 relu6_1/relu6_3，钳位改变
                                                       // 检测头输入 → 上板几百框误检
-out_int8  = ((v + 2^(shift-1)) >> shift) & 0xFF      // shift=30，round-half-up + 8 位截断（wrap，黑盒语义）
+out_int8  = ((v + 2^(shift-1)) >> shift) & 0xFF     // shift=30，round-half-up + 8 位截断（wrap，黑盒语义）
+                                                     // 2026-08-10 追加：移位后负值 -1（黑盒实测"floor 除法特性"），
+                                                     // box 头负 logits 对齐黑盒（conv2d_69-76 黑盒 log 验证 95.8-100%）
 ```
 
 - `ws`/`b` 为模型 per-channel weight_scale/bias，`is`/`os` 为 input/output scale；
