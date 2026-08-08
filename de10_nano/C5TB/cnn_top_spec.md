@@ -213,8 +213,11 @@ v_rq64    = acc_int32 × mult + (bias_mul << 8)      // 乘后域：mult = round
                                                     // bias_mul = round(b/os·2^22)（q22 左移 8 对齐）
 act（可选，乘后施加）：
   relu        v = max(v, 0)
-  relu6       v = min(max(v, 0), rcl6 << 8)         // rcl6 = round(6/os·2^22)
-out_int8  = saturate((v + 2^(shift-1)) >> shift)    // shift=30，round-half-up + 算术右移
+  relu6       v = max(v, 0)                          // 黑盒实测无 min(6)（BLACKBOX_NUMERICS.md）；
+                                                      // 2026-08-10 移除 rcl6 钳位（原 min(v, rcl6<<8)）——
+                                                      // box 头输入直接来自 relu6_1/relu6_3，钳位改变
+                                                      // 检测头输入 → 上板几百框误检
+out_int8  = ((v + 2^(shift-1)) >> shift) & 0xFF      // shift=30，round-half-up + 8 位截断（wrap，黑盒语义）
 ```
 
 - `ws`/`b` 为模型 per-channel weight_scale/bias，`is`/`os` 为 input/output scale；
@@ -224,7 +227,7 @@ out_int8  = saturate((v + 2^(shift-1)) >> shift)    // shift=30，round-half-up 
   150 MHz 收敛）：`S_REQ_MUL`（参数打拍）→ `S_REQ_MULB`（acc 打拍）→
   `S_REQ_MUL2`（4×16×16 DSP 部分积）→ `S_REQ_MUL3`（两组中间和）→
   `S_REQ_MUL4`（中间和相加）→ `S_REQ_MULC`（+bias_mul<<8，64-bit 加法）→
-  `S_REQ_MULC2`（relu/rcl6 64-bit 比较）→ `S_REQ_ACT`（relu/rcl6 mux）→
+  `S_REQ_MULC2`（保留空拍；relu6 rcl6 比较 2026-08-10 已随钳位移除）→ `S_REQ_ACT`（relu mux）→
   `S_REQ_OUT`（round 桶形移位）→ `S_REQ_ROUND2`（round 加法）→
   `S_REQ_OUT2`（算术右移）→ `S_REQ_OUT3`（8 位截断 wrap `y = r & 0xFF` + 输出）。
   数值语义与 float 公式（CPU cvt_kernel 同源）完全一致（tb 按事件对拍）。

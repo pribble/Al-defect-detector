@@ -49,10 +49,10 @@ def quantize_params(ws, is_, os_, b, shift=30):
 def act_s8(x, act, clamp6):
     if act == 0:
         return x
-    if act == 1:
+    if act == 1 or act == 2:
+        # relu/relu6：仅 max(0, x)。黑盒实测 relu6 无 min(6)（BLACKBOX_NUMERICS.md），
+        # box 头输入直接来自 relu6_1/relu6_3，钳位会改变检测头输入（上板几百框）。
         return max(x, 0)
-    if act == 2:
-        return max(0, min(x, clamp6))
     raise ValueError(f"unsupported act={act}")
 
 

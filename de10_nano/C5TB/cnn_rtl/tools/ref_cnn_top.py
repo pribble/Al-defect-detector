@@ -200,11 +200,11 @@ def post_np(p, acc, co0):
     mult = np.array(p.mult[co0:co0 + out_c], dtype=np.int64)
     acc = acc[:, :, :out_c]  # 块末不足 8 通道：截取有效通道
     v = acc.astype(np.int64) * mult[None, None, :] + (bias[None, None, :] << 8)  # 乘后域 q30 对齐（bias_mul 为 q22）
-    if p.act == 1:
+    if p.act == 1 or p.act == 2:
+        # relu/relu6：仅 max(0, v)。黑盒实测 relu6 无 min(6)（BLACKBOX_NUMERICS.md），
+        # box 头输入直接来自 relu6_1/relu6_3，钳位会改变检测头输入（上板几百框）。
+        # 与 CPU cvt_kernel 的 min(x, 6/os) 不同——以黑盒为准。
         v = np.maximum(v, 0)
-    elif p.act == 2:
-        rcl6 = np.array(p.rcl6[co0:co0 + out_c], dtype=np.int64)
-        v = np.clip(v, 0, rcl6[None, None, :] << 8)
     v = (v + (1 << (p.shift - 1))) >> p.shift
     v = v & 0xFF                        # 8 位截断（wrap）
     v = np.where(v >= 128, v - 256, v)  # 字节按 int8 解释

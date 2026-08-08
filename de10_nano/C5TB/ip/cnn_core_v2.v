@@ -1889,7 +1889,7 @@ module cnn_core_v2 #(
         if (state == S_REQ_MUL) begin
             for (ln = 0; ln < 8; ln = ln + 1) begin
                 rq_bias_m[ln] <= rq_bias_q[ln];
-                v_rcl6_l[ln] <= rq_rcl6_q[ln];
+                // v_rcl6_l 打拍已随 relu6 钳位移除（2026-08-10，对齐黑盒无 min6）
             end
         end
     end
@@ -1941,17 +1941,16 @@ module cnn_core_v2 #(
             end
         end else if (state == S_REQ_ACT) begin
             // relu/rcl6 mux（乘后域，64-bit）
+            // 2026-08-10：relu6 去掉 rcl6 钳位（黑盒实测无 min6，见
+            // BLACKBOX_NUMERICS.md；CPU 语义的 min(6/os) 与黑盒不符，且
+            // box 头输入直接来自 relu6_1/relu6_3 输出，钳位改变检测头
+            // 输入 → 上板几百框误检）。act==1 与 act==2 现行为相同。
             for (ln = 0; ln < 8; ln = ln + 1) begin
                 v_out_ch = o_group * 8 + ln;
                 if (v_out_ch >= out_c_reg) begin
                     v_rq64_l[ln] <= 64'sd0;
-                end else if (act_reg == 2'd1) begin
+                end else if (act_reg == 2'd1 || act_reg == 2'd2) begin
                     v_rq64_l[ln] <= v_rq64_l[ln][63] ? 64'sd0 : v_rq64_l[ln];
-                end else if (act_reg == 2'd2) begin
-                    if (v_rq64_l[ln][63])
-                        v_rq64_l[ln] <= 64'sd0;
-                    else if (v_rcl6_cmp_q[ln])
-                        v_rq64_l[ln] <= {{32{v_rcl6_l[ln][31]}}, v_rcl6_l[ln], 8'd0};
                 end
             end
         end
@@ -1959,17 +1958,9 @@ module cnn_core_v2 #(
 
     // 乘加拍级 3b（S_REQ_MULC2）：relu/rcl6 的 64-bit 比较单独一拍（拆比较+mux 链）：
     //   仅正值才可能被 rcl6 截断（relu 后 0 恒 ≤ rcl6）；rcl6 上限 = rcl6_mul<<8（q22 对齐）
-    always @(posedge clk) begin
-        if (state == S_REQ_MULC2) begin
-            for (ln = 0; ln < 8; ln = ln + 1) begin
-                v_out_ch = o_group * 8 + ln;
-                v_rcl6_cmp_q[ln] <= (v_out_ch < out_c_reg) &&
-                                    !v_rq64_l[ln][63] &&
-                                    (v_rq64_l[ln] >
-                                     {{32{v_rcl6_l[ln][31]}}, v_rcl6_l[ln], 8'd0});
-            end
-        end
-    end
+    // 2026-08-10：relu6 钳位已移除（对齐黑盒无 min6），比较逻辑不再使用——
+    //   v_rcl6_cmp_q 保留声明不赋值（综合消除），状态转移 S_REQ_MULC2 保留
+    //   以保证 requant 流水拍数/事件序列不变。
 
     // 乘加拍级 3c（S_REQ_ACT）的 relu/rcl6 mux 已并入乘法级 3 的单一 always
     //（v_rq64_l 单驱动，Quartus 10028）
