@@ -12,7 +12,6 @@
 #include "core/target_wrapper.h"
 #include "core/type_system.h"
 #include "core/types.h"
-#include "core/workspace.h"
 #include "lite/operators/op_params.h"
 #include "lite/utils/all.h"
 #include "lite/utils/stream.h"
@@ -55,10 +54,6 @@ class KernelBase {
     /// re-init the kernel if needed (input shape should be checked in conv
     /// kernel)
     ReInitWhenNeeded();
-
-    // Reset the workspace to make every kernel in the same thread to share the
-    // temporary memory.
-    WorkSpace::Global_Host().AllocReset();
 
     Run();
   }

@@ -14,10 +14,18 @@ class Scope final {
   Scope() = default;
   Scope(const Scope&) = delete;
   Scope& operator=(const Scope&) = delete;
-  ~Scope();
+  ~Scope() = default;
 
-  Variable* Var(const std::string& name);
-  Variable* FindVar(const std::string& name) const;
+  Variable* Var(const std::string &name) {
+    auto it = vars_.emplace(name, nullptr).first;
+    if (!it->second) it->second.reset(new Variable);
+    return it->second.get();
+  }
+
+  Variable* FindVar(const std::string &name) const {
+    auto it = vars_.find(name);
+    return (it != vars_.end()) ? it->second.get() : nullptr;
+  }
 
   const Tensor* FindTensor(const std::string& name) const {
     auto* var = FindVar(name);

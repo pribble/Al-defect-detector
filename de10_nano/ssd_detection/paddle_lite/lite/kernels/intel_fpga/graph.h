@@ -19,9 +19,9 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <iostream>
 #include <intelfpga.h>
 
-#include "lite/utils/env.h"
 #include "lite/utils/logging.h"
 #include "lite/utils/macros.h"
 

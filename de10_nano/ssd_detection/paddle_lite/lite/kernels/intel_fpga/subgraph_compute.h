@@ -17,7 +17,6 @@
 #include "core/type_system.h"
 #include "core/types.h"
 #include "lite/kernels/intel_fpga/graph.h"
-#include "lite/utils/env.h"
 
 
 namespace paddle {
