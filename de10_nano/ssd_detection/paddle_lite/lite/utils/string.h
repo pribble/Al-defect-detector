@@ -21,7 +21,7 @@
 #include <string>
 #include <vector>
 #include "lite/utils/charconv.h"
-#include "lite/utils/replace_stl/stream.h"
+#include "lite/utils/stream.h"
 
 namespace paddle {
 namespace lite {

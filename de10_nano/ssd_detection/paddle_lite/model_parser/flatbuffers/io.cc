@@ -4,7 +4,7 @@
 #include <memory>
 #include <utility>
 #include <vector>
-#include "core/model/base/io.h"
+#include "core/io.h"
 #include "model_parser/flatbuffers/traits.h"
 
 namespace paddle {

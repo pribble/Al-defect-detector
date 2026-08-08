@@ -18,7 +18,7 @@
 #include <time.h>
 #include <utility>
 #include "core/op_registry.h"
-#include "lite/kernels/intel_fpga/bridges/paddle_use_bridges.h"
+#include "lite/kernels/intel_fpga/paddle_use_bridges.h"
 
 #include "core/type_system.h"
 

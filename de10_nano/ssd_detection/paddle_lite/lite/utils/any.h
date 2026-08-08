@@ -23,7 +23,7 @@
 #include "lite/utils/fast_type_id.h"
 #endif
 
-#include "lite/utils/log/cp_logging.h"
+#include "lite/utils/cp_logging.h"
 
 namespace paddle {
 namespace lite {

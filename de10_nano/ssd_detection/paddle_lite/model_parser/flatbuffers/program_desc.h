@@ -5,8 +5,8 @@
 #include <string>
 #include <utility>
 #include <vector>
-#include "core/model/base/io.h"
-#include "core/model/base/program_desc.h"
+#include "core/io.h"
+#include "core/program_desc.h"
 #include "model_parser/flatbuffers/block_desc.h"
 #include "model_parser/flatbuffers/framework_generated.h"
 #include "model_parser/flatbuffers/op_version_map.h"

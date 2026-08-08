@@ -1,0 +1,85 @@
+#pragma once
+#include <string>
+#include <vector>
+#include "core/traits.h"
+#include "lite/utils/cp_logging.h"
+
+namespace paddle {
+namespace lite {
+
+class TensorInfoReadAPI {
+ public:
+  virtual std::vector<int64_t> Dim() const = 0;
+  virtual VarDataType GetDataType() const = 0;
+
+  virtual ~TensorInfoReadAPI() = default;
+};
+
+class TensorInfoWriteAPI {
+ public:
+  virtual void SetDim(const std::vector<int64_t> &dim) {
+    LITE_MODEL_INTERFACE_NOT_IMPLEMENTED;
+  }
+  virtual void SetDataType(VarDataType data_type) {
+    LITE_MODEL_INTERFACE_NOT_IMPLEMENTED;
+  }
+  virtual void Sync() { LITE_MODEL_INTERFACE_NOT_IMPLEMENTED; }
+
+  virtual ~TensorInfoWriteAPI() = default;
+};
+
+class ParamDescReadAPI : public TensorInfoReadAPI {
+ public:
+  virtual std::string Name() const = 0;
+  virtual const void *GetData() const = 0;
+  virtual size_t byte_size() const = 0;
+
+  virtual ~ParamDescReadAPI() = default;
+};
+
+class ParamDescWriteAPI : public TensorInfoWriteAPI {
+ public:
+  virtual void SetName(const std::string &name) {
+    LITE_MODEL_INTERFACE_NOT_IMPLEMENTED;
+  }
+
+  virtual void SetData(const void *data, size_t byte_size) {
+    LITE_MODEL_INTERFACE_NOT_IMPLEMENTED;
+  }
+
+  virtual ~ParamDescWriteAPI() = default;
+};
+
+class CombinedParamsDescReadAPI {
+ public:
+  virtual const ParamDescReadAPI *GetParamDesc(size_t idx) const = 0;
+  virtual size_t GetParamsSize() const = 0;
+  virtual ~CombinedParamsDescReadAPI() = default;
+};
+
+class CombinedParamsDescWriteAPI {
+ public:
+  virtual ParamDescWriteAPI *AddParamDesc() {
+    LITE_MODEL_INTERFACE_NOT_IMPLEMENTED;
+    return nullptr;
+  }
+  virtual ~CombinedParamsDescWriteAPI() = default;
+};
+
+// The reading and writing of the model are one-time and separate.
+// This interface is a combination of reading and writing interfaces,
+// which is used to support legacy interfaces.
+
+class ParamDescAPI : public ParamDescReadAPI, public ParamDescWriteAPI {
+ public:
+  virtual ~ParamDescAPI() = default;
+};
+
+class CombinedParamsDescAPI : public CombinedParamsDescReadAPI,
+                              public CombinedParamsDescWriteAPI {
+ public:
+  virtual ~CombinedParamsDescAPI() = default;
+};
+
+}  // namespace lite
+}  // namespace paddle

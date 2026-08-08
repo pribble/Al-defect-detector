@@ -6,7 +6,7 @@
 #include "api/paddle_place.h"
 #include "core/dim.h"
 #include "core/target_wrapper.h"
-#include "lite/utils/log/logging.h"
+#include "lite/utils/logging.h"
 #include "lite/utils/macros.h"
 
 namespace paddle {

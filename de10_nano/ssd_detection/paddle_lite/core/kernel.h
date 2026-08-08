@@ -15,7 +15,7 @@
 #include "core/workspace.h"
 #include "lite/operators/op_params.h"
 #include "lite/utils/all.h"
-#include "lite/utils/replace_stl/stream.h"
+#include "lite/utils/stream.h"
 
 namespace paddle {
 namespace lite {

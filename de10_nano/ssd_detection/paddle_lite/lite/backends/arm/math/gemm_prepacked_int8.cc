@@ -16,9 +16,9 @@
 #include <arm_neon.h>
 #include "core/parallel_defines.h"
 #ifdef __aarch64__
-#include "lite/backends/arm/math/dotprod/gemm_sdot.h"
+#include "lite/backends/arm/math/gemm_sdot.h"
 #else
-#include "lite/backends/arm/math/dotprod/gemm_vsdot.h"
+#include "lite/backends/arm/math/gemm_vsdot.h"
 #endif
 namespace paddle {
 namespace lite {

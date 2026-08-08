@@ -12,29 +12,4 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#pragma once
-
-#include <iostream>
-#include <list>
-#include <map>
-#include <memory>
-#include <string>
-#include <utility>
-
-#include "lite/utils/any.h"
-#include "lite/utils/check.h"
-#include "lite/utils/hash.h"
-#include "lite/utils/io.h"
-#include "lite/utils/cp_logging.h"
-#include "lite/utils/macros.h"
-#include "lite/utils/string.h"
-#include "lite/utils/varient.h"
-
-#include "lite/utils/stream.h"
-
-// On windows environment, min and max will be undefined to
-// avoid compiling error.
-#if defined(_MSC_VER)
-#undef min
-#undef max
-#endif
+#include "lite/backends/host/prior_box.h"

@@ -12,11 +12,11 @@
 #include "core/op_lite.h"
 #include "core/op_registry.h"
 #include "core/program.h"
-#include "core/subgraph/subgraph_bridge_registry.h"
+#include "core/subgraph_bridge_registry.h"
 #include "core/tensor.h"
 #include "core/type_system.h"
 #include "core/types.h"
-#include "lite/kernels/intel_fpga/bridges/graph.h"
+#include "lite/kernels/intel_fpga/graph.h"
 #include "lite/utils/env.h"
 
 

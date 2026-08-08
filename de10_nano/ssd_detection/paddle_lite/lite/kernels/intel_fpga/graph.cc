@@ -12,29 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#pragma once
-
-#include <iostream>
-#include <list>
-#include <map>
-#include <memory>
-#include <string>
+#include "lite/kernels/intel_fpga/graph.h"
 #include <utility>
 
-#include "lite/utils/any.h"
-#include "lite/utils/check.h"
-#include "lite/utils/hash.h"
-#include "lite/utils/io.h"
-#include "lite/utils/cp_logging.h"
-#include "lite/utils/macros.h"
-#include "lite/utils/string.h"
-#include "lite/utils/varient.h"
+namespace paddle {
+namespace lite {
+namespace subgraph {
+namespace intel_fpga {
 
-#include "lite/utils/stream.h"
 
-// On windows environment, min and max will be undefined to
-// avoid compiling error.
-#if defined(_MSC_VER)
-#undef min
-#undef max
-#endif
+
+bool Graph::BuildDeviceModel() {
+  VLOG(4) << "Pass.";
+  return true;
+}
+
+bool Graph::DeviceModelValidCheck() {
+  return true;
+}
+
+}  // namespace apu
+}  // namespace subgraph
+}  // namespace lite
+}  // namespace paddle

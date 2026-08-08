@@ -23,7 +23,7 @@
 #include "lite/backends/arm/math/type_trans.h"
 #include "core/target_wrapper.h"
 #include "lite/operators/op_params.h"
-#include "lite/utils/log/cp_logging.h"
+#include "lite/utils/cp_logging.h"
 #if defined(__aarch64__) && defined(LITE_WITH_ARM8_SVE2)
 #include "lite/backends/arm/math/sve/gemm_sve_i8mm.h"
 #endif

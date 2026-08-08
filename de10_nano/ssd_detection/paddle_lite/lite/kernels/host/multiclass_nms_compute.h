@@ -17,7 +17,7 @@
 #include <map>
 #include <utility>
 #include <vector>
-#include "lite/backends/host/math/nms_util.h"
+#include "lite/backends/host/nms_util.h"
 #include "core/kernel.h"
 #include "core/op_registry.h"
 namespace paddle {

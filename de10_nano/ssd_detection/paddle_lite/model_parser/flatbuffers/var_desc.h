@@ -3,7 +3,7 @@
 #include <memory>
 #include <string>
 #include <vector>
-#include "core/model/base/var_desc.h"
+#include "core/var_desc.h"
 #include "model_parser/flatbuffers/framework_generated.h"
 #include "model_parser/flatbuffers/traits.h"
 #include "lite/utils/all.h"

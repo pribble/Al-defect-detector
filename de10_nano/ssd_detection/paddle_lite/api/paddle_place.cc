@@ -1,7 +1,7 @@
 #include "api/paddle_place.h"
 #include "lite/utils/hash.h"
-#include "lite/utils/log/cp_logging.h"
-#include "lite/utils/replace_stl/stream.h"
+#include "lite/utils/cp_logging.h"
+#include "lite/utils/stream.h"
 #include "lite/utils/string.h"
 
 namespace paddle {

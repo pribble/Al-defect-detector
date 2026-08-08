@@ -5,7 +5,7 @@
 #include <vector>
 
 #include "api/paddle_place.h"
-#include "core/model/base/apis.h"
+#include "core/apis.h"
 #include "core/scope.h"
 #include "core/tensor.h"
 #include "core/types.h"

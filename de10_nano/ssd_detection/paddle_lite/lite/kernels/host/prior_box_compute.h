@@ -16,7 +16,7 @@
 #include <algorithm>
 #include <string>
 #include <vector>
-#include "lite/backends/host/math/prior_box.h"
+#include "lite/backends/host/prior_box.h"
 #include "core/kernel.h"
 #include "core/op_registry.h"
 #include "lite/kernels/host/prior_box_compute.h"

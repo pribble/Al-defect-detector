@@ -2,7 +2,7 @@
 
 #include "core/thread_pool.h"
 #include <string.h>
-#include "lite/utils/log/logging.h"
+#include "lite/utils/logging.h"
 
 namespace paddle {
 namespace lite {

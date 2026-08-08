@@ -20,7 +20,7 @@
 #include <utility>
 #include <vector>
 
-#include "core/model/base/op_desc.h"
+#include "core/op_desc.h"
 #include "model_parser/flatbuffers/framework_generated.h"
 #include "model_parser/flatbuffers/traits.h"
 #include "model_parser/flatbuffers/vector_view.h"

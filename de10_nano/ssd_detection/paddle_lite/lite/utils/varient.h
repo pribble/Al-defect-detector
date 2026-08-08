@@ -20,7 +20,7 @@
 #include <typeinfo>
 #include <utility>
 #include "lite/utils/fast_type_id.h"
-#include "lite/utils/log/cp_logging.h"
+#include "lite/utils/cp_logging.h"
 #include "lite/utils/string.h"
 
 // This is an equivalent implementation of boost::any. We implement this to

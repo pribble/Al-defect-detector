@@ -20,8 +20,8 @@
 #include <string>
 #include <utility>
 #include <vector>
-#include "core/model/base/io.h"
-#include "core/model/base/param_desc.h"
+#include "core/io.h"
+#include "core/param_desc.h"
 #include "model_parser/flatbuffers/framework_generated.h"
 #include "model_parser/flatbuffers/param_generated.h"
 #include "model_parser/flatbuffers/traits.h"
