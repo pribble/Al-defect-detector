@@ -1,4 +1,4 @@
 model_file ssd_mobilenet_v1_opt.nb 
 label_path ./label_list
-mean 127.5,127.5,127.5
-std 127.502231,127.502231,127.502231
+mean 127.5
+std 127.502231

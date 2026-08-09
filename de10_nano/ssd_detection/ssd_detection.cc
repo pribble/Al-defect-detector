@@ -35,8 +35,8 @@ struct Object {
 
 // Object for storing all preprocessed data
 struct ImageBlob {
-  std::vector<float> mean_;
-  std::vector<float> scale_;
+  float mean_;
+  float scale_;
 };
 
 std::vector<std::string> ReadLine(const std::string &path) {
@@ -87,9 +87,6 @@ public:
     config_ = LoadConfigTxt(config_path);
     PrintConfig(config_);
 
-    rgb_img.create(cv::Size(input_shape, input_shape), CV_8UC3);
-    img_float.create(cv::Size(input_shape, input_shape), CV_32FC3);
-
     std::string label_path = config_.at("label_path");
     class_names_ = ReadLine(label_path);
 
@@ -112,6 +109,11 @@ public:
       float* d = predictor_->GetInput(0)->mutable_data<float>();
       d[0] = d[1] = input_shape;
     }
+    // scale 输入恒为 {1, 1}
+    {
+      float* scale_data = predictor_->GetInput(2)->mutable_data<float>();
+      scale_data[0] = scale_data[1] = 1.f;
+    }
 
     init_ImageData();
   }
@@ -133,22 +135,18 @@ public:
       return {};
     }
 
-    // input[1] — image data (changes every frame).
-    // Shape [1, 3, 300, 300] was pre-set by InitInputs.
-    float* data1 = predictor_->GetInput(1)->mutable_data<float>();
-    if (frame.channels() == 1) {
-      preprocessImgGray(frame, data1);
-    } else {
-      preprocessImg(frame, data1);
+    // 本检测器只适配灰度图：非 1 通道输入直接拒绝，不自动转换。
+    if (frame.channels() != 1) {
+      std::cerr << "[WARN] Detect only accepts grayscale (1-channel) input, got "
+                << frame.channels() << " channels\n";
+      return {};
     }
 
-    // input[2] — scale (depends on original frame size).
-    // Shape [1, 2] was pre-set by InitInputs.
-    {
-      float* d = predictor_->GetInput(2)->mutable_data<float>();
-      d[0] = static_cast<float>(input_shape) / static_cast<float>(frame.rows);
-      d[1] = static_cast<float>(input_shape) / static_cast<float>(frame.cols);
-    }
+    // input[1] — image data (changes every frame).
+    // Shape [1, 3, 300, 300] was pre-set by InitInputs.
+    // input[2] (scale) 已在构造时写死为 {1, 1}，无需每帧更新。
+    float* data1 = predictor_->GetInput(1)->mutable_data<float>();
+    preprocessImg(frame, data1);
 
     predictor_->Run();
 
@@ -184,16 +182,19 @@ public:
     int font_face = cv::FONT_HERSHEY_COMPLEX_SMALL;
     double font_scale = 1.f;
     int thickness = 1;
+    const cv::Scalar kBoxColor(255);   // 白色框
+    const cv::Scalar kTextColor(255);  // 白色文字
     for (auto obj: objects){
       auto rec_clip = obj.rec;
+      std::string class_name = GetClassName(obj.class_id);
       std::cout << "image size: " << image.cols << ", " << image.rows
-                << ", detect object: " << class_names_[obj.class_id] << ", score: " << obj.prob
+                << ", detect object: " << class_name << ", score: " << obj.prob
                 << ", location: x=" << rec_clip.x << ", y=" << rec_clip.y
                 << ", width=" << rec_clip.width << ", height=" << rec_clip.height
                 << std::endl;
-      cv::rectangle(image, rec_clip, cv::Scalar(0, 0, 255), 1, cv::LINE_AA);
+      cv::rectangle(image, rec_clip, kBoxColor, 1, cv::LINE_AA);
       std::string str_prob = std::to_string(obj.prob);
-      std::string text = std::string(class_names_[obj.class_id]) + ": " +
+      std::string text = class_name + ": " +
                           str_prob.substr(0, str_prob.find(".") + 4);
       cv::Size text_size = cv::getTextSize(text, font_face, font_scale, thickness, nullptr);
       float new_font_scale = rec_clip.width * 0.5f * font_scale / text_size.width;
@@ -206,7 +207,7 @@ public:
                   origin,
                   font_face,
                   new_font_scale,
-                  cv::Scalar(0, 255, 255),
+                  kTextColor,
                   thickness,
                   cv::LINE_AA);
     }
@@ -218,7 +219,6 @@ private:
   std::vector<std::string> class_names_;
   std::vector<float> class_thresholds_;
   ImageBlob img_data;
-  cv::Mat rgb_img;   // 复用缓冲区
   cv::Mat img_float;
 
   void loadModel() {
@@ -232,33 +232,12 @@ private:
   }
 
   void init_ImageData() {
-    std::vector<float> mean_vals, scale_vals;
-    std::vector<std::string> mean_str = split(config_.at("mean"), ',');
-    std::vector<std::string> std_str = split(config_.at("std"), ',');
-    std::transform(mean_str.begin(), mean_str.end(), back_inserter(mean_vals),
-                    [](const std::string& s) { return std::stof(s); });
-    std::transform(std_str.begin(), std_str.end(), back_inserter(scale_vals),
-                    [](const std::string& s) { return std::stof(s); });
-    if (mean_vals.size() != 3 || scale_vals.size() != 3) {
-      std::cerr << "[ERROR] mean or scale size must equal to 3\n";
-      exit(1);
-    }
-    img_data.mean_ = mean_vals;
-    img_data.scale_ = scale_vals;
+    img_data.mean_ = std::stof(config_.at("mean"));
+    img_data.scale_ = std::stof(config_.at("std"));
   }
 
+  // 灰度图 (CV_8UC1) → 3-channel NCHW tensor
   void preprocessImg(const cv::Mat& img, float* data) {
-    // img is already 300×300 (Pi resizes before sending; detect_image_file resizes explicitly)
-    img.copyTo(rgb_img);
-
-    rgb_img.convertTo(img_float, CV_32FC3, 1);
-    const float* dimg = reinterpret_cast<const float*>(img_float.data);
-    neon_mean_scale(dimg, data);
-  }
-
-  // Single-channel input → 3-channel NCHW tensor (no cvtColor, no redundant channel copy)
-  void preprocessImgGray(const cv::Mat& img, float* data) {
-    cv::Mat img_float;
     img.convertTo(img_float, CV_32FC1, 1.0);
     const float* din = reinterpret_cast<const float*>(img_float.data);
 
@@ -267,10 +246,8 @@ private:
     float* dout_c1 = data + size;
     float* dout_c2 = data + size * 2;
 
-    float mean = img_data.mean_[0];
-    float scale = 1.f / img_data.scale_[0];
-    float32x4_t vmean = vdupq_n_f32(mean);
-    float32x4_t vscale = vdupq_n_f32(scale);
+    float32x4_t vmean = vdupq_n_f32(img_data.mean_);
+    float32x4_t vscale = vdupq_n_f32(1.f / img_data.scale_);
 
     for (int i = 0; i < size; i += 4) {
       float32x4_t vin = vld1q_f32(din + i);
@@ -278,39 +255,6 @@ private:
       vst1q_f32(dout_c0 + i, vscaled);
       vst1q_f32(dout_c1 + i, vscaled);
       vst1q_f32(dout_c2 + i, vscaled);
-    }
-  }
-
-  // fill tensor with mean and scale and trans layout: nhwc -> nchw, neon speed up
-  void neon_mean_scale(const float* din, float* dout) {
-    float32x4_t vmean0 = vdupq_n_f32(img_data.mean_[0]);
-    float32x4_t vmean1 = vdupq_n_f32(img_data.mean_[1]);
-    float32x4_t vmean2 = vdupq_n_f32(img_data.mean_[2]);
-    float32x4_t vscale0 = vdupq_n_f32(1.f / img_data.scale_[0]);
-    float32x4_t vscale1 = vdupq_n_f32(1.f / img_data.scale_[1]);
-    float32x4_t vscale2 = vdupq_n_f32(1.f / img_data.scale_[2]);
-
-    const int size = input_shape * input_shape;
-    float* dout_c0 = dout;
-    float* dout_c1 = dout + size;
-    float* dout_c2 = dout + size * 2;
-
-    for (int i = 0; i < size; i += 4) {
-      float32x4x3_t vin3 = vld3q_f32(din);
-      float32x4_t vsub0 = vsubq_f32(vin3.val[0], vmean0);
-      float32x4_t vsub1 = vsubq_f32(vin3.val[1], vmean1);
-      float32x4_t vsub2 = vsubq_f32(vin3.val[2], vmean2);
-      float32x4_t vs0 = vmulq_f32(vsub0, vscale0);
-      float32x4_t vs1 = vmulq_f32(vsub1, vscale1);
-      float32x4_t vs2 = vmulq_f32(vsub2, vscale2);
-      vst1q_f32(dout_c0, vs0);
-      vst1q_f32(dout_c1, vs1);
-      vst1q_f32(dout_c2, vs2);
-
-      din += 12;
-      dout_c0 += 4;
-      dout_c1 += 4;
-      dout_c2 += 4;
     }
   }
 };
@@ -329,7 +273,7 @@ void detect_image_file(Detector& detector, std::string input_path){
   }
   else img_paths.push_back(input_path);
   //warmup
-  cv::Mat img(input_shape, input_shape, CV_8UC3);
+  cv::Mat img(input_shape, input_shape, CV_8UC1);
   detector.Detect(img);
 
   if (stat("./result", &st) != 0) {
@@ -340,7 +284,7 @@ void detect_image_file(Detector& detector, std::string input_path){
   for (const auto& img_path: img_paths){
     std::cout<< img_path <<std::endl;
 
-    cv::Mat img = imread(img_path, cv::IMREAD_COLOR);
+    cv::Mat img = imread(img_path, cv::IMREAD_GRAYSCALE);
     if (img.empty()) {
       std::cerr << "[ERROR] Failed to read image: " << img_path << "\n";
       continue;

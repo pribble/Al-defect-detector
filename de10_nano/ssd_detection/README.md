@@ -77,7 +77,7 @@ deploy/
 |------|------|------|------|
 | feed 0 | `im_shape_0` | `[1,2]` | 固定 `{300, 300}`，构造时预填 |
 | feed 1 | `image_0` | `[1,3,300,300]` | 每帧更新 |
-| feed 2 | `scale_0` | `[1,2]` | `{300/rows, 300/cols}`，每帧更新 |
+| feed 2 | `scale_0` | `[1,2]` | 恒 `{1, 1}`（输入固定 300×300），构造时写死 |
 | fetch 0 | `save_infer_model/scale_0.tmp_1` | `[N,6]` | 由 multiclass_nms3 产生；每行 `[class_id, confidence, x_min, y_min, x_max, y_max]` |
 
 ## 推理管线
@@ -87,7 +87,7 @@ HTTP 模式（`POST /predict`，multipart 字段 `image_file`）：
 ```
 Pi: 768×512 gray → cv2.resize(300×300) → 90000 字节 raw → POST
 FPGA: Mat(300×300, CV_8UC1) → preprocessImgGray（NEON 1ch→3ch NCHW，减 mean 127.5、乘 1/std）
-    → 填 input[1]、input[2] → PaddlePredictor::Run() → 解析 [N,6] 输出 → JSON
+    → 填 input[1]（input[0] im_shape、input[2] scale 构造时写死）→ PaddlePredictor::Run() → 解析 [N,6] 输出 → JSON
 ```
 
 - `preprocessImgGray`：`CV_8UC1 → CV_32FC1`，NEON `vld1q/vmulq/vsubq` 一次算 4 像素，
@@ -165,7 +165,7 @@ cd /opt/paddle_frame
 ./test.sh       # 同上，但以 data 目录为参数 → 离线检测（结果写 ./result/）
 ```
 
-离线模式（`detect_image_file`）：接受单张图片或目录，`imread(IMREAD_COLOR)` →
+离线模式（`detect_image_file`）：接受单张图片或目录，`imread(IMREAD_GRAYSCALE)` →
 `resize(300×300, INTER_CUBIC)` → `Detect()` → 画框存 `./result/*_result.jpg`。
 
 ## 调试技巧
@@ -181,6 +181,9 @@ cd /opt/paddle_frame
 
 ## 已知约定（勿改动）
 
+- **`Detect()` 只接受灰度图（CV_8UC1）**：非 1 通道输入直接拒绝（WARN + 返回空），
+  不做自动转灰度；离线模式 `imread` 固定 `IMREAD_GRAYSCALE`，HTTP 模式 Pi 发 300×300
+  灰度 raw。
 - 输入固定 300×300（`#define input_shape 300`，必须是 2 的整数倍），Pi 端保证。
 - `intelfpga.h`：`REOGANIZE_TYPE = REOGANIZE_ARM`（输入/输出重组在 ARM 上用 NEON
   做，而非 FPGA reorganize IP）、`INPUT_CHANNEL_TILE = 8`（ARM32）、
