@@ -91,6 +91,29 @@ GAUSSIAN_KERNEL = int(shared.config.get("Configuration", "gaussian_kernel", fall
 BINARY_THRESHOLD_1 = 100
 DILATE_ITERATIONS = 4
 
+
+def _det_cfg(key, fallback):
+    """读取 [detection] 段配置 (config.ini 缺段/缺键时回退默认值)."""
+    return shared.config.get("detection", key, fallback=fallback)
+
+
+# ---- 软处理参数 (config.ini [detection] 段, 现场可调; 改动后需重启服务) ----
+USE_SOFT_PROCESSING = int(_det_cfg("use_soft_processing", "1"))
+BINARIZE_MODE = _det_cfg("binarize_mode", "otsu")
+OTSU_MIN_THRESHOLD = float(_det_cfg("otsu_min_threshold", "50"))
+ADAPTIVE_BLOCK = int(_det_cfg("adaptive_block", "21"))
+ADAPTIVE_C = int(_det_cfg("adaptive_c", "8"))
+MORPH_OPEN = int(_det_cfg("morph_open", "1"))
+MORPH_CLOSE = int(_det_cfg("morph_close", "2"))
+MIN_COMPONENT_AREA = float(_det_cfg("min_component_area", "0.002"))
+BACKGROUND_ALPHA = float(_det_cfg("background_alpha", "0.03"))
+BASELINE_INIT_FRAMES = int(_det_cfg("baseline_init_frames", "30"))
+BASELINE_WINDOW = int(_det_cfg("baseline_window", "60"))
+TRIGGER_K = float(_det_cfg("trigger_k", "3.0"))
+TRIGGER_CONFIRM = int(_det_cfg("trigger_confirm_frames", "3"))
+CAL_RATIO_THRESHOLD = float(_det_cfg("cal_ratio_threshold", "0.01"))
+USE_SSIM_GATE = int(_det_cfg("use_ssim_gate", "0"))
+
 # 机械臂控制参数缓存 (路由 /change_conf 同步更新)
 GRAB_SPEED = shared.config.get("Configuration", "speed")
 GRAB_DELAY = shared.config.get("Configuration", "time")
@@ -154,6 +177,57 @@ def compare_image(image_gray) -> float:
 
 
 # ============================================================
+# 软处理: 光照鲁棒前景提取 (背景差分 → 自适应二值化 → 形态学 → 连通域)
+# ============================================================
+
+def _binarize(diff):
+    """对背景差分图做二值化: Otsu(默认)/adaptive/fixed."""
+    blurred = cv2.GaussianBlur(diff, (GAUSSIAN_KERNEL, GAUSSIAN_KERNEL), 0)
+    if BINARIZE_MODE == "adaptive":
+        binary = cv2.adaptiveThreshold(
+            blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY, ADAPTIVE_BLOCK, ADAPTIVE_C)
+    elif BINARIZE_MODE == "fixed":
+        _, binary = cv2.threshold(blurred, BINARY_THRESHOLD_1, 255, cv2.THRESH_BINARY)
+    else:  # otsu
+        t, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        if t < OTSU_MIN_THRESHOLD:  # 纯暗背景下限保护, 防把噪声当目标
+            _, binary = cv2.threshold(blurred, OTSU_MIN_THRESHOLD, 255, cv2.THRESH_BINARY)
+    return binary
+
+
+def _morph(binary):
+    """形态学: 开运算去噪 + 闭运算填洞连块."""
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    if MORPH_OPEN:
+        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=MORPH_OPEN)
+    if MORPH_CLOSE:
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=MORPH_CLOSE)
+    return binary
+
+
+def _filter_components(binary):
+    """连通域面积过滤: 只保留足够大的前景块 (铝片), 去掉散乱高光碎斑."""
+    num, labels, stats, _ = cv2.connectedComponentsWithStats(binary, 8)
+    mask = np.zeros_like(binary)
+    min_area = MIN_COMPONENT_AREA * binary.size
+    for i in range(1, num):  # 跳过 label=0 背景
+        if stats[i, cv2.CC_STAT_AREA] >= min_area:
+            mask[labels == i] = 255
+    return mask
+
+
+def _extract_fg_ratio(gray, background):
+    """软处理前景提取: 返回 (fg_ratio, 中间结果 dict 供调试)."""
+    diff = cv2.absdiff(gray, background.astype(np.uint8))
+    binary = _binarize(diff)
+    opened = _morph(binary)
+    mask = _filter_components(opened)
+    fg_ratio = np.count_nonzero(mask) / mask.size
+    return fg_ratio, {"diff": diff, "binary": binary, "mask": mask}
+
+
+# ============================================================
 # FPS 标注
 # ============================================================
 
@@ -187,6 +261,11 @@ class Consumer(threading.Thread):
         self._cal_last_ratio = 0.0
         self._cal_entry_time = None
         self._cal_peak_ratio = 0.0
+        # 软处理: EMA 背景模型 + fg_ratio 基线
+        self._background = None   # float32 (48,64) EMA 背景
+        self._baseline = []       # 空皮带 fg_ratio 滚动窗口
+        self._baseline_mean = 0.0
+        self._baseline_std = 0.0
 
     def run(self):
         database.create_database()
@@ -202,59 +281,144 @@ class Consumer(threading.Thread):
     # ---- 单帧处理 ----
 
     def _process_sampling_frame(self):
-        global _cached_ref_gray
+        """每帧入口: 按 USE_SOFT_PROCESSING 选软/硬检测, 再走统一状态机."""
         image = frame_queue.get()
         if image is None:
             return
 
-        black_image = cv2.resize(image, (SSIM_WIDTH, SSIM_HEIGHT), interpolation=cv2.INTER_AREA)
-        blurred = cv2.GaussianBlur(black_image, (GAUSSIAN_KERNEL, GAUSSIAN_KERNEL), 0)
+        gray = cv2.resize(image, (SSIM_WIDTH, SSIM_HEIGHT), interpolation=cv2.INTER_AREA)
+
+        if USE_SOFT_PROCESSING:
+            enter, exit_cond, ratio = self._soft_detect(gray)
+            self._calibration_update(ratio, CAL_RATIO_THRESHOLD)
+        else:
+            enter, exit_cond, ratio = self._hard_detect(gray, image)
+            self._calibration_update(ratio, 0.02)
+
+        self._run_state_machine(enter, exit_cond, ratio, image)
+
+    # ---- 软处理: 光照鲁棒前景提取 (背景建模 + 自适应二值化) ----
+
+    def _init_background(self, gray):
+        """用参考图(存在时)或首帧初始化 EMA 背景."""
+        if os.path.exists(REFERENCE_IMAGE):
+            ref = cv2.imread(REFERENCE_IMAGE, cv2.IMREAD_GRAYSCALE)
+            if ref is not None:
+                ref = cv2.resize(ref, (SSIM_WIDTH, SSIM_HEIGHT), interpolation=cv2.INTER_AREA)
+                self._background = ref.astype(np.float32)
+                return
+        self._background = gray.astype(np.float32)
+
+    def _recalc_baseline(self):
+        if len(self._baseline) >= BASELINE_INIT_FRAMES:
+            arr = np.array(self._baseline)
+            self._baseline_mean = float(arr.mean())
+            self._baseline_std = float(arr.std())
+
+    def _triggered(self, fg_ratio):
+        """fg_ratio 是否显著高于空皮带基线 (z-score). 基线未建好时抑制触发."""
+        if len(self._baseline) < BASELINE_INIT_FRAMES:
+            return False
+        if self._baseline_std < 1e-9:
+            return fg_ratio > self._baseline_mean + TRIGGER_K * 0.01
+        return fg_ratio > self._baseline_mean + TRIGGER_K * self._baseline_std
+
+    def _update_background(self, gray, fg_ratio):
+        """暖机期无条件更新; 稳定期只在无目标时更新, 避免吸收铝片/高光."""
+        warmup = len(self._baseline) < BASELINE_INIT_FRAMES
+        if not warmup and self._triggered(fg_ratio):
+            return
+        self._background = ((1 - BACKGROUND_ALPHA) * self._background
+                            + BACKGROUND_ALPHA * gray.astype(np.float32))
+        self._baseline.append(fg_ratio)
+        if len(self._baseline) > BASELINE_WINDOW:
+            self._baseline.pop(0)
+        self._recalc_baseline()
+
+    def _soft_detect(self, gray):
+        """软处理: 背景差分→自适应二值化→连通域, 返回 (进入条件, 退出条件, fg_ratio)."""
+        if self._background is None:
+            self._init_background(gray)
+        fg_ratio, stages = _extract_fg_ratio(gray, self._background)
+        self._update_background(gray, fg_ratio)
+        triggered = self._triggered(fg_ratio)
+
+        # 归一化 SSIM (背景 vs 当前帧): 默认仅观测; USE_SSIM_GATE=1 时参与触发
+        a = self._background.astype(np.float32)
+        b = gray.astype(np.float32)
+        sa, sb = float(a.std()), float(b.std())
+        if sa < 1e-6 or sb < 1e-6:
+            n_ssim = 0.0
+        else:
+            a = (a - a.mean()) / sa
+            b = (b - b.mean()) / sb
+            n_ssim = float(compare_ssim(a, b))
+
+        shared.debug_mask = stages["mask"]
+        shared.debug_intermediates = stages
+        shared.last_ssim = n_ssim
+        shared.last_white_ratio = fg_ratio
+
+        if USE_SSIM_GATE:
+            triggered = triggered and n_ssim < SSIM_TRIGGER_THRESHOLD
+
+        return triggered, (not triggered), fg_ratio
+
+    def _hard_detect(self, gray, image):
+        """原硬处理链 (固定阈值+SSIM+单快照参考), 保留用于回滚."""
+        global _cached_ref_gray
+        blurred = cv2.GaussianBlur(gray, (GAUSSIAN_KERNEL, GAUSSIAN_KERNEL), 0)
         _, img_binary = cv2.threshold(blurred, BINARY_THRESHOLD_1, 255, cv2.THRESH_BINARY)
         thresh = cv2.dilate(img_binary, None, iterations=DILATE_ITERATIONS)
 
         white_ratio = np.count_nonzero(thresh) / thresh.size
-        current_ssim = compare_image(black_image)
+        current_ssim = compare_image(gray)
 
-        shared.debug_mask = thresh  # 供 /debug_mask 路由可视化
+        shared.debug_mask = thresh
         shared.last_ssim = current_ssim
         shared.last_white_ratio = white_ratio
-
-        # --- 标定模式: 追踪 white_ratio 变化以测量传送带速度 ---
-        if shared.calibration_active:
-            now = time.time()
-            if white_ratio > 0.02:
-                # 铝片开始进入: 记录进入时间和峰值
-                if self._cal_last_ratio < 0.02:
-                    self._cal_entry_time = now
-                    self._cal_peak_ratio = white_ratio
-                if white_ratio > self._cal_peak_ratio:
-                    self._cal_peak_ratio = white_ratio
-                # 铝片开始退出 (ratio 从峰值下降 > 10%)
-                if (self._cal_entry_time is not None and
-                        white_ratio < self._cal_peak_ratio * 0.85):
-                    duration = now - self._cal_entry_time
-                    if 0.1 < duration < 30:  # 合理性检查: 0.1s ~ 30s
-                        speed = 100.0 / duration  # 100mm 直径 / 进入时间 = mm/s
-                        shared.calibration_samples.append(speed)
-                        logger.info('标定: 测得速度 {:.1f} mm/s (耗时 {:.2f}s)'.format(speed, duration))
-                    self._cal_entry_time = None
-            else:
-                self._cal_entry_time = None
-            self._cal_last_ratio = white_ratio
 
         self._ssim_history[:-1] = self._ssim_history[1:]
         self._ssim_history[-1] = current_ssim
         ssim_std = np.std(self._ssim_history)
         ssim_mean = np.mean(self._ssim_history)
-
         if ssim_std < STABILITY_STD_THRESHOLD and ssim_mean < STABILITY_MEAN_THRESHOLD and all(self._ssim_history):
             cv2.imwrite(REFERENCE_IMAGE, image)
             _cached_ref_gray = None  # 缓存失效, 下次重载
 
+        enter = current_ssim < SSIM_TRIGGER_THRESHOLD and white_ratio > WHITE_RATIO_THRESHOLD
+        exit_cond = current_ssim > SSIM_TRIGGER_THRESHOLD and white_ratio < WHITE_RATIO_THRESHOLD
+        return enter, exit_cond, white_ratio
+
+    def _calibration_update(self, ratio, threshold):
+        """标定模式: 追踪 ratio 变化测量传送带速度 (语义与原 white_ratio 一致)."""
+        if not shared.calibration_active:
+            return
+        now = time.time()
+        if ratio > threshold:
+            if self._cal_last_ratio < threshold:
+                self._cal_entry_time = now
+                self._cal_peak_ratio = ratio
+            if ratio > self._cal_peak_ratio:
+                self._cal_peak_ratio = ratio
+            if (self._cal_entry_time is not None and
+                    ratio < self._cal_peak_ratio * 0.85):
+                duration = now - self._cal_entry_time
+                if 0.1 < duration < 30:
+                    speed = 100.0 / duration
+                    shared.calibration_samples.append(speed)
+                    logger.info('标定: 测得速度 {:.1f} mm/s (耗时 {:.2f}s)'.format(speed, duration))
+                self._cal_entry_time = None
+        else:
+            self._cal_entry_time = None
+        self._cal_last_ratio = ratio
+
+    def _run_state_machine(self, enter, exit_cond, ratio, image):
+        """统一触发状态机: 0=IDLE → 1=TRACKING → 2=COOLDOWN."""
         if self._state == 0:  # IDLE — 等待铝片进入
-            if current_ssim < SSIM_TRIGGER_THRESHOLD and white_ratio > WHITE_RATIO_THRESHOLD:
+            if enter:
                 self._buf += 1
-                if self._buf >= 3:
+                if self._buf >= TRIGGER_CONFIRM:
                     self._state = 1
                     self._tracking_count = 1
                     self._tracking_frames = [image.copy()]
@@ -263,16 +427,14 @@ class Consumer(threading.Thread):
                 self._buf = 0
 
         elif self._state == 1:  # TRACKING — 收集跟踪帧，取中间帧
-            if current_ssim > SSIM_TRIGGER_THRESHOLD and white_ratio < WHITE_RATIO_THRESHOLD:  # SSIM 回升 ≥ 0.9 → 触发
+            if exit_cond:
                 self._buf += 1
-                if self._buf >= 3:
+                if self._buf >= TRIGGER_CONFIRM:
                     self._selected_frame = self._tracking_frames[0]
                     self._buf = 0
                     logger.info(
-                        'SSIM回升 current_ssim:{:.3f}, white_ratio:{:.3f}, '
-                        'total_frames:{}'.format(
-                            current_ssim, white_ratio,
-                            self._tracking_count,
+                        '触发回落 ratio:{:.3f}, total_frames:{}'.format(
+                            ratio, self._tracking_count,
                         )
                     )
                     self._run_inference_pipeline()

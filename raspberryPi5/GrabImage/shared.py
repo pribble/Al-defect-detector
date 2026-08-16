@@ -30,3 +30,6 @@ calibration_samples = deque(maxlen=30)
 # 全局运行时状态
 stream_image_ref = [np.zeros((512, 512, 3), dtype=np.uint8)]
 thread_pool = ThreadPoolExecutor()
+
+# 软处理调试中间结果 (供 /debug_stages 路由逐段可视化: diff/binary/mask)
+debug_intermediates = None

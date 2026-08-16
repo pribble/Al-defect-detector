@@ -284,7 +284,7 @@ def _generate_frames():
 
 
 def _generate_debug_frames():
-    """SSIM 调试帧生成器: 二值掩码 + SSIM/white_ratio 叠加"""
+    """SSIM 调试帧生成器: 二值掩码 + SSIM/ratio 叠加"""
     while True:
         time.sleep(0.1)
         mask = getattr(shared, 'debug_mask', None)
@@ -293,7 +293,7 @@ def _generate_debug_frames():
         display = cv2.resize(mask, (640, 480), interpolation=cv2.INTER_NEAREST)
         ssim = getattr(shared, 'last_ssim', -1)
         wr = getattr(shared, 'last_white_ratio', -1)
-        cv2.putText(display, 'SSIM={:.3f}  white_ratio={:.2f}'.format(ssim, wr),
+        cv2.putText(display, 'SSIM={:.3f}  ratio={:.2f}'.format(ssim, wr),
                     (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, 128, 1)
         _ret, jpeg = cv2.imencode('.jpg', display)
         yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n\r\n')
@@ -301,8 +301,36 @@ def _generate_debug_frames():
 
 @bp.route('/debug_mask')
 def debug_mask():
-    """SSIM 调试流: 实时二值掩码 + SSIM/white_ratio"""
+    """SSIM 调试流: 实时二值掩码 + SSIM/ratio"""
     return Response(_generate_debug_frames(), mimetype='multipart/x-mixed-replace;boundary=frame')
+
+
+def _generate_stage_frames():
+    """软处理中间结果调试流: diff / binary / mask 三列并排"""
+    while True:
+        time.sleep(0.1)
+        stages = getattr(shared, 'debug_intermediates', None)
+        if not stages:
+            continue
+        diff = stages.get('diff')
+        if diff is None:
+            continue
+        panels = []
+        for key in ('diff', 'binary', 'mask'):
+            img = stages.get(key)
+            if img is None:
+                img = np.zeros_like(diff)
+            up = cv2.resize(img, (320, 240), interpolation=cv2.INTER_NEAREST)
+            panels.append(cv2.cvtColor(up, cv2.COLOR_GRAY2BGR))
+        canvas = np.hstack(panels)
+        _ret, jpeg = cv2.imencode('.jpg', canvas)
+        yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n\r\n')
+
+
+@bp.route('/debug_stages')
+def debug_stages():
+    """软处理中间结果调试流: diff/binary/mask 逐段可视化"""
+    return Response(_generate_stage_frames(), mimetype='multipart/x-mixed-replace;boundary=frame')
 
 
 @bp.route('/img')
