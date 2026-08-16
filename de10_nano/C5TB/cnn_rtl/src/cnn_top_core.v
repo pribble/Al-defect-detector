@@ -103,29 +103,6 @@ module cnn_top_core (
             8'h28: as_readdata = reg_ddrout;
             8'h34: as_readdata = reg_param;
             8'h40: as_readdata = reg_scale;
-            // 调试只读寄存器（复现核专用，非黑盒协议；软件 start_fpga
-            // 轮询超时期间读取，定位死锁现场）：
-            //   0x44 = {state[3:0], lr_pending[7:0], wr_pending[7:0], dma_ibeat[11:0]}
-            //   0x48 = {dma_wbeat[19:0], lr_round_end, lr_round_reset,
-            //          core_i_ready, core_ow_ready, dma_obeat[7:0]}
-            //   （obeat 只取低 8 位：out_seg_words 可能 >255 会回绕，仅调试参考）
-            8'h11: as_readdata = {state, lr_pending, wr_pending, dma_ibeat[11:0]};
-            8'h12: as_readdata = {dma_wbeat, lr_round_end, lr_round_reset,
-                                  core_i_ready, core_ow_ready, dma_obeat[7:0]};
-            8'h13: as_readdata = {lr_cmd_cnt, lr_rdv_cnt};   // 0x4C：lr 命令/返回计数
-            8'h14: as_readdata = {wr_cmd_cnt, wr_rdv_cnt};   // 0x50：wr 命令/返回计数
-            // ---- 观测寄存器（复现核专用，非黑盒协议）----
-            // 0x54 = {core_state[4:0], o_group[10:0], i_group[10:0], cmd_head, cmd_cnt}
-            8'h15: as_readdata = {core_dbg_ptr0[31:27], core_dbg_ptr0[26:16],
-                                  core_dbg_ptr0[15:5], cmd_head, cmd_cnt};
-            // 0x58 = {rq_row, rq_col}（requant 指针）
-            8'h16: as_readdata = core_dbg_ptr1;
-            // 0x5C = {mac_row, mac_col}（MAC 窗口指针）
-            8'h17: as_readdata = core_dbg_ptr2;
-            // 0x60 = {mac_t, load_row, load_col, wf_cnt}（DMA/权重进度）
-            8'h18: as_readdata = core_dbg_ptr3;
-            // 0xB8 = {done_cnt, o_evt_cnt}（层完成/输出事件累计）
-            8'h2E: as_readdata = {dbg_done_cnt, dbg_o_evt_cnt};
             default: as_readdata = 32'h0;
         endcase
     end
@@ -152,28 +129,8 @@ module cnn_top_core (
         .start(core_start), .o_done(core_done),
         .i_valid(core_i_valid), .i_ready(core_i_ready), .i_data(core_i_data),
         .iw_valid(core_iw_valid), .ow_ready(core_ow_ready), .iw_data(core_iw_data),
-        .o_valid(core_o_valid), .o_ready(core_o_ready), .o_data(core_o_data),
-        .dbg_ptr0(core_dbg_ptr0), .dbg_ptr1(core_dbg_ptr1),
-        .dbg_ptr2(core_dbg_ptr2), .dbg_ptr3(core_dbg_ptr3)
+        .o_valid(core_o_valid), .o_ready(core_o_ready), .o_data(core_o_data)
     );
-
-    //-----------------------------------------------------------------------
-    // 观测探针（cnn_core_v2 输出端口引出；Quartus 不支持跨模块层次引用）
-    // 指针类：组合直读（busy 时抓状态机现场）；数据类：快照锁存
-    //（core_done 自动锁存层末值 + 写 0x64 手动冻结 busy 现场）
-    //-----------------------------------------------------------------------
-    wire [31:0]  core_dbg_ptr0, core_dbg_ptr1, core_dbg_ptr2, core_dbg_ptr3;
-
-    // 输出事件计数 / 层完成计数（累计，不复位）
-    reg [15:0] dbg_o_evt_cnt, dbg_done_cnt;
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            dbg_o_evt_cnt <= 0; dbg_done_cnt <= 0;
-        end else begin
-            if (core_o_valid && core_o_ready) dbg_o_evt_cnt <= dbg_o_evt_cnt + 1;
-            if (core_done) dbg_done_cnt <= dbg_done_cnt + 1;
-        end
-    end
 
     //-----------------------------------------------------------------------
     // param 解析缓存 + 派生量
@@ -182,7 +139,8 @@ module cnn_top_core (
 
     reg [15:0] p_in_c, p_in_h, p_in_w, p_out_c, p_out_h, p_out_w;   // ≤302
     reg [31:0] p_input_offset, p_weight_offset, p_output_offset;   // param[0/1/3]，字偏移（×8 = 字节）
-    reg [7:0]  p_k, p_pad, p_stride, p_act, p_type;
+    reg [7:0]  p_pad, p_stride, p_act, p_type;
+    reg [1:0]  p_k;   // 窄化（k ∈ {1,3}，比较/选择变短，拆 p_k→w_rb_beats_r 乘法链）
     reg [7:0]  p_out_row_tile, p_in_row_tile, p_in_cb, p_out_cb, p_row_block;   // ≤19/4
 
     //-----------------------------------------------------------------------
@@ -201,13 +159,15 @@ module cnn_top_core (
     reg [31:0] out_cb_stride_r;         // p_out_h*p_out_w*8（输出每 cb 块字节偏移）
     reg [31:0] out_rb_stride_r;         // p_out_row_tile*p_out_w*8（输出每行块字节偏移）
     reg signed [31:0] rb_tile_stride_r; // p_out_row_tile * p_stride（rb_base 增量）
-    reg [31:0] w_cb_r;                  // p_out_cb * (type==4 ? 1 : p_in_cb)
-    reg [31:0] w_rb_beats_r;            // w_cb_r * 72（每行块权重拍数）
+    reg [15:0] w_cb_r;                  // p_out_cb * (type==4 ? 1 : p_in_cb)（窄化：实际 ≤1024，乘法树变短）
+    reg [23:0] w_rb_beats_r;            // w_cb_r * 72（每行块权重拍数，窄化：≤4.7M）
+    reg [23:0] w_rb_beats_last_q;       // w_rb_beats_r - 1（S_PREP_L 拍 2 预计算，拆 S_RUN 的 24-bit 减法链）
+    reg [7:0]  wr_slice_q;              // S_PREP_L 拍 1 寄存 (p_k==1 ? 8 : 72)（拆 p_k 比较与乘法链）
     reg [7:0]  lr_last_cb_r;            // lr 轮末 cb：CONV = p_in_cb-1，DW = 0（单 cb）
     reg [31:0] in_row_w8_r;             // p_in_w * 8
     reg signed [15:0] r0_in_r;          // max(rb_base_r, 0)，≤in_h
     reg signed [15:0] r1_in_r;          // min(rb_base_r + in_row_tile, in_h)
-    reg [7:0]  load_rows_r;             // max(r1_in_r - r0_in_r, 0)，≤in_row_tile
+    reg [15:0] load_rows_r;             // max(r1_in_r - r0_in_r, 0)，≤in_row_tile
     reg [31:0] in_rb_base_r;            // r0_in_r * p_in_w * 8（输入行块内偏移）
     reg [31:0] in_seg_words_r;          // load_rows_r * p_in_w（每输入块段拍数）
     reg [31:0] in_seg_tail_r;           // (in_seg_words_r - 1) * 8（段尾地址回退）
@@ -392,22 +352,6 @@ module cnn_top_core (
         end
     end
 
-    // 调试计数器（0x4C/0x50 只读）：命令接受数 vs 本侧数据返回数
-    // （lr_got/wr_got 已按命令序路由，修复后 lr_rdv==lr_cmd、wr_rdv==wr_cmd，
-    // 不再互相污染），定位 readdatavalid 不返回是桥的问题还是计数的问题
-    reg [15:0] lr_cmd_cnt, lr_rdv_cnt, wr_cmd_cnt, wr_rdv_cnt;
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            lr_cmd_cnt <= 0; lr_rdv_cnt <= 0;
-            wr_cmd_cnt <= 0; wr_rdv_cnt <= 0;
-        end else begin
-            if (lr_read && !lr_waitrequest) lr_cmd_cnt <= lr_cmd_cnt + 16'd1;
-            if (lr_got)                     lr_rdv_cnt <= lr_rdv_cnt + 16'd1;
-            if (wr_read && !wr_waitrequest) wr_cmd_cnt <= wr_cmd_cnt + 16'd1;
-            if (wr_got)                     wr_rdv_cnt <= wr_rdv_cnt + 16'd1;
-        end
-    end
-
     //-----------------------------------------------------------------------
     // 主状态机
     //-----------------------------------------------------------------------
@@ -421,6 +365,8 @@ module cnn_top_core (
             start_clear_pending <= 0;
             dma_icb <= 0; dma_ibeat <= 0; dma_wbeat <= 0;
             dma_ocb <= 0; dma_obeat <= 0;
+            wr_slice_q <= 8'd0;
+            w_rb_beats_last_q <= 24'd0;
         end else begin
             case (state)
                 S_IDLE: begin
@@ -539,12 +485,15 @@ module cnn_top_core (
                         w_cb_r   <= p_out_cb * (p_type == 4 ? 1 : p_in_cb);
                         in_row_w8_r <= p_in_w << 3;
                         lr_last_cb_r <= (p_type == 4) ? 8'd0 : (p_in_cb - 1);
+                        // p_k 比较/选择提前一拍（拆 p_k→w_rb_beats_r 的 32-bit 乘法链）
+                        wr_slice_q <= (p_k == 2'd1) ? 8'd8 : 8'd72;
                     end else begin
                         rd_cnt <= 0;
                         in_cb_stride_r  <= in_hw_r << 3;
                         out_cb_stride_r <= out_hw_r << 3;
                         out_rb_stride_r <= (p_out_row_tile * p_out_w) << 3;
-                        w_rb_beats_r    <= w_cb_r * (p_k == 1 ? 8 : 72);   // k=1：slice=8 拍；k=3：72 拍
+                        w_rb_beats_r    <= w_cb_r * wr_slice_q;   // 16×8 乘法（原 32-bit×mux 链）
+                        w_rb_beats_last_q <= w_cb_r * wr_slice_q - 24'd1;   // 末值-1 提前（拆 S_RUN 减法链）
                         state <= S_RD_SCALE;
                     end
                 end
@@ -602,7 +551,7 @@ module cnn_top_core (
                         out_row_prod_r <= rb * p_out_row_tile;
                     end else if (rd_cnt == 1) begin
                         rd_cnt <= 2;
-                        load_rows_r  <= (r1_in_r > r0_in_r) ? (r1_in_r - r0_in_r) : 32'sd0;
+                        load_rows_r  <= (r1_in_r > r0_in_r) ? (r1_in_r - r0_in_r) : 16'sd0;
                         in_rb_base_r <= r0_in_r * in_row_w8_r;
                     end else if (rd_cnt == 2) begin
                         rd_cnt <= 3;
@@ -667,7 +616,7 @@ module cnn_top_core (
                     end
                     // wr：命令接受拍推进（连续，无跳转；行块末 core_done 清 pending）
                     if (wr_read && !wr_waitrequest) begin
-                        if (dma_wbeat < w_rb_beats_r - 1) begin
+                        if (dma_wbeat < w_rb_beats_last_q) begin
                             dma_wbeat <= dma_wbeat + 1;
                             wr_address <= wr_address + 8;
                         end

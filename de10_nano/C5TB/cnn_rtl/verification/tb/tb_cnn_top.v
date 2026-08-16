@@ -344,9 +344,8 @@ module tb_cnn_top;
             $display("PASS: %0d events bit-exact", nexp);
         else
             $display("FAIL: %0d errors", errors);
-        $display("DBG: lr_cmd=%0d lr_got=%0d wr_cmd=%0d wr_got=%0d occ=%0d cnt=%0d",
-                 dut.lr_cmd_cnt, lr_got_cnt, dut.wr_cmd_cnt, wr_got_cnt,
-                 ld_occ, dut.cmd_cnt);
+        $display("DBG: lr_got=%0d wr_got=%0d occ=%0d cnt=%0d",
+                 lr_got_cnt, wr_got_cnt, ld_occ, dut.cmd_cnt);
         $display("DBG: cfg in_cb=%0d in_h=%0d in_w=%0d out_cb=%0d out_w=%0d k=%0d stride=%0d type=%0d tile=%0d in_tile=%0d act=%0d pad=%0d og=%0d ig=%0d",
                  dut.core.in_cb_reg, dut.core.in_h_reg, dut.core.in_w_reg,
                  dut.core.out_cb_reg, dut.core.out_w_reg,

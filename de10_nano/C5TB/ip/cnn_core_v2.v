@@ -54,8 +54,6 @@
 endmodule
 
 module cnn_core_v2 #(
-    parameter G_MAX_IN_CB  = 1,    // 输入通道块流式驻留（每 o_group 轮重读 1 cb）
-    parameter G_MAX_OUT_CB = 4,    // 最大输出通道块（模型 out_c<=32）
     parameter G_MAX_IN_ROWS= 41,   // 最大输入行块高度（模型 max in_tile=39）
     parameter G_MAX_OROWS  = 20,   // 最大输出行块高度（模型 max tile=19）
     parameter G_MAX_W      = 512,  // 输入行缓冲最大列数（2 的幂：lb 地址乘法变移位，150MHz 收敛；软件实际 ≤302）
@@ -90,16 +88,7 @@ module cnn_core_v2 #(
     output reg  [63:0]         o_data,
 
     // ---- 单行块完成 ----
-    output reg                 o_done,
-
-    // ---- 观测输出（调试寄存器用，组合直读 core 内部状态/数据；不带 QSys 接口）----
-    output wire [31:0]  dbg_ptr0,   // {state[4:0], o_group[10:0], i_group[10:0], mac_t[3:0]}
-    output wire [31:0]  dbg_ptr1,   // {rq_row[15:0], rq_col[15:0]}
-    output wire [31:0]  dbg_ptr2,   // {mac_row[15:0], mac_col[15:0]}
-    output wire [31:0]  dbg_ptr3,   // {load_row[9:0], load_col[9:0], wf_cnt[7:0]}
-    output wire [127:0] dbg_data0,  // {acc_q[31:0], v_act_l[0], v_act_l[0], v_rq64_l[0][31:0]}（乘后域）
-    output wire [127:0] dbg_data1,  // {v_round_l[0], v_shifted[0], v_rnd_delta[0], w_q[0][3:0]}
-    output wire [31:0]  dbg_lb      // lb_q[31:0]
+    output reg                 o_done
 );
 
     //-----------------------------------------------------------------------
@@ -116,9 +105,9 @@ module cnn_core_v2 #(
     reg [11:0] in_cb_reg, out_cb_reg;
     reg signed [12:0] base_row_reg;
 
-    // requant 参数存储（cfg_sel 1/2/3/4 = bias/mult/shift/rcl6，addr=输出通道）
-    // 见下方 generate 块 g_rq_param：8 lane 并行读 8 个不同通道地址，
-    // 单端口 RAM 每拍只能 1 地址 → 每 lane 独立一份 M10K（8×4 组）
+    // requant 参数存储（cfg_sel 1/2/3 = bias/mult/shift，addr=输出通道）
+    // 见下方 8 lane 显式展开块：每 lane 并行读 8 个不同通道地址，
+    // 单端口 RAM 每拍只能 1 地址 → 每 lane 独立一份 M10K（8×3 组）
 
     integer i;
     always @(posedge clk) begin
@@ -149,10 +138,10 @@ module cnn_core_v2 #(
     end
 
     //-----------------------------------------------------------------------
-    // requant 参数存储：8 lane 独立 M10K（cfg_sel 1/2/3/4 = bias/mult/shift/rcl6，
+    // requant 参数存储：8 lane 独立 M10K（cfg_sel 1/2/3 = bias/mult/shift，
     // addr=输出通道）。8 lane 并行读 8 个不同通道地址（v_out_ch = o_group*8+ln），
-    // 单端口 RAM 每拍只能 1 地址 → 每 lane 一份（8×4 组，约 104 块 M10K）。
-    // M10K 同步读 1 拍延迟：bias/rcl6 于 S_REQ_ADDR 发起（S_REQ_MUL 用）、
+    // 单端口 RAM 每拍只能 1 地址 → 每 lane 一份（8×3 组，约 78 块 M10K）。
+    // M10K 同步读 1 拍延迟：bias 于 S_REQ_ADDR 发起（S_REQ_MUL 用）、
     // mult 于 S_REQ_MUL 发起（S_REQ_MUL2 用）、shift 于 S_REQ_MUL2 发起
     // （S_REQ_OUT 用）——正好插入现有 4 拍 requant 流水，事件序列不变。
     // 读数据经 q_* 输出到模块顶层 wire 数组（generate 实例内声明的对象
@@ -161,7 +150,6 @@ module cnn_core_v2 #(
     wire signed [31:0] rq_bias_q  [0:7];
     wire [31:0]        rq_mult_q  [0:7];
     wire [7:0]         rq_shift_q [0:7];
-    wire signed [31:0] rq_rcl6_q  [0:7];
     // requant 参数存储：8 lane 显式展开（移出 generate）。
     // Quartus 对 generate 块内数组的 M10K 推断不可靠——实测（map.rpt）仅靠
     // RAM 恢复救回 16/32 个（g_rq_param 奇数实例），偶数实例数组照旧展开成
@@ -178,7 +166,6 @@ module cnn_core_v2 #(
     (* ramstyle = "M10K" *) reg signed [31:0] bias_store_0 [0:G_MAX_C-1];
     (* ramstyle = "M10K" *) reg [31:0] rq_m_store_0 [0:G_MAX_C-1];
     (* ramstyle = "M10K" *) reg [7:0]  rq_r_store_0 [0:G_MAX_C-1];
-    (* ramstyle = "M10K" *) reg signed [31:0] rcl6_store_0 [0:G_MAX_C-1];
     always @(posedge clk) begin
         if (cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C)
             bias_store_0[cfg_addr[9:0]] <= cfg_wdata;
@@ -191,17 +178,11 @@ module cnn_core_v2 #(
         if (cfg_we && cfg_sel == 3'd3 && cfg_addr < G_MAX_C)
             rq_r_store_0[cfg_addr[9:0]] <= cfg_wdata[7:0];
     end
-    always @(posedge clk) begin
-        if (cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C)
-            rcl6_store_0[cfg_addr[9:0]] <= cfg_wdata;
-    end
     reg signed [31:0] q_bias_0;
     reg [31:0] q_mult_0;
     reg [7:0]  q_shift_0;
-    reg signed [31:0] q_rcl6_0;
     always @(posedge clk) begin
         q_bias_0  <= bias_store_0[rq_raddr_q];
-        q_rcl6_0  <= rcl6_store_0[rq_raddr_q];
         q_mult_0  <= rq_m_store_0[rq_raddr_q];
         q_shift_0 <= rq_r_store_0[rq_raddr_q];
     end
@@ -212,7 +193,6 @@ module cnn_core_v2 #(
     wire signed [31:0] q_bias_0;
     wire [31:0] q_mult_0;
     wire [7:0]  q_shift_0;
-    wire signed [31:0] q_rcl6_0;
     altsyncram #(
         .operation_mode("DUAL_PORT"),
         .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
@@ -282,40 +262,15 @@ module cnn_core_v2 #(
         .address_b(rq_raddr_q),
         .q_b(q_shift_0)
     );
-    altsyncram #(
-        .operation_mode("DUAL_PORT"),
-        .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
-        .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
-        .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0"),
-        .address_aclr_a("NONE"),
-        .address_aclr_b("NONE"),
-        .outdata_aclr_b("NONE"),
-        .clock_enable_input_a("BYPASS"),
-        .clock_enable_input_b("BYPASS"),
-        .clock_enable_output_b("BYPASS"),
-        .power_up_uninitialized("FALSE"),
-        .intended_device_family("Cyclone V")
-    ) u_rq_rcl6_0 (
-        .clock0(clk),
-        .clock1(clk),
-        .address_a(cfg_addr[9:0]),
-        .wren_a(cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C),
-        .data_a(cfg_wdata),
-        .address_b(rq_raddr_q),
-        .q_b(q_rcl6_0)
-    );
 `endif
     assign rq_bias_q[0]  = q_bias_0;
     assign rq_mult_q[0]  = q_mult_0;
     assign rq_shift_q[0] = q_shift_0;
-    assign rq_rcl6_q[0]  = q_rcl6_0;
 
 `ifdef SIMULATION
     (* ramstyle = "M10K" *) reg signed [31:0] bias_store_1 [0:G_MAX_C-1];
     (* ramstyle = "M10K" *) reg [31:0] rq_m_store_1 [0:G_MAX_C-1];
     (* ramstyle = "M10K" *) reg [7:0]  rq_r_store_1 [0:G_MAX_C-1];
-    (* ramstyle = "M10K" *) reg signed [31:0] rcl6_store_1 [0:G_MAX_C-1];
     always @(posedge clk) begin
         if (cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C)
             bias_store_1[cfg_addr[9:0]] <= cfg_wdata;
@@ -328,17 +283,11 @@ module cnn_core_v2 #(
         if (cfg_we && cfg_sel == 3'd3 && cfg_addr < G_MAX_C)
             rq_r_store_1[cfg_addr[9:0]] <= cfg_wdata[7:0];
     end
-    always @(posedge clk) begin
-        if (cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C)
-            rcl6_store_1[cfg_addr[9:0]] <= cfg_wdata;
-    end
     reg signed [31:0] q_bias_1;
     reg [31:0] q_mult_1;
     reg [7:0]  q_shift_1;
-    reg signed [31:0] q_rcl6_1;
     always @(posedge clk) begin
         q_bias_1  <= bias_store_1[rq_raddr_q + 9'd1];
-        q_rcl6_1  <= rcl6_store_1[rq_raddr_q + 9'd1];
         q_mult_1  <= rq_m_store_1[rq_raddr_q + 9'd1];
         q_shift_1 <= rq_r_store_1[rq_raddr_q + 9'd1];
     end
@@ -349,7 +298,6 @@ module cnn_core_v2 #(
     wire signed [31:0] q_bias_1;
     wire [31:0] q_mult_1;
     wire [7:0]  q_shift_1;
-    wire signed [31:0] q_rcl6_1;
     altsyncram #(
         .operation_mode("DUAL_PORT"),
         .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
@@ -419,40 +367,15 @@ module cnn_core_v2 #(
         .address_b(rq_raddr_q + 9'd1),
         .q_b(q_shift_1)
     );
-    altsyncram #(
-        .operation_mode("DUAL_PORT"),
-        .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
-        .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
-        .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0"),
-        .address_aclr_a("NONE"),
-        .address_aclr_b("NONE"),
-        .outdata_aclr_b("NONE"),
-        .clock_enable_input_a("BYPASS"),
-        .clock_enable_input_b("BYPASS"),
-        .clock_enable_output_b("BYPASS"),
-        .power_up_uninitialized("FALSE"),
-        .intended_device_family("Cyclone V")
-    ) u_rq_rcl6_1 (
-        .clock0(clk),
-        .clock1(clk),
-        .address_a(cfg_addr[9:0]),
-        .wren_a(cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C),
-        .data_a(cfg_wdata),
-        .address_b(rq_raddr_q + 9'd1),
-        .q_b(q_rcl6_1)
-    );
 `endif
     assign rq_bias_q[1]  = q_bias_1;
     assign rq_mult_q[1]  = q_mult_1;
     assign rq_shift_q[1] = q_shift_1;
-    assign rq_rcl6_q[1]  = q_rcl6_1;
 
 `ifdef SIMULATION
     (* ramstyle = "M10K" *) reg signed [31:0] bias_store_2 [0:G_MAX_C-1];
     (* ramstyle = "M10K" *) reg [31:0] rq_m_store_2 [0:G_MAX_C-1];
     (* ramstyle = "M10K" *) reg [7:0]  rq_r_store_2 [0:G_MAX_C-1];
-    (* ramstyle = "M10K" *) reg signed [31:0] rcl6_store_2 [0:G_MAX_C-1];
     always @(posedge clk) begin
         if (cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C)
             bias_store_2[cfg_addr[9:0]] <= cfg_wdata;
@@ -465,17 +388,11 @@ module cnn_core_v2 #(
         if (cfg_we && cfg_sel == 3'd3 && cfg_addr < G_MAX_C)
             rq_r_store_2[cfg_addr[9:0]] <= cfg_wdata[7:0];
     end
-    always @(posedge clk) begin
-        if (cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C)
-            rcl6_store_2[cfg_addr[9:0]] <= cfg_wdata;
-    end
     reg signed [31:0] q_bias_2;
     reg [31:0] q_mult_2;
     reg [7:0]  q_shift_2;
-    reg signed [31:0] q_rcl6_2;
     always @(posedge clk) begin
         q_bias_2  <= bias_store_2[rq_raddr_q + 9'd2];
-        q_rcl6_2  <= rcl6_store_2[rq_raddr_q + 9'd2];
         q_mult_2  <= rq_m_store_2[rq_raddr_q + 9'd2];
         q_shift_2 <= rq_r_store_2[rq_raddr_q + 9'd2];
     end
@@ -486,7 +403,6 @@ module cnn_core_v2 #(
     wire signed [31:0] q_bias_2;
     wire [31:0] q_mult_2;
     wire [7:0]  q_shift_2;
-    wire signed [31:0] q_rcl6_2;
     altsyncram #(
         .operation_mode("DUAL_PORT"),
         .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
@@ -556,40 +472,15 @@ module cnn_core_v2 #(
         .address_b(rq_raddr_q + 9'd2),
         .q_b(q_shift_2)
     );
-    altsyncram #(
-        .operation_mode("DUAL_PORT"),
-        .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
-        .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
-        .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0"),
-        .address_aclr_a("NONE"),
-        .address_aclr_b("NONE"),
-        .outdata_aclr_b("NONE"),
-        .clock_enable_input_a("BYPASS"),
-        .clock_enable_input_b("BYPASS"),
-        .clock_enable_output_b("BYPASS"),
-        .power_up_uninitialized("FALSE"),
-        .intended_device_family("Cyclone V")
-    ) u_rq_rcl6_2 (
-        .clock0(clk),
-        .clock1(clk),
-        .address_a(cfg_addr[9:0]),
-        .wren_a(cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C),
-        .data_a(cfg_wdata),
-        .address_b(rq_raddr_q + 9'd2),
-        .q_b(q_rcl6_2)
-    );
 `endif
     assign rq_bias_q[2]  = q_bias_2;
     assign rq_mult_q[2]  = q_mult_2;
     assign rq_shift_q[2] = q_shift_2;
-    assign rq_rcl6_q[2]  = q_rcl6_2;
 
 `ifdef SIMULATION
     (* ramstyle = "M10K" *) reg signed [31:0] bias_store_3 [0:G_MAX_C-1];
     (* ramstyle = "M10K" *) reg [31:0] rq_m_store_3 [0:G_MAX_C-1];
     (* ramstyle = "M10K" *) reg [7:0]  rq_r_store_3 [0:G_MAX_C-1];
-    (* ramstyle = "M10K" *) reg signed [31:0] rcl6_store_3 [0:G_MAX_C-1];
     always @(posedge clk) begin
         if (cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C)
             bias_store_3[cfg_addr[9:0]] <= cfg_wdata;
@@ -602,17 +493,11 @@ module cnn_core_v2 #(
         if (cfg_we && cfg_sel == 3'd3 && cfg_addr < G_MAX_C)
             rq_r_store_3[cfg_addr[9:0]] <= cfg_wdata[7:0];
     end
-    always @(posedge clk) begin
-        if (cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C)
-            rcl6_store_3[cfg_addr[9:0]] <= cfg_wdata;
-    end
     reg signed [31:0] q_bias_3;
     reg [31:0] q_mult_3;
     reg [7:0]  q_shift_3;
-    reg signed [31:0] q_rcl6_3;
     always @(posedge clk) begin
         q_bias_3  <= bias_store_3[rq_raddr_q + 9'd3];
-        q_rcl6_3  <= rcl6_store_3[rq_raddr_q + 9'd3];
         q_mult_3  <= rq_m_store_3[rq_raddr_q + 9'd3];
         q_shift_3 <= rq_r_store_3[rq_raddr_q + 9'd3];
     end
@@ -623,7 +508,6 @@ module cnn_core_v2 #(
     wire signed [31:0] q_bias_3;
     wire [31:0] q_mult_3;
     wire [7:0]  q_shift_3;
-    wire signed [31:0] q_rcl6_3;
     altsyncram #(
         .operation_mode("DUAL_PORT"),
         .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
@@ -693,40 +577,15 @@ module cnn_core_v2 #(
         .address_b(rq_raddr_q + 9'd3),
         .q_b(q_shift_3)
     );
-    altsyncram #(
-        .operation_mode("DUAL_PORT"),
-        .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
-        .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
-        .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0"),
-        .address_aclr_a("NONE"),
-        .address_aclr_b("NONE"),
-        .outdata_aclr_b("NONE"),
-        .clock_enable_input_a("BYPASS"),
-        .clock_enable_input_b("BYPASS"),
-        .clock_enable_output_b("BYPASS"),
-        .power_up_uninitialized("FALSE"),
-        .intended_device_family("Cyclone V")
-    ) u_rq_rcl6_3 (
-        .clock0(clk),
-        .clock1(clk),
-        .address_a(cfg_addr[9:0]),
-        .wren_a(cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C),
-        .data_a(cfg_wdata),
-        .address_b(rq_raddr_q + 9'd3),
-        .q_b(q_rcl6_3)
-    );
 `endif
     assign rq_bias_q[3]  = q_bias_3;
     assign rq_mult_q[3]  = q_mult_3;
     assign rq_shift_q[3] = q_shift_3;
-    assign rq_rcl6_q[3]  = q_rcl6_3;
 
 `ifdef SIMULATION
     (* ramstyle = "M10K" *) reg signed [31:0] bias_store_4 [0:G_MAX_C-1];
     (* ramstyle = "M10K" *) reg [31:0] rq_m_store_4 [0:G_MAX_C-1];
     (* ramstyle = "M10K" *) reg [7:0]  rq_r_store_4 [0:G_MAX_C-1];
-    (* ramstyle = "M10K" *) reg signed [31:0] rcl6_store_4 [0:G_MAX_C-1];
     always @(posedge clk) begin
         if (cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C)
             bias_store_4[cfg_addr[9:0]] <= cfg_wdata;
@@ -739,17 +598,11 @@ module cnn_core_v2 #(
         if (cfg_we && cfg_sel == 3'd3 && cfg_addr < G_MAX_C)
             rq_r_store_4[cfg_addr[9:0]] <= cfg_wdata[7:0];
     end
-    always @(posedge clk) begin
-        if (cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C)
-            rcl6_store_4[cfg_addr[9:0]] <= cfg_wdata;
-    end
     reg signed [31:0] q_bias_4;
     reg [31:0] q_mult_4;
     reg [7:0]  q_shift_4;
-    reg signed [31:0] q_rcl6_4;
     always @(posedge clk) begin
         q_bias_4  <= bias_store_4[rq_raddr_q + 9'd4];
-        q_rcl6_4  <= rcl6_store_4[rq_raddr_q + 9'd4];
         q_mult_4  <= rq_m_store_4[rq_raddr_q + 9'd4];
         q_shift_4 <= rq_r_store_4[rq_raddr_q + 9'd4];
     end
@@ -760,7 +613,6 @@ module cnn_core_v2 #(
     wire signed [31:0] q_bias_4;
     wire [31:0] q_mult_4;
     wire [7:0]  q_shift_4;
-    wire signed [31:0] q_rcl6_4;
     altsyncram #(
         .operation_mode("DUAL_PORT"),
         .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
@@ -830,40 +682,15 @@ module cnn_core_v2 #(
         .address_b(rq_raddr_q + 9'd4),
         .q_b(q_shift_4)
     );
-    altsyncram #(
-        .operation_mode("DUAL_PORT"),
-        .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
-        .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
-        .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0"),
-        .address_aclr_a("NONE"),
-        .address_aclr_b("NONE"),
-        .outdata_aclr_b("NONE"),
-        .clock_enable_input_a("BYPASS"),
-        .clock_enable_input_b("BYPASS"),
-        .clock_enable_output_b("BYPASS"),
-        .power_up_uninitialized("FALSE"),
-        .intended_device_family("Cyclone V")
-    ) u_rq_rcl6_4 (
-        .clock0(clk),
-        .clock1(clk),
-        .address_a(cfg_addr[9:0]),
-        .wren_a(cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C),
-        .data_a(cfg_wdata),
-        .address_b(rq_raddr_q + 9'd4),
-        .q_b(q_rcl6_4)
-    );
 `endif
     assign rq_bias_q[4]  = q_bias_4;
     assign rq_mult_q[4]  = q_mult_4;
     assign rq_shift_q[4] = q_shift_4;
-    assign rq_rcl6_q[4]  = q_rcl6_4;
 
 `ifdef SIMULATION
     (* ramstyle = "M10K" *) reg signed [31:0] bias_store_5 [0:G_MAX_C-1];
     (* ramstyle = "M10K" *) reg [31:0] rq_m_store_5 [0:G_MAX_C-1];
     (* ramstyle = "M10K" *) reg [7:0]  rq_r_store_5 [0:G_MAX_C-1];
-    (* ramstyle = "M10K" *) reg signed [31:0] rcl6_store_5 [0:G_MAX_C-1];
     always @(posedge clk) begin
         if (cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C)
             bias_store_5[cfg_addr[9:0]] <= cfg_wdata;
@@ -876,17 +703,11 @@ module cnn_core_v2 #(
         if (cfg_we && cfg_sel == 3'd3 && cfg_addr < G_MAX_C)
             rq_r_store_5[cfg_addr[9:0]] <= cfg_wdata[7:0];
     end
-    always @(posedge clk) begin
-        if (cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C)
-            rcl6_store_5[cfg_addr[9:0]] <= cfg_wdata;
-    end
     reg signed [31:0] q_bias_5;
     reg [31:0] q_mult_5;
     reg [7:0]  q_shift_5;
-    reg signed [31:0] q_rcl6_5;
     always @(posedge clk) begin
         q_bias_5  <= bias_store_5[rq_raddr_q + 9'd5];
-        q_rcl6_5  <= rcl6_store_5[rq_raddr_q + 9'd5];
         q_mult_5  <= rq_m_store_5[rq_raddr_q + 9'd5];
         q_shift_5 <= rq_r_store_5[rq_raddr_q + 9'd5];
     end
@@ -897,7 +718,6 @@ module cnn_core_v2 #(
     wire signed [31:0] q_bias_5;
     wire [31:0] q_mult_5;
     wire [7:0]  q_shift_5;
-    wire signed [31:0] q_rcl6_5;
     altsyncram #(
         .operation_mode("DUAL_PORT"),
         .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
@@ -967,40 +787,15 @@ module cnn_core_v2 #(
         .address_b(rq_raddr_q + 9'd5),
         .q_b(q_shift_5)
     );
-    altsyncram #(
-        .operation_mode("DUAL_PORT"),
-        .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
-        .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
-        .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0"),
-        .address_aclr_a("NONE"),
-        .address_aclr_b("NONE"),
-        .outdata_aclr_b("NONE"),
-        .clock_enable_input_a("BYPASS"),
-        .clock_enable_input_b("BYPASS"),
-        .clock_enable_output_b("BYPASS"),
-        .power_up_uninitialized("FALSE"),
-        .intended_device_family("Cyclone V")
-    ) u_rq_rcl6_5 (
-        .clock0(clk),
-        .clock1(clk),
-        .address_a(cfg_addr[9:0]),
-        .wren_a(cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C),
-        .data_a(cfg_wdata),
-        .address_b(rq_raddr_q + 9'd5),
-        .q_b(q_rcl6_5)
-    );
 `endif
     assign rq_bias_q[5]  = q_bias_5;
     assign rq_mult_q[5]  = q_mult_5;
     assign rq_shift_q[5] = q_shift_5;
-    assign rq_rcl6_q[5]  = q_rcl6_5;
 
 `ifdef SIMULATION
     (* ramstyle = "M10K" *) reg signed [31:0] bias_store_6 [0:G_MAX_C-1];
     (* ramstyle = "M10K" *) reg [31:0] rq_m_store_6 [0:G_MAX_C-1];
     (* ramstyle = "M10K" *) reg [7:0]  rq_r_store_6 [0:G_MAX_C-1];
-    (* ramstyle = "M10K" *) reg signed [31:0] rcl6_store_6 [0:G_MAX_C-1];
     always @(posedge clk) begin
         if (cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C)
             bias_store_6[cfg_addr[9:0]] <= cfg_wdata;
@@ -1013,17 +808,11 @@ module cnn_core_v2 #(
         if (cfg_we && cfg_sel == 3'd3 && cfg_addr < G_MAX_C)
             rq_r_store_6[cfg_addr[9:0]] <= cfg_wdata[7:0];
     end
-    always @(posedge clk) begin
-        if (cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C)
-            rcl6_store_6[cfg_addr[9:0]] <= cfg_wdata;
-    end
     reg signed [31:0] q_bias_6;
     reg [31:0] q_mult_6;
     reg [7:0]  q_shift_6;
-    reg signed [31:0] q_rcl6_6;
     always @(posedge clk) begin
         q_bias_6  <= bias_store_6[rq_raddr_q + 9'd6];
-        q_rcl6_6  <= rcl6_store_6[rq_raddr_q + 9'd6];
         q_mult_6  <= rq_m_store_6[rq_raddr_q + 9'd6];
         q_shift_6 <= rq_r_store_6[rq_raddr_q + 9'd6];
     end
@@ -1034,7 +823,6 @@ module cnn_core_v2 #(
     wire signed [31:0] q_bias_6;
     wire [31:0] q_mult_6;
     wire [7:0]  q_shift_6;
-    wire signed [31:0] q_rcl6_6;
     altsyncram #(
         .operation_mode("DUAL_PORT"),
         .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
@@ -1104,40 +892,15 @@ module cnn_core_v2 #(
         .address_b(rq_raddr_q + 9'd6),
         .q_b(q_shift_6)
     );
-    altsyncram #(
-        .operation_mode("DUAL_PORT"),
-        .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
-        .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
-        .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0"),
-        .address_aclr_a("NONE"),
-        .address_aclr_b("NONE"),
-        .outdata_aclr_b("NONE"),
-        .clock_enable_input_a("BYPASS"),
-        .clock_enable_input_b("BYPASS"),
-        .clock_enable_output_b("BYPASS"),
-        .power_up_uninitialized("FALSE"),
-        .intended_device_family("Cyclone V")
-    ) u_rq_rcl6_6 (
-        .clock0(clk),
-        .clock1(clk),
-        .address_a(cfg_addr[9:0]),
-        .wren_a(cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C),
-        .data_a(cfg_wdata),
-        .address_b(rq_raddr_q + 9'd6),
-        .q_b(q_rcl6_6)
-    );
 `endif
     assign rq_bias_q[6]  = q_bias_6;
     assign rq_mult_q[6]  = q_mult_6;
     assign rq_shift_q[6] = q_shift_6;
-    assign rq_rcl6_q[6]  = q_rcl6_6;
 
 `ifdef SIMULATION
     (* ramstyle = "M10K" *) reg signed [31:0] bias_store_7 [0:G_MAX_C-1];
     (* ramstyle = "M10K" *) reg [31:0] rq_m_store_7 [0:G_MAX_C-1];
     (* ramstyle = "M10K" *) reg [7:0]  rq_r_store_7 [0:G_MAX_C-1];
-    (* ramstyle = "M10K" *) reg signed [31:0] rcl6_store_7 [0:G_MAX_C-1];
     always @(posedge clk) begin
         if (cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C)
             bias_store_7[cfg_addr[9:0]] <= cfg_wdata;
@@ -1150,17 +913,11 @@ module cnn_core_v2 #(
         if (cfg_we && cfg_sel == 3'd3 && cfg_addr < G_MAX_C)
             rq_r_store_7[cfg_addr[9:0]] <= cfg_wdata[7:0];
     end
-    always @(posedge clk) begin
-        if (cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C)
-            rcl6_store_7[cfg_addr[9:0]] <= cfg_wdata;
-    end
     reg signed [31:0] q_bias_7;
     reg [31:0] q_mult_7;
     reg [7:0]  q_shift_7;
-    reg signed [31:0] q_rcl6_7;
     always @(posedge clk) begin
         q_bias_7  <= bias_store_7[rq_raddr_q + 9'd7];
-        q_rcl6_7  <= rcl6_store_7[rq_raddr_q + 9'd7];
         q_mult_7  <= rq_m_store_7[rq_raddr_q + 9'd7];
         q_shift_7 <= rq_r_store_7[rq_raddr_q + 9'd7];
     end
@@ -1171,7 +928,6 @@ module cnn_core_v2 #(
     wire signed [31:0] q_bias_7;
     wire [31:0] q_mult_7;
     wire [7:0]  q_shift_7;
-    wire signed [31:0] q_rcl6_7;
     altsyncram #(
         .operation_mode("DUAL_PORT"),
         .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
@@ -1241,34 +997,10 @@ module cnn_core_v2 #(
         .address_b(rq_raddr_q + 9'd7),
         .q_b(q_shift_7)
     );
-    altsyncram #(
-        .operation_mode("DUAL_PORT"),
-        .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
-        .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
-        .read_during_write_mode_mixed_ports("OLD_DATA"),
-        .outdata_reg_b("CLOCK0"),
-        .address_aclr_a("NONE"),
-        .address_aclr_b("NONE"),
-        .outdata_aclr_b("NONE"),
-        .clock_enable_input_a("BYPASS"),
-        .clock_enable_input_b("BYPASS"),
-        .clock_enable_output_b("BYPASS"),
-        .power_up_uninitialized("FALSE"),
-        .intended_device_family("Cyclone V")
-    ) u_rq_rcl6_7 (
-        .clock0(clk),
-        .clock1(clk),
-        .address_a(cfg_addr[9:0]),
-        .wren_a(cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C),
-        .data_a(cfg_wdata),
-        .address_b(rq_raddr_q + 9'd7),
-        .q_b(q_rcl6_7)
-    );
 `endif
     assign rq_bias_q[7]  = q_bias_7;
     assign rq_mult_q[7]  = q_mult_7;
     assign rq_shift_q[7] = q_shift_7;
-    assign rq_rcl6_q[7]  = q_rcl6_7;
 
 
 
@@ -1382,9 +1114,8 @@ module cnn_core_v2 #(
     localparam S_REQ_ADDR = 4'd6;   // requant 请求拍（采样 acc_q）
     localparam S_REQ_MUL  = 4'd7;   // requant 乘加拍级 1（参数打拍，乘后域）
     localparam S_REQ_MULB = 5'd19;  // requant 乘加拍级 2（acc 打拍 → v_act_l，乘后域）
-    localparam S_REQ_MULC = 5'd20;  // requant 乘加拍级 3（relu/rcl6 比较 → v_rcl6_cmp_q）
-    localparam S_REQ_MULC2 = 5'd22; // requant 乘加拍级 3b（relu/rcl6 比较 → v_rcl6_cmp_q，64-bit）
-    localparam S_REQ_ACT  = 5'd23;  // requant 乘加拍级 3c（relu/rcl6 mux → v_rq64_l，乘后域）
+    localparam S_REQ_MULC = 5'd20;  // requant 乘加拍级 3（乘后 bias 加法）
+    localparam S_REQ_ACT  = 5'd23;  // requant 乘加拍级 3c（relu mux → v_rq64_l，乘后域）
     localparam S_REQ_MUL2 = 4'd8;   // requant 乘法拍级 1（4×16×16 DSP 部分积，寄存 v_p_*/v_shift_l）
     localparam S_REQ_MUL3 = 4'd15;  // requant 乘法拍级 2（两组中间和 → v_sum_lo/v_sum_hi）
     localparam S_REQ_MUL4 = 5'd16;  // requant 乘法拍级 3（中间和相加 → v_rq64_l，每级仅 1 个 64-bit 加法）
@@ -1404,7 +1135,7 @@ module cnn_core_v2 #(
     reg [11:0] mac_row, mac_col;
     reg [3:0]  mac_t;
     reg        mac_first_q, mac_last_q;   // S_MAC_MUL2 拍寄存首/末 tap 标志（拆 mac_t 32-bit 比较链）
-    reg [31:0] rq_row, rq_col;
+    reg [15:0] rq_row, rq_col;      // ≤ out_row_tile×out_w（≤19×150），16-bit 足够
 
     // 行缓冲行 r 对应输入行 base_row_reg + r；有效 = 输入行 ∈ [0, in_h)
     wire signed [12:0] load_in_row = base_row_reg + load_row;
@@ -1684,10 +1415,7 @@ module cnn_core_v2 #(
                     state <= S_REQ_MULC;   // 乘后 bias 加法拍
                 end
                 S_REQ_MULC: begin
-                    state <= S_REQ_MULC2;
-                end
-                S_REQ_MULC2: begin
-                    state <= S_REQ_ACT;    // relu/rcl6 mux 拍
+                    state <= S_REQ_ACT;    // relu mux 拍
                 end
                 S_REQ_ACT: begin
                     state <= S_REQ_OUT;
@@ -1834,10 +1562,16 @@ module cnn_core_v2 #(
             // 用沿前值；其他拍取清零地址（rq_row 稳定）——写口永不直接连组合
             if (state == S_MAC_MUL3)
                 acc_wa_q <= acc_waddr_mac[15:0];
-            if (state == S_REQ_ADDR || state == S_REQ_MUL || state == S_REQ_MUL2)
-                acc_q <= acc[acc_raddr_r];
-            else
-                acc_q <= acc[acc_addr_mac_r];
+            // acc_q 采样：requant 首拍（S_REQ_ADDR）时 acc_raddr_r 尚是旧地址
+            //（S_REQ_OUT3 末拍才推进 rq_row/rq_col，acc_raddr_r 同步采样的是沿前
+            // 旧值），S_REQ_MUL 拍才采到新地址——两拍连续采样取后者（S_REQ_MULB
+            // 用）；S_REQ_MUL2 起地址不变，重复读无意义，保持即可。
+            // 单读端口：两个互斥地址在 RAM 口前 mux。原 if/else 全覆盖写法
+            // Quartus 可合并成 1 端口，改 if/else if（带保持）后被推断成 2 个读
+            // 端口 = 2 份 acc RAM（≈75 个 M10K），超 5CSEMA5F31 容量报 276003；
+            // 显式单表达式强制 1 端口，功能/时序不变。
+            if (state == S_MAC_RD || state == S_REQ_ADDR || state == S_REQ_MUL)
+                acc_q <= acc[(state == S_MAC_RD) ? acc_addr_mac_r : acc_raddr_r];
         end
     end
 
@@ -1865,8 +1599,6 @@ module cnn_core_v2 #(
     integer ln;
     reg signed [63:0] v_rq64;
     reg signed [31:0] v_act_l [0:7];   // 每 lane 的 act 后值（流水级 2）
-    reg        v_rcl6_cmp_q [0:7];  // 每 lane 的 v_biased > v_rcl6 比较结果（S_REQ_MULC 拍寄存，拆比较+mux 链）
-    reg signed [31:0] v_rcl6_l [0:7];   // 每 lane 的 rcl6 上限（S_REQ_MUL 拍寄存 RAM 读，断组合读链）
     // 乘法拆三级（150MHz 单级 32×33 组合乘法 slack -10.1ns；64-bit 加法树 2 级仍紧）：
     //   级 1 = 4 个 16×16 DSP 乘法（v_act_l = a_hi<<16 + a_lo，rq_mult_q = m_hi<<16 + m_lo）
     //   级 2 = 两组 64-bit 并行加法（v_sum_lo/v_sum_hi），每级仅 1 个加法器
@@ -1905,7 +1637,6 @@ module cnn_core_v2 #(
         if (state == S_REQ_MUL) begin
             for (ln = 0; ln < 8; ln = ln + 1) begin
                 rq_bias_m[ln] <= rq_bias_q[ln];
-                // v_rcl6_l 打拍已随 relu6 钳位移除（2026-08-10，对齐黑盒无 min6）
             end
         end
     end
@@ -1972,13 +1703,7 @@ module cnn_core_v2 #(
         end
     end
 
-    // 乘加拍级 3b（S_REQ_MULC2）：relu/rcl6 的 64-bit 比较单独一拍（拆比较+mux 链）：
-    //   仅正值才可能被 rcl6 截断（relu 后 0 恒 ≤ rcl6）；rcl6 上限 = rcl6_mul<<8（q22 对齐）
-    // 2026-08-10：relu6 钳位已移除（对齐黑盒无 min6），比较逻辑不再使用——
-    //   v_rcl6_cmp_q 保留声明不赋值（综合消除），状态转移 S_REQ_MULC2 保留
-    //   以保证 requant 流水拍数/事件序列不变。
-
-    // 乘加拍级 3c（S_REQ_ACT）的 relu/rcl6 mux 已并入乘法级 3 的单一 always
+    // 乘加拍级 3c（S_REQ_ACT）的 relu mux 已并入乘法级 3 的单一 always
     //（v_rq64_l 单驱动，Quartus 10028）
 
     // 乘法级 1（S_REQ_MUL2）：v_act_l × rq_mult_q 拆 4 个 16×16 部分积（DSP 18×18，~4ns）；
@@ -2094,14 +1819,5 @@ module cnn_core_v2 #(
         end
     end
 
-    // ---- 观测输出（组合直读；Quartus 不支持跨模块层次引用，故以端口引出）----
-    assign dbg_ptr0  = {state[4:0], o_group[10:0], i_group[10:0], mac_t[3:0]};
-    assign dbg_ptr1  = {4'd0, rq_row, 4'd0, rq_col};
-    assign dbg_ptr2  = {4'd0, mac_row, 4'd0, mac_col};
-    assign dbg_ptr3  = {load_row[9:0], load_col[9:0], wf_cnt[7:0]};
-    assign dbg_data0 = {acc_q[31:0], v_act_l[0], v_act_l[0], v_rq64_l[0][31:0]};
-    assign dbg_data1 = {v_round_l[0][31:0], v_shifted[0][31:0], v_rnd_delta[0][31:0],
-                        {w_q[0][3], w_q[0][2], w_q[0][1], w_q[0][0]}};
-    assign dbg_lb    = lb_q[31:0];
-
 endmodule
+

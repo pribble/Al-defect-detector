@@ -103,39 +103,6 @@ module cnn_top_core (
             8'h28: as_readdata = reg_ddrout;
             8'h34: as_readdata = reg_param;
             8'h40: as_readdata = reg_scale;
-            // 调试只读寄存器（复现核专用，非黑盒协议；软件 start_fpga
-            // 轮询超时期间读取，定位死锁现场）：
-            //   0x44 = {state[3:0], lr_pending[7:0], wr_pending[7:0], dma_ibeat[11:0]}
-            //   0x48 = {dma_wbeat[19:0], lr_round_end, lr_round_reset,
-            //          core_i_ready, core_ow_ready, dma_obeat[7:0]}
-            //   （obeat 只取低 8 位：out_seg_words 可能 >255 会回绕，仅调试参考）
-            8'h11: as_readdata = {state, lr_pending, wr_pending, dma_ibeat[11:0]};
-            8'h12: as_readdata = {dma_wbeat, lr_round_end, lr_round_reset,
-                                  core_i_ready, core_ow_ready, dma_obeat[7:0]};
-            8'h13: as_readdata = {lr_cmd_cnt, lr_rdv_cnt};   // 0x4C：lr 命令/返回计数
-            8'h14: as_readdata = {wr_cmd_cnt, wr_rdv_cnt};   // 0x50：wr 命令/返回计数
-            // ---- 观测寄存器（复现核专用，非黑盒协议）----
-            // 0x54 = {core_state[4:0], o_group[10:0], i_group[10:0], cmd_head, cmd_cnt}
-            8'h15: as_readdata = {core_dbg_ptr0[31:27], core_dbg_ptr0[26:16],
-                                  core_dbg_ptr0[15:5], cmd_head, cmd_cnt};
-            // 0x58 = {rq_row, rq_col}（requant 指针）
-            8'h16: as_readdata = core_dbg_ptr1;
-            // 0x5C = {mac_row, mac_col}（MAC 窗口指针）
-            8'h17: as_readdata = core_dbg_ptr2;
-            // 0x60 = {mac_t, load_row, load_col, wf_cnt}（DMA/权重进度）
-            8'h18: as_readdata = core_dbg_ptr3;
-            // 快照（core_done 或写 0x64 冻结；lane0）——0x90~0xB8：
-            8'h24: as_readdata = dbg_snap_acc;     // 0x90 acc_q lane0（int32 累加）
-            8'h25: as_readdata = dbg_snap_vact;    // 0x94 v_act_l[0]（relu/rcl6 后）
-            8'h26: as_readdata = dbg_snap_vrq;     // 0x98 v_rq64_l[0] 低 32（64-bit 积）
-            8'h27: as_readdata = dbg_snap_vrnd;    // 0x9C v_round_l[0] 低 32（round 后）
-            8'h29: as_readdata = dbg_snap_vshf;    // 0xA4 v_shifted[0] 低 32（右移后）
-            8'h2A: as_readdata = dbg_snap_lb;      // 0xA8 lb_q 低 32（输入采样）
-            8'h2B: as_readdata = dbg_snap_wq;      // 0xAC w_q[0][0..3]（权重采样）
-            8'h2C: as_readdata = dbg_snap_vbias;   // 0xB0 v_act_l[0]（乘法输入）
-            8'h2D: as_readdata = dbg_snap_vdelta;  // 0xB4 v_rnd_delta[0] 低 32（round 移位）
-            // 0xB8 = {done_cnt, o_evt_cnt}（层完成/输出事件累计）
-            8'h2E: as_readdata = {dbg_done_cnt, dbg_o_evt_cnt};
             default: as_readdata = 32'h0;
         endcase
     end
@@ -162,56 +129,8 @@ module cnn_top_core (
         .start(core_start), .o_done(core_done),
         .i_valid(core_i_valid), .i_ready(core_i_ready), .i_data(core_i_data),
         .iw_valid(core_iw_valid), .ow_ready(core_ow_ready), .iw_data(core_iw_data),
-        .o_valid(core_o_valid), .o_ready(core_o_ready), .o_data(core_o_data),
-        .dbg_ptr0(core_dbg_ptr0), .dbg_ptr1(core_dbg_ptr1),
-        .dbg_ptr2(core_dbg_ptr2), .dbg_ptr3(core_dbg_ptr3),
-        .dbg_data0(core_dbg_data0), .dbg_data1(core_dbg_data1),
-        .dbg_lb(core_dbg_lb)
+        .o_valid(core_o_valid), .o_ready(core_o_ready), .o_data(core_o_data)
     );
-
-    //-----------------------------------------------------------------------
-    // 观测探针（cnn_core_v2 输出端口引出；Quartus 不支持跨模块层次引用）
-    // 指针类：组合直读（busy 时抓状态机现场）；数据类：快照锁存
-    //（core_done 自动锁存层末值 + 写 0x64 手动冻结 busy 现场）
-    //-----------------------------------------------------------------------
-    wire [31:0]  core_dbg_ptr0, core_dbg_ptr1, core_dbg_ptr2, core_dbg_ptr3;
-    wire [127:0] core_dbg_data0, core_dbg_data1;
-    wire [31:0]  core_dbg_lb;
-
-    reg [31:0] dbg_snap_acc, dbg_snap_vact, dbg_snap_vrq, dbg_snap_vrnd;
-    reg [31:0] dbg_snap_vshf, dbg_snap_lb, dbg_snap_wq, dbg_snap_vbias, dbg_snap_vdelta;
-    reg        dbg_freeze;
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            dbg_snap_acc <= 0; dbg_snap_vact <= 0; dbg_snap_vrq <= 0; dbg_snap_vrnd <= 0;
-            dbg_snap_vshf <= 0; dbg_snap_lb <= 0; dbg_snap_wq <= 0;
-            dbg_snap_vbias <= 0; dbg_snap_vdelta <= 0; dbg_freeze <= 0;
-        end else begin
-            dbg_freeze <= as_write && as_address == 8'h19;   // 写 0x64：冻结一拍
-            if (core_done || dbg_freeze) begin
-                dbg_snap_acc    <= core_dbg_data0[31:0];    // acc_q lane0
-                dbg_snap_vbias  <= core_dbg_data0[63:32];   // v_act_l[0]（乘后域：乘法输入）
-                dbg_snap_vact   <= core_dbg_data0[95:64];   // v_act_l[0]
-                dbg_snap_vrq    <= core_dbg_data0[127:96];  // v_rq64_l[0] 低 32
-                dbg_snap_vrnd   <= core_dbg_data1[31:0];    // v_round_l[0] 低 32
-                dbg_snap_vshf   <= core_dbg_data1[63:32];   // v_shifted[0] 低 32
-                dbg_snap_vdelta <= core_dbg_data1[95:64];   // v_rnd_delta[0] 低 32
-                dbg_snap_wq     <= core_dbg_data1[127:96];  // w_q[0][3:0]
-                dbg_snap_lb     <= core_dbg_lb;             // lb_q 低 32
-            end
-        end
-    end
-
-    // 输出事件计数 / 层完成计数（累计，不复位）
-    reg [15:0] dbg_o_evt_cnt, dbg_done_cnt;
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            dbg_o_evt_cnt <= 0; dbg_done_cnt <= 0;
-        end else begin
-            if (core_o_valid && core_o_ready) dbg_o_evt_cnt <= dbg_o_evt_cnt + 16'd1;
-            if (core_done) dbg_done_cnt <= dbg_done_cnt + 1;
-        end
-    end
 
     //-----------------------------------------------------------------------
     // param 解析缓存 + 派生量
@@ -430,22 +349,6 @@ module cnn_top_core (
                         - (lr_got && lr_pending != 8'd0);
             wr_pending <= wr_pending + (wr_read && !wr_waitrequest)
                         - (wr_got && wr_pending != 8'd0);
-        end
-    end
-
-    // 调试计数器（0x4C/0x50 只读）：命令接受数 vs 本侧数据返回数
-    // （lr_got/wr_got 已按命令序路由，修复后 lr_rdv==lr_cmd、wr_rdv==wr_cmd，
-    // 不再互相污染），定位 readdatavalid 不返回是桥的问题还是计数的问题
-    reg [15:0] lr_cmd_cnt, lr_rdv_cnt, wr_cmd_cnt, wr_rdv_cnt;
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            lr_cmd_cnt <= 0; lr_rdv_cnt <= 0;
-            wr_cmd_cnt <= 0; wr_rdv_cnt <= 0;
-        end else begin
-            if (lr_read && !lr_waitrequest) lr_cmd_cnt <= lr_cmd_cnt + 16'd1;
-            if (lr_got)                     lr_rdv_cnt <= lr_rdv_cnt + 16'd1;
-            if (wr_read && !wr_waitrequest) wr_cmd_cnt <= wr_cmd_cnt + 16'd1;
-            if (wr_got)                     wr_rdv_cnt <= wr_rdv_cnt + 16'd1;
         end
     end
 
