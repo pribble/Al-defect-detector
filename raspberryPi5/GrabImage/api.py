@@ -352,7 +352,7 @@ class Consumer(threading.Thread):
         else:
             a = (a - a.mean()) / sa
             b = (b - b.mean()) / sb
-            n_ssim = float(compare_ssim(a, b))
+            n_ssim = float(compare_ssim(a, b, data_range=1.0))
 
         shared.debug_mask = stages["mask"]
         shared.debug_intermediates = stages
