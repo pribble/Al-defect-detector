@@ -30,7 +30,7 @@ raspberryPi5/
 ├── ArmControl/   # 机械臂控制服务（详见其 README）
 ├── frontend/     # 前端 SPA（Vue 2 + Element UI + ECharts，无构建步骤）
 ├── MvImport/     # Hikvision MVS SDK 的 ctypes 绑定（手写）
-├── tools/        # logger.py —— 共享日志工具
+├── tools/        # logger.py（共享日志工具）、crop_train_dataset.py（训练集方形化预处理）
 ├── deploy.sh     # rsync 部署脚本（dev 机 → Pi）
 └── restart.sh    # 重启两个服务并查看状态
 ```
