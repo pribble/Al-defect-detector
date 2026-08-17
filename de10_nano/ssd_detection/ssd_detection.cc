@@ -116,6 +116,10 @@ public:
     }
 
     init_ImageData();
+
+    // 启动 warmup：构造完成立即跑一次空图推理
+    cv::Mat warmup_img(input_shape, input_shape, CV_8UC1);
+    Detect(warmup_img);
   }
 
   ~Detector() {
@@ -272,9 +276,6 @@ void detect_image_file(Detector& detector, std::string input_path){
     closedir(dp);
   }
   else img_paths.push_back(input_path);
-  //warmup
-  cv::Mat img(input_shape, input_shape, CV_8UC1);
-  detector.Detect(img);
 
   if (stat("./result", &st) != 0) {
       mkdir("./result", 0755);
