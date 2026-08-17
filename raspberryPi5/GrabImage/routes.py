@@ -17,7 +17,7 @@ from flask import Blueprint, Response, render_template, request
 
 import database
 import shared
-from disc_detect import probe_disc
+from disc_detect import find_disc_robust
 
 bp = Blueprint('main', __name__)
 
@@ -335,7 +335,7 @@ def debug_stages():
 
 
 def _generate_disc_debug_frames():
-    """圆识别调试流: 对实时帧直接跑 probe_disc, 叠加检出圆(绿)与裁剪框(黄).
+    """圆识别调试流: 对实时帧直接跑 find_disc_robust, 叠加检出圆(绿)与裁剪框(黄).
 
     注意: 这里是实时检测, 与生产推理管线(SSIM 触发后才定圆)解耦——调试时把
     铝片/任意物体放进画面即可立刻看到检出结果与失败原因.
@@ -355,7 +355,10 @@ def _generate_disc_debug_frames():
 
         method = getattr(shared, 'disc_method', 'mask')
         cfg = getattr(shared, 'disc_cfg', None)
-        circle, info = probe_disc(frame, method=method, cfg=cfg)
+        circle, info = find_disc_robust(
+            frame, method=method, cfg=cfg,
+            background=getattr(shared, 'debug_background', None),
+        )
 
         if circle is not None:
             cx, cy, r = (int(v) for v in circle)
@@ -379,7 +382,8 @@ def _generate_disc_debug_frames():
                     (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 1)
         if found:
             cx, cy, r = circle
-            detail = 'circle=({:.0f},{:.0f}) r={:.0f}'.format(cx, cy, r)
+            detail = 'circle=({:.0f},{:.0f}) r={:.0f} [{}]'.format(
+                cx, cy, r, (info or {}).get('used_method', '?'))
         else:
             detail = 'reject: {}'.format((info or {}).get('reject') or '未知')
         cv2.putText(display, detail, (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)

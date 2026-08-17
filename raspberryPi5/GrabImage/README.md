@@ -87,24 +87,28 @@ COOLDOWN: 5 帧冷却，防止同一铝片重复触发
 整帧 768×512（3:2）直接 `resize(300,300)` 是**各向异性压缩**（水平 2.56×、垂直 1.71×），
 缺陷形状会被挤压。因此推理前先定位铝片圆心：
 
-1. `find_disc()`（disc_detect.py）在**选中帧**上定圆，返回 `(cx, cy, r)`：
-   - `method=mask`（默认）：Otsu 二值化（带下限保护）→ 形态学开/闭 → 最大外轮廓 →
-     `minEnclosingCircle`。反射高光在圆内部不影响外边界；圆形度过滤剔除机械臂等
-     非圆亮斑。**抗反光、无参数，推荐现场先用它**。
+1. `find_disc_robust()`（disc_detect.py）在**选中帧**上定圆，返回 `(cx, cy, r)`，
+   带**回退链**（`method_fallback=1` 时）：主方法失败自动换下一个，全失败才回退整帧：
+   - `method=mask`（默认）：优先**背景差分路径**——与触发链路同源的 EMA 背景
+     `absdiff → 高斯模糊 → Otsu → 形态学 → 最大外轮廓 → minEnclosingCircle`，
+     光照变化/皮带反光下最稳；无背景（硬处理路径/启动暖机期）时走原始帧 Otsu。
+     反射高光在圆内部不影响外边界；圆形度过滤剔除机械臂等非圆亮斑。
    - `method=hough`：`Canny + HoughCircles` 圆弧投票，边缘残缺也能定圆；参数
      （`hough_param1/param2`）需现场调。
 2. 以 `(cx, cy)` 为中心裁**正方形**：边长 `side = 2×(r + r×margin_ratio)`（默认留
    半径 10% 的黑边，不完全切边，减少背景干扰），越界自动钳制到帧内。
 3. 裁剪图等比缩放到 300×300 送 FPGA —— 内容不失真、铝片居中。
-4. **未检出圆/裁剪过小时回退整帧缩放**（记 warning，不影响流程）。
+4. **未检出圆/裁剪过小时回退整帧缩放**（记 warning，不影响流程）。`_smart_crop`
+   整体有 try/except 保护——定圆代码出意外也不会中断推理/存图链路。
 
 坐标映射：`_draw_defect_box` 按 `self._crop_box (x0, y0, side)` 把推理坐标从
 300×300 空间先映射回裁剪图、再平移到全帧；未裁剪时保持旧的整帧等比缩放。
 `draw_overlay=1` 时在保存的标注图上画绿色圆 + 黄色裁剪框。
 
-> 现场调参提示：`/debug_disc` 流是**对实时帧直接跑圆检测**（`probe_disc()`，与
-> 触发/推理解耦），把铝片放进画面即可立即看到检出圆与裁剪框；未检出时第二行
-> 文字显示 reject 原因（Otsu 阈值/圆形度/半径范围等），据此调 `[disc]` 参数。
+> 现场调参提示：`/debug_disc` 流是**对实时帧直接跑圆检测**（`find_disc_robust()`，
+> 与触发/推理解耦），把铝片放进画面即可立即看到检出圆与裁剪框，并显示最终生效
+> 的方法（如 `mask+bg`）；未检出时第二行文字显示 reject 原因（Otsu 阈值/圆形度/
+> 半径范围等），据此调 `[disc]` 参数。
 
 > 注意：`method`/`enabled`/`margin_ratio` 等为**启动时读取**，改动需重启服务
 > （`systemctl restart detect-api.service`）。
@@ -183,6 +187,7 @@ draw_overlay = 1       # 标注图/调试流上画圆与裁剪框
 hough_param1 = 100     # hough 方法: Canny 高阈值
 hough_param2 = 30      # hough 方法: 累加器阈值
 hough_min_dist = 0     # 0=自动 max(w,h)/4
+method_fallback = 1    # 主方法未检出时尝试另一方法 (mask 优先背景差分)
 ```
 
 > 说明：`gaussian_kernel` 可从 config 读（默认 21）；`grab_position`/

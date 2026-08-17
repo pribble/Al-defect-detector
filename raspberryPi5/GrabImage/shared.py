@@ -39,3 +39,4 @@ last_disc = None        # (cx, cy, r) 最近一次检出的铝片圆
 last_crop_box = None    # (x0, y0, side) 最近一次智能裁剪框 (全帧坐标)
 disc_method = "mask"    # api.py 启动时从 config.ini [disc] 同步
 disc_enabled = 1
+debug_background = None  # Consumer 的 EMA 背景模型 (float32 低分辨率, 供背景差分定圆/调试)

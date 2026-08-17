@@ -27,7 +27,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '../tools'))
 from logger import setup_log
 
 from camera import frame_queue, Producer
-from disc_detect import find_disc
+from disc_detect import find_disc_robust
 import database
 import shared
 
@@ -135,6 +135,7 @@ DISC_CFG = {
     "hough_param1": float(_disc_cfg("hough_param1", "100")),
     "hough_param2": float(_disc_cfg("hough_param2", "30")),
     "hough_min_dist": float(_disc_cfg("hough_min_dist", "0")),
+    "method_fallback": int(_disc_cfg("method_fallback", "1")),
 }
 shared.disc_method = DISC_METHOD
 shared.disc_enabled = DISC_ENABLED
@@ -323,6 +324,9 @@ class Consumer(threading.Thread):
             enter, exit_cond, ratio = self._hard_detect(gray, image)
             self._calibration_update(ratio, 0.02)
 
+        # 供 /debug_disc 与智能裁剪使用: EMA 背景 (硬处理路径下为 None → 走原始阈值)
+        shared.debug_background = getattr(self, '_background', None)
+
         self._run_state_machine(enter, exit_cond, ratio, image)
 
     # ---- 软处理: 光照鲁棒前景提取 (背景建模 + 自适应二值化) ----
@@ -488,35 +492,48 @@ class Consumer(threading.Thread):
         定位铝片圆心, 以其为中心裁正方形(四周留黑边), 返回 (裁剪图, (x0, y0, side)).
         未启用 / 未检出圆 / 裁剪过小时返回 (None, None), 由调用方回退整帧缩放.
 
+        定圆: find_disc_robust() 主方法(默认 mask) → 回退链(有背景时 hough;
+        无背景时 mask 原始阈值 → hough), 优先使用 Consumer 的 EMA 背景做背景
+        差分 (与触发链路同源, 光照鲁棒).
+
         理由: 整帧 768×512 (3:2) 被各向异性压缩成 300×300 会挤压缺陷形状;
         以铝片为中心裁方形再等比缩放, 内容不失真, 黑边也减少了背景干扰.
+
+        注意: 整个方法被 try/except 包裹——即使定圆代码出意外, 也绝不中断
+        推理/存图链路 (宁可靠后回退整帧, 不可让铝片经过时丢图).
         """
         shared.last_disc = None
         shared.last_crop_box = None
         if not DISC_ENABLED:
             return None, None
-        h, w = image.shape[:2]
-        circle = find_disc(image, method=DISC_METHOD, cfg=DISC_CFG)
-        if circle is None:
-            logger.warning('智能裁剪: 未检出铝片圆, 回退整帧缩放')
+        try:
+            h, w = image.shape[:2]
+            circle, info = find_disc_robust(
+                image, method=DISC_METHOD, cfg=DISC_CFG, background=self._background)
+            if circle is None:
+                logger.warning('智能裁剪: 未检出铝片圆 (%s), 回退整帧缩放',
+                               (info or {}).get('reject') or '未知原因')
+                return None, None
+            cx, cy, r = circle
+            margin = int(r * DISC_MARGIN_RATIO)
+            side = int(2 * (r + margin))
+            side = min(side, w, h)  # 窗口不得超出画面
+            if side < 32:
+                logger.warning('智能裁剪: 裁剪边长过小(%d), 回退整帧缩放', side)
+                return None, None
+            x0 = min(max(int(cx) - side // 2, 0), w - side)
+            y0 = min(max(int(cy) - side // 2, 0), h - side)
+            crop = image[y0:y0 + side, x0:x0 + side]
+            if crop.shape[0] < 32 or crop.shape[1] < 32:
+                return None, None
+            shared.last_disc = (cx, cy, r)
+            shared.last_crop_box = (x0, y0, side)
+            logger.info('智能裁剪: 圆(cx=%.1f, cy=%.1f, r=%.1f) [%s] → 裁剪(%d,%d,%d)',
+                        cx, cy, r, (info or {}).get('used_method', '?'), x0, y0, side)
+            return crop, (x0, y0, side)
+        except Exception as e:
+            logger.error('智能裁剪异常, 回退整帧缩放: %s', e, exc_info=True)
             return None, None
-        cx, cy, r = circle
-        margin = int(r * DISC_MARGIN_RATIO)
-        side = int(2 * (r + margin))
-        side = min(side, w, h)  # 窗口不得超出画面
-        if side < 32:
-            logger.warning('智能裁剪: 裁剪边长过小(%d), 回退整帧缩放', side)
-            return None, None
-        x0 = min(max(int(cx) - side // 2, 0), w - side)
-        y0 = min(max(int(cy) - side // 2, 0), h - side)
-        crop = image[y0:y0 + side, x0:x0 + side]
-        if crop.shape[0] < 32 or crop.shape[1] < 32:
-            return None, None
-        shared.last_disc = (cx, cy, r)
-        shared.last_crop_box = (x0, y0, side)
-        logger.info('智能裁剪: 圆(cx=%.1f, cy=%.1f, r=%.1f) → 裁剪(%d,%d,%d)',
-                    cx, cy, r, x0, y0, side)
-        return crop, (x0, y0, side)
 
     def _draw_disc_overlay(self, image):
         """在标注图上叠加绿色圆与黄色裁剪框 (现场调参/验证用, draw_overlay 控制)."""
