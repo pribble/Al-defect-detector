@@ -174,32 +174,37 @@ class Producer(threading.Thread):
     def run(self):
         cam, data_buf, nPayloadSize, stFrameInfo = init_camera()
         while True:
-            ret = cam.MV_CC_GetOneFrameTimeout(data_buf, nPayloadSize, stFrameInfo, 10000)
-            if ret != 0:
-                logger.info('海康相机状态：{}'.format(ret))
+            try:
+                ret = cam.MV_CC_GetOneFrameTimeout(data_buf, nPayloadSize, stFrameInfo, 10000)
+                if ret != 0:
+                    logger.info('海康相机状态：{}'.format(ret))
 
-            if ret == CAMERA_NEED_RESTART:
-                logger.info("相机重启")
-                cam.MV_CC_StopGrabbing()
-                cam.MV_CC_CloseDevice()
-                cam.MV_CC_DestroyHandle()
-                cam, data_buf, nPayloadSize, stFrameInfo = init_camera()
-                continue
-
-            time.sleep(0.01)
-
-            if ret == 0:
-                if stFrameInfo.nWidth == 0 or stFrameInfo.nHeight == 0:
-                    logger.error("frame with zero dimension! w=%d h=%d", stFrameInfo.nWidth, stFrameInfo.nHeight)
+                if ret == CAMERA_NEED_RESTART:
+                    logger.info("相机重启")
+                    cam.MV_CC_StopGrabbing()
+                    cam.MV_CC_CloseDevice()
+                    cam.MV_CC_DestroyHandle()
+                    cam, data_buf, nPayloadSize, stFrameInfo = init_camera()
                     continue
-                image = np.asarray(data_buf).reshape((stFrameInfo.nHeight, stFrameInfo.nWidth))
-                # 先裁宽高比到 4:3 以内, 再下采样 (减少 resize 处理的像素)
-                image = _crop_to_max_aspect(image)
-                h, w = image.shape[:2]
-                image = cv2.resize(
-                    image,
-                    (int(w / 4), int(h / 4)),
-                    interpolation=cv2.INTER_AREA,
-                )
-                frame_queue.put(image)
-                self._stream_image[0] = image
+
+                time.sleep(0.01)
+
+                if ret == 0:
+                    if stFrameInfo.nWidth == 0 or stFrameInfo.nHeight == 0:
+                        logger.error("frame with zero dimension! w=%d h=%d", stFrameInfo.nWidth, stFrameInfo.nHeight)
+                        continue
+                    image = np.asarray(data_buf).reshape((stFrameInfo.nHeight, stFrameInfo.nWidth))
+                    # 先裁宽高比到 4:3 以内, 再下采样 (减少 resize 处理的像素)
+                    image = _crop_to_max_aspect(image)
+                    h, w = image.shape[:2]
+                    image = cv2.resize(
+                        image,
+                        (int(w / 4), int(h / 4)),
+                        interpolation=cv2.INTER_AREA,
+                    )
+                    frame_queue.put(image)
+                    self._stream_image[0] = image
+            except Exception as e:
+                # 单帧异常不杀死采集线程, 记日志继续 (防视频流静默中断)
+                logger.error('producer frame error: %s', e, exc_info=True)
+                time.sleep(0.1)

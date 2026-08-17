@@ -73,6 +73,7 @@ ALARM_STOP_BITS = 1
 ALARM_CMD = bytes.fromhex('7E FF 06 03 00 00 01 EF')
 
 SAVE_IMAGE_NUM = 10
+CLEANUP_INTERVAL = 60  # 周期清理间隔 (秒): 防止运行期间 files/ 被缺陷图占满磁盘
 SSIM_WIDTH = 64
 SSIM_HEIGHT = 48
 REFERENCE_IMAGE = 'yuanshi.jpg'
@@ -159,6 +160,22 @@ alarm_serial = None
 
 app = Flask(__name__)
 CORS(app, supports_credentials=True)
+
+
+def _submit_pool(fn, *args):
+    """有界提交到线程池: 任务积压超过阈值时丢弃本次任务并告警.
+
+    机械臂/报警请求在目标服务无响应时会挂起 30s, 若铝片持续触发, 无界队列的
+    任务只进不出会吃内存. 丢弃的是"补救性"动作 (抓取/报警), 不丢也不致命.
+    """
+    try:
+        qsize = shared.thread_pool._work_queue.qsize()
+    except Exception:
+        qsize = 0
+    if qsize > 200:
+        logger.warning('线程池任务积压 %d, 丢弃 %s', qsize, getattr(fn, '__name__', str(fn)))
+        return
+    shared.thread_pool.submit(fn, *args)
 
 
 # ============================================================
@@ -302,16 +319,33 @@ class Consumer(threading.Thread):
 
     def run(self):
         database.create_database()
+        frame_counter = 0
 
         while True:
             time.sleep(0.01)
             try:
                 self._process_sampling_frame()
+                frame_counter += 1
+                # 周期性记录进程 RSS, 供排查内存缓慢增长 (Linux /proc)
+                if frame_counter % 300 == 0:
+                    self._log_rss()
 
             except Exception as e:
                 # 记录最近一次异常到 shared, 供 /get_status 诊断; exc_info 输出完整堆栈
                 shared.last_consumer_error = '{}'.format(e)
                 logger.error('consumer thread error：{}'.format(str(e)), exc_info=True)
+
+    @staticmethod
+    def _log_rss():
+        """读取 /proc/self/status 的 VmRSS 并记 INFO 日志 (非 Linux 环境静默跳过)."""
+        try:
+            with open('/proc/self/status') as f:
+                for line in f:
+                    if line.startswith('VmRSS'):
+                        logger.info('RSS: %s', line.strip())
+                        break
+        except Exception:
+            pass
 
     # ---- 单帧处理 ----
 
@@ -624,7 +658,7 @@ class Consumer(threading.Thread):
         if inference_result['len'] > 0:
             self._handle_inference_result(inference_result, uid, file_name, annotated_image, original_image)
         else:
-            shared.thread_pool.submit(trigger_grab, "OK")
+            _submit_pool(trigger_grab, "OK")
             self._save_normal_result(uid, file_name, annotated_image, original_image)
 
     def _handle_inference_result(self, inference_result, uid, file_name, annotated_image, original_image):
@@ -633,7 +667,7 @@ class Consumer(threading.Thread):
         if action == "NG":
             self._handle_defect(inference_result, uid, file_name, annotated_image, original_image)
         else:
-            shared.thread_pool.submit(trigger_grab, "OK")
+            _submit_pool(trigger_grab, "OK")
             self._save_normal_result(uid, file_name, annotated_image, original_image)
 
     def _save_normal_result(self, uid, file_name, annotated_image, original_image):
@@ -651,10 +685,10 @@ class Consumer(threading.Thread):
 
     def _handle_defect(self, inference_result, uid, file_name, annotated_image, original_image):
         logger.info("准备报警")
-        shared.thread_pool.submit(trigger_alarm)
+        _submit_pool(trigger_alarm)
         logger.info("报警完成")
         time.sleep(0.1)
-        shared.thread_pool.submit(trigger_grab, "NG")
+        _submit_pool(trigger_grab, "NG")
         logger.info("检测到缺陷，触发报警和抓取动作")
 
         for detection in inference_result['result']:
@@ -731,6 +765,16 @@ def cleanup():
             os.remove(full_path)
 
 
+def cleanup_loop():
+    """周期清理 files/ 目录, 防止长时间运行磁盘被缺陷图占满 (原 cleanup 只在启动时跑一次)."""
+    while True:
+        try:
+            cleanup()
+        except Exception as e:
+            logger.error('cleanup error: %s', e)
+        time.sleep(CLEANUP_INTERVAL)
+
+
 # ============================================================
 # 注册路由
 # ============================================================
@@ -748,5 +792,7 @@ if __name__ == "__main__":
     # 提前启动相机采集和检测线程 (避免 routes.py 因 import Consumer 形成循环)
     Producer(shared.stream_image_ref).start()
     Consumer().start()
-    threading.Thread(target=cleanup).start()
-    app.run(host='0.0.0.0', debug=False, use_reloader=False, port=7777)
+    threading.Thread(target=cleanup_loop).start()
+    # threaded=True 必须开: MJPEG 流 (/img /debug_disc /debug_stages) 是长驻生成器,
+    # 单线程下第一个流会占死唯一 HTTP 线程, 其余请求全部排队阻塞直至内存堆积
+    app.run(host='0.0.0.0', debug=False, use_reloader=False, port=7777, threaded=True)
