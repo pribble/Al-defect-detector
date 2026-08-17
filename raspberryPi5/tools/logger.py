@@ -14,6 +14,11 @@ def setup_log(name, log_file):
                 f.truncate(int(size / 2))
 
     logger = logging.getLogger(name)
+    if logger.handlers:
+        # 同一服务被多处调用 setup_log (如 api.py 与 camera.py) 时会重复加
+        # handler, 导致每条日志写两遍; 已有 handler 时直接复用
+        return logger
+
     logger.setLevel(logging.DEBUG)
     formatter = logging.Formatter(
         '[%(asctime)s %(filename)s:%(funcName)s:%(lineno)d %(levelname)s]->%(message)s'
