@@ -8,24 +8,31 @@
   训练/推理输入分布不一致会引入误检, 本脚本把旧数据集切成同样的形态, 并同步
   变换 VOC XML 里的缺陷框坐标, 供重新训练。输出到新目录, 绝不动原文件。
 
-裁剪规则 (与 GrabImage/Consumer._smart_crop 一致):
-  1. 定圆心: find_disc_robust (mask 背景差分→原始阈值→hough; 训练图无背景走
-     原始阈值, hough 可从"被画面切掉的圆"的可见弧恢复完整圆心)。
-  2. 检出圆 → 正方形边长 side = 2×(r + r×margin_ratio), 圆心居中, 越界钳制。
-  3. 未检出圆 → 回退"图片中心取最大正方形" (本数据集铝片几乎占满整帧,
-     中心正方形≈正确裁剪; --no-fallback-center 可改为跳过)。
-  4. 缺陷框: 与裁剪区相交保留并裁剪越界部分, 完全在外丢弃, 过小(<--min-box)丢弃。
-  5. 输出保持裁剪后的原始分辨率 (不缩放); 源图本身是灰度 (VOC depth=1),
-     输出灰度图 (与 FPGA 推理输入一致)。
+两种模式:
+  [默认] 方形化 + XML 变换:
+    1. 定圆心: find_disc_robust (mask→hough; 训练图无背景走原始阈值)。
+    2. 检出圆 → 正方形 side = 2×(r + r×margin_ratio), 圆心居中, 越界钳制。
+    3. 未检出圆 → 回退"图片中心取最大正方形" (--no-fallback-center 改为跳过)。
+    4. 缺陷框: 相交保留+越界裁剪, 完全在外/过小丢弃。
+    5. 输出保持裁剪后原始分辨率; 源图灰度 (VOC depth=1), 输出灰度。
+
+  [--pipeline] 线上管线原样复刻 (仅图片, 不碰 XML):
+    与 GrabImage/Consumer._smart_crop 完全一致:
+    1. find_disc_robust, 参数读 GrabImage/config.ini 的 [disc] 段。
+    2. 圆完整度 in_frame_fraction ≥ min_completeness(0.7) → 输出正方形裁剪;
+       否则(圆不完整/未检出) → 保存整帧 (与线上回退行为一致, 不硬切圆)。
 
 用法:
   python crop_train_dataset.py --images-dir D:\\HAOYAO\\images1 \
       --xmls-dir D:\\HAOYAO\\annotations1 \
       --out-images D:\\HAOYAO\\images_square --out-xmls D:\\HAOYAO\\annotations_square
+  python crop_train_dataset.py --pipeline --images-dir D:\\HAOYAO\\images1 \
+      --out-images D:\\HAOYAO\\images_pipeline
   加 --dry-run 先预览不写文件
 """
 
 import argparse
+import configparser
 import glob
 import os
 import sys
@@ -35,10 +42,41 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../GrabImage'))
-from disc_detect import find_disc_robust
+from disc_detect import find_disc_robust, in_frame_fraction
 
 IMAGE_EXTS = ('.jpg', '.jpeg', '.png')
 DEFAULT_MARGIN = 0.10   # 与 config.ini [disc] margin_ratio 一致
+
+
+def load_disc_cfg(config_path):
+    """读取线上 config.ini [disc] 段 (与 api.py 相同键), 缺键回退默认值."""
+    cfg = {}
+    cp = configparser.ConfigParser()
+    try:
+        cp.read(config_path, encoding='utf-8')
+        sec = cp['disc'] if cp.has_section('disc') else {}
+    except Exception:
+        sec = {}
+    disc_keys = {
+        'min_radius_ratio': 0.15, 'max_radius_ratio': 0.50, 'circularity': 0.60,
+        'mask_threshold': 0.0, 'otsu_min_threshold': 50.0,
+        'hough_param1': 100.0, 'hough_param2': 30.0, 'hough_min_dist': 0.0,
+        'method_fallback': 1,
+    }
+    for k, default in disc_keys.items():
+        try:
+            cfg[k] = float(sec.get(k, default))
+        except (TypeError, ValueError):
+            cfg[k] = default
+    try:
+        margin = float(sec.get('margin_ratio', DEFAULT_MARGIN))
+    except (TypeError, ValueError):
+        margin = DEFAULT_MARGIN
+    try:
+        min_completeness = float(sec.get('min_completeness', 0.7))
+    except (TypeError, ValueError):
+        min_completeness = 0.7
+    return cfg, margin, min_completeness
 
 
 # ============================================================
@@ -195,22 +233,102 @@ def process_one(img_path, xml_path, out_img_dir, out_xml_dir, margin_ratio, min_
 
 
 # ============================================================
+# [--pipeline] 线上管线原样复刻 (仅图片)
+# ============================================================
+
+def pipeline_crop(gray, cfg, margin_ratio, min_completeness):
+    """复刻 api.Consumer._smart_crop: 返回 (crop, info) 或 (None, info) → 保存整帧."""
+    h, w = gray.shape[:2]
+    circle, info = find_disc_robust(gray, method='mask', cfg=cfg, background=None)
+    if circle is None:
+        return None, info
+    cx, cy, r = circle
+    if in_frame_fraction(circle, h, w) < min_completeness:
+        return None, info
+    side = min(int(2 * (r + r * margin_ratio)), w, h)
+    if side < 32:
+        return None, info
+    x0 = min(max(int(cx) - side // 2, 0), w - side)
+    y0 = min(max(int(cy) - side // 2, 0), h - side)
+    crop = gray[y0:min(y0 + side, h), x0:min(x0 + side, w)]
+    if crop.shape[0] < 32 or crop.shape[1] < 32:
+        return None, info
+    return crop, info
+
+
+def run_pipeline(images_dir, out_dir, margin_ratio, min_completeness, cfg, dry_run):
+    """pipeline 模式: 每张图按线上 _smart_crop 出裁剪图, 不达标保存整帧. 仅输出图片."""
+    img_files = []
+    for ext in IMAGE_EXTS:
+        img_files.extend(glob.glob(os.path.join(images_dir, '*' + ext)))
+    img_files = sorted(img_files)
+    if not img_files:
+        print('未在 {} 找到图片'.format(images_dir))
+        return 1
+
+    stats = {'crop': 0, 'full': 0, 'err': 0}
+    for img_path in img_files:
+        base, ext = os.path.splitext(os.path.basename(img_path))
+        gray = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+        if gray is None:
+            stats['err'] += 1
+            print('  [ERR] {} 读取失败'.format(base))
+            continue
+        crop, info = pipeline_crop(gray, cfg, margin_ratio, min_completeness)
+        if crop is None:
+            out_img = gray
+            kind = '整帧'
+            stats['full'] += 1
+        else:
+            out_img = crop
+            kind = '裁剪({}x{})'.format(crop.shape[1], crop.shape[0])
+            stats['crop'] += 1
+        method = (info or {}).get('used_method', '?') if crop is not None else (info or {}).get('reject', '?')
+        print('  [{}] {} | {} | {}'.format(
+            'dry-run' if dry_run else 'OK', base, kind, method))
+        if not dry_run:
+            os.makedirs(out_dir, exist_ok=True)
+            cv2.imwrite(os.path.join(out_dir, base + ext), out_img)
+
+    mode = 'DRY-RUN (未写文件)' if dry_run else '完成'
+    print('\n[{}] 共 {} 张: 正方形裁剪 {} / 整帧(完整度不达标/未检出) {} / 出错 {}'.format(
+        mode, len(img_files), stats['crop'], stats['full'], stats['err']))
+    return 0
+
+
+# ============================================================
 # 主入口
 # ============================================================
 
 def main():
     ap = argparse.ArgumentParser(description='VOC 训练集裁剪为铝片居中正方形 (与线上智能裁剪一致)')
+    ap.add_argument('--pipeline', action='store_true',
+                    help='线上管线原样复刻: find_disc_robust + min_completeness 门槛, '
+                         '不达标/未检出保存整帧; 仅输出图片, 不处理 XML')
     ap.add_argument('--images-dir', required=True, help='原图片目录 (如 D:\\HAOYAO\\images1)')
-    ap.add_argument('--xmls-dir', required=True, help='原标注目录 (如 D:\\HAOYAO\\annotations1)')
+    ap.add_argument('--xmls-dir', default='', help='原标注目录 (默认模式用, 如 D:\\HAOYAO\\annotations1)')
     ap.add_argument('--out-images', required=True, help='输出图片目录 (新建, 如 D:\\HAOYAO\\images_square)')
-    ap.add_argument('--out-xmls', required=True, help='输出标注目录 (新建, 如 D:\\HAOYAO\\annotations_square)')
-    ap.add_argument('--margin-ratio', type=float, default=DEFAULT_MARGIN,
-                    help='黑边 = 半径 × 该值 (默认 {})'.format(DEFAULT_MARGIN))
-    ap.add_argument('--min-box', type=int, default=2, help='裁剪后过小的框丢弃 (像素)')
+    ap.add_argument('--out-xmls', default='', help='输出标注目录 (默认模式用, 如 D:\\HAOYAO\\annotations_square)')
+    ap.add_argument('--margin-ratio', type=float, default=None,
+                    help='黑边 = 半径 × 该值 (默认读 config.ini, 回退 0.10)')
+    ap.add_argument('--min-box', type=int, default=2, help='裁剪后过小的框丢弃 (像素, 默认模式)')
     ap.add_argument('--no-fallback-center', action='store_true',
-                    help='找不到圆时跳过该图 (默认用图片中心取最大正方形)')
+                    help='找不到圆时跳过该图 (默认模式; 默认用图片中心取最大正方形)')
     ap.add_argument('--dry-run', action='store_true', help='只预览不写文件')
     args = ap.parse_args()
+
+    # 读取线上 config.ini [disc] 参数 (pipeline 模式必读; 默认模式也用于 margin 兜底)
+    cfg, cfg_margin, cfg_min_comp = load_disc_cfg(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), '../GrabImage/config.ini'))
+    margin_ratio = args.margin_ratio if args.margin_ratio is not None else cfg_margin
+
+    if args.pipeline:
+        return run_pipeline(args.images_dir, args.out_images, margin_ratio,
+                            cfg_min_comp, cfg, args.dry_run)
+
+    if not args.xmls_dir or not args.out_xmls:
+        print('默认模式需要 --xmls-dir 和 --out-xmls (或使用 --pipeline 仅处理图片)')
+        return 1
 
     img_files = []
     for ext in IMAGE_EXTS:
