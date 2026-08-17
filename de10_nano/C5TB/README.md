@@ -19,18 +19,18 @@ SDMMC、USB、UART）接到 QSys 生成的 `soc_system` 系统上，并在其中
 | `C5TB_top.v` | 顶层 Verilog：例化 `pll_inst`（PLL）与 `soc_system`（QSys 系统），连接 HPS 外设引脚 |
 | `C5TB_top.sdc` | 时序约束（Quartus 18.1 生成） |
 | `soc_system.qsys` / `soc_system.sopcinfo` | QSys 系统描述：HPS + 时钟 + `cnn_top_0` 加速器 |
-| `cnn_top_spec.md` | **cnn_top 黑盒规格书**：接口/寄存器/指令格式/数据布局/数值语义，纯 RTL 复现 `cnn_top` 的依据 |
+| `cnn_top_spec.md` | **cnn_top 规格书**：接口/寄存器/指令格式/数据布局/数值语义（现行行为契约；附 A 47 层实测参数、附 B CPU 算法） |
 | `cnn_rtl/` | **cnn_top 开源复现工作区**：上游卷积数据通路（MIT）+ 差距矩阵与分阶段改造路线图 |
 | `soc_system_board_info.xml` / `hps_common_board_info.xml` | 生成设备树时使用的板级信息（供 sopc2dts） |
 | `ip/cnn_top_hw.tcl` | 自定义 CNN 加速器 IP 硬件描述（引用 `cnn_top.v`/`cnn_top_core.v`/`cnn_core_v2.v`/`mac8x8_dsp.v`/`mac8x8_lut.v` 五个 RTL 文件，已替换旧黑盒归档） |
 | `ip/cnn_top.v` 等五个 `.v` | cnn_top 的 RTL 实现（QSys 适配层 + 核心 + 卷积执行器 + 8×8 乘法器，见 `cnn_rtl/README.md`） |
-| `ip/pll/` | PLL IP：`FPGA_CLK1_50`（50 MHz 参考）分出三路：`fpga_clk_50`（outclk_0，50 MHz）/ `fpga_clk_cnn`（outclk_1，**150 MHz**，驱动 cnn_top）/ `fpga_clk_stp`（outclk_2，100 MHz） |
+| `ip/pll/` | PLL IP：`FPGA_CLK1_50`（50 MHz 参考）分出三路：`fpga_clk_50`（outclk_0，50 MHz）/ `fpga_clk_cnn`（outclk_1，**100 MHz**，驱动 cnn_top）/ `fpga_clk_stp`（outclk_2，100 MHz） |
 | `tools/` | 构建辅助脚本与**已提交的生成产物**（见下） |
 
 ### 顶层结构（C5TB_top.v）
 
 ```
-FPGA_CLK1_50 ──> pll_inst ──> fpga_clk_50(50M) / fpga_clk_cnn(150M) / fpga_clk_stp(100M)
+FPGA_CLK1_50 ──> pll_inst ──> fpga_clk_50(50M) / fpga_clk_cnn(100M) / fpga_clk_stp(100M)
                                    │
                               soc_system (QSys)
                                    ├── HPS DDR3（32-bit）
@@ -39,8 +39,10 @@ FPGA_CLK1_50 ──> pll_inst ──> fpga_clk_50(50M) / fpga_clk_cnn(150M) / fp
                                    └── cnn_top_0（CNN 加速器，Avalon 从接口 hps2cnn_avs）
 ```
 
-QSys 系统中 `cnn_top_0` 的关键参数（`soc_system.qsys`）：`IMAGE_MAX_W=302`、
-`INPUT_CHANNEL_TILE=8`、`INPUT_ROW_TILE=11`、32-bit AXI/Avalon 数据宽度等。
+QSys 系统中 `cnn_top_0` 的参数（`ip/cnn_top_hw.tcl`）：4 个 Avalon 主接口的地址宽度
+32-bit、数据宽度 32/64-bit（param/scale 读 32-bit，load 读/output 写 64-bit）。
+黑盒时代的 `IMAGE_MAX_W=302`、`INPUT_CHANNEL_TILE=8`、`INPUT_ROW_TILE=11` 等尺寸参数
+已随 RTL 化删除——各层尺寸由运行时 param 块驱动（见 `cnn_top_spec.md` §3/§5）。
 
 ### tools/ 内容
 
@@ -68,7 +70,7 @@ QSys 系统中 `cnn_top_0` 的关键参数（`soc_system.qsys`）：`IMAGE_MAX_W
 ## 构建流程
 
 ```text
-1. Quartus Prime（23.1 Lite Edition；工程创建于 18.1 Standard，SDC 为 18.1 生成，兼容正常）打开 C5TB_top.qpf
+1. Quartus Prime（23.1 Lite Edition；qpf 版本 17.1，SDC 为 18.1 生成，兼容正常）打开 C5TB_top.qpf
 2. 全编译（Analysis & Synthesis → Fitter → Assembler）
    —— 顶层 = C5TB_top.v + soc_system/synthesis/soc_system.qip（QSys 生成，目录被 gitignore）
         + ip/pll/pll_inst.qip + ip/cnn_top（cnn_top_hw.tcl + 5 个 .v）
