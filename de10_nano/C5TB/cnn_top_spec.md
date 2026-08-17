@@ -4,7 +4,7 @@
 
 本文档描述 `cnn_top` 加速器的**现行行为契约**：顶层接口（§2）、IP 参数（§3）、
 寄存器协议（§4）、指令格式（§5）、数据布局（§6）、量化/数值语义（§7）、
-执行时序与分块（§8）。RTL 实现（`ip/` 下五个 `.v`，见 `cnn_rtl/README.md`）与
+执行时序与分块（§8）。RTL 实现（`cnn_rtl/src/` 下五个 `.v`，见 `cnn_rtl/README.md`）与
 软件栈（`intelfpga.cc` / `conv_op.cc`）均以本文档为准；47 层实测参数见附 A，
 数值语义实测方法与 CPU 同源算法见附 B。
 
@@ -15,16 +15,16 @@
 
 - `cnn_top` 是 QSys 自定义 IP（Component Editor 18.1，v2.0，`ip/cnn_top_hw.tcl`）。
   原黑盒网表 `ip/cnn_top.qxp`（8.3MB，无 RTL 源码）已于 **2026-08 由开源复现 RTL
-  （`ip/cnn_top.v`/`cnn_top_core.v`/`cnn_core_v2.v`/`mac8x8_dsp.v`/`mac8x8_lut.v`
-  五个 `.v`）替代并删除**。
+  （`cnn_rtl/src/` 下 `cnn_top.v`/`cnn_top_core.v`/`cnn_core_v2.v`/`mac8x8_dsp.v`/`mac8x8_lut.v`
+  五个 `.v`，hw.tcl fileset 唯一引用）替代并删除**。
 - 软件侧协议：`ssd_detection/intelfpga.cc`（寄存器读写、DMA、重排）、
   `ssd_detection/include/intelfpga.h`（指令结构）、
   `ssd_detection/paddle_lite/lite/kernels/intel_fpga/conv_op.cc`（参数/scale 填充）。
 - 现状：RTL 已上板全链路跑通，检测正确性已确认（2026-08-10 修复后 47 层黑盒 log
   逐层对比：主干 100%、box 头 97-100%）；**性能较黑盒慢**（`fpga_time` 约 2670 ms vs
   黑盒 475 ms，瓶颈与优化方向见 `cnn_rtl/README.md` 遗留节）。
-- 编译注意：QSys Generate 会把 `ip/` 的 HDL 复制到
-  `soc_system/synthesis/submodules/` 后才参与编译——更新 `ip/` 下 `.v` 后必须重新
+- 编译注意：QSys Generate 会把 `cnn_rtl/src/` 的 HDL 复制到
+  `soc_system/synthesis/submodules/` 后才参与编译——更新 `cnn_rtl/src/` 下 `.v` 后必须重新
   Generate QSys（或手动覆盖 submodules/ 同名文件），否则综合仍引用旧副本。
 
 ## 2. 顶层接口

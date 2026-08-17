@@ -37,7 +37,7 @@ cnn_rtl/
 本分支数值/架构底子源自 Intel intelfpga 开源卷积数据通路
 （`conv_layer.vhd`，MIT 协议）：单层流式卷积（行缓冲 3+1 行、int32 累加、
 定点乘移位 requant、valid/ready 流控）。2026-08 已完全重写为自研 Verilog
-（`src/cnn_core_v2.v`（仿真版）与 `../ip/cnn_core_v2.v`（综合版，同源），NHWC8 块序流 + 乘后域定点），
+（`src/cnn_core_v2.v`，仿真与综合共用同一份，NHWC8 块序流 + 乘后域定点），
 上游 VHDL 源码及其 GHDL 验证框架已从分支移除（历史见 git）。
 
 ## 差距矩阵（上游 → cnn_top 规格）
@@ -78,9 +78,9 @@ cnn_rtl/
 > run 脚本、向量生成器）已被 v2/top 取代，随 `STAGE1_plan.md` 一并删除，历史见 git；
 > `tools/ref_int8.py` 保留（`conv_op.cc` 定点公式的对齐依据）。
 
-**阶段 5 交付（Quartus 接入）**：`cnn_top.v`（QSys 适配层，端口与 `ip/cnn_top_hw.tcl` 一致）+ `cnn_top_core.v`（RTL 本体，tb 直接对拍）+ `cnn_core_v2.v` + `mac8x8_dsp.v`/`mac8x8_lut.v`（8×8 乘法器，lane 0-3 DSP / 4-7 LUT）；`ip/cnn_top_hw.tcl` 已把 `cnn_top.qxp` 黑盒引用改为 5 个 `.v`。接入步骤（Windows Quartus）：
-1. 把 `ip/` 下 5 个 `.v` 随工程提交（已复制）；Platform Designer 打开 `soc_system.qsys` → Generate HDL（顶层会例化 `cnn_top` = 新 wrapper）
-   **⚠ 编译实际引用 `soc_system/synthesis/submodules/` 下的副本**（`soc_system.qip:7110-7114` 指向 submodules 而非 `ip/`）——改了 `ip/` 的 `.v` 后**必须**重新 Generate QSys（或手动覆盖 submodules/ 同名文件），否则编译用的还是旧副本（现象：Flow Summary 数字与旧版逐位相同）
+**阶段 5 交付（Quartus 接入）**：`cnn_top.v`（QSys 适配层，端口与 `ip/cnn_top_hw.tcl` 一致）+ `cnn_top_core.v`（RTL 本体，tb 直接对拍）+ `cnn_core_v2.v` + `mac8x8_dsp.v`/`mac8x8_lut.v`（8×8 乘法器，lane 0-3 DSP / 4-7 LUT）；`ip/cnn_top_hw.tcl` 已把 `cnn_top.qxp` 黑盒引用改为这 5 个 `.v`（fileset 指向 `../cnn_rtl/src/`，RTL 仅此一份）。接入步骤（Windows Quartus）：
+1. RTL 源随工程提交（`cnn_rtl/src/`）；Platform Designer 打开 `soc_system.qsys` → Generate HDL（顶层会例化 `cnn_top` = 新 wrapper）
+   **⚠ 编译实际引用 `soc_system/synthesis/submodules/` 下的副本**（`soc_system.qip:7110-7114` 指向 submodules 而非 `cnn_rtl/src/`）——改了 `cnn_rtl/src/` 的 `.v` 后**必须**重新 Generate QSys（或手动覆盖 submodules/ 同名文件），否则编译用的还是旧副本（现象：Flow Summary 数字与旧版逐位相同）
 2. 全量编译（Analysis & Synthesis → Fitter → Timing；黑盒换 RTL 不能增量）
 3. 关注 `clk_cnn`（50MHz）时序；board 验证：寄存器读写 → 单层对拍（软件侧跑一层，比对 DDR 输出）
 - 适配要点：burstcount 固定 1、byteenable 全 1；**读完成以 `readdatavalid` 为准**（2026-08 起，见调试历史；早期实现曾错误地以 `read && !waitrequest` 判完成）；lr/wr 共用 load master（黑盒无独立权重 master），多笔在途独立计数
@@ -137,7 +137,7 @@ requant 现为 12 拍单操作流水（S_REQ_ADDR → MUL → MULB → MUL2 → 
 每拍仅加法/移位/比较之一（≤~5ns）；state 扩 5-bit；事件级对拍不受拍数影响（v2 24/24 随机层 PASS）。
 
 **部署注意**：Quartus 综合读的是 QSys 生成物 `soc_system/synthesis/submodules/` 里的 RTL 拷贝
-（.gitignore 忽略、git pull 不更新）——更新 `ip/` 后需重新 Generate QSys，或手动拷 5 个 .v 到 submodules/。
+（.gitignore 忽略、git pull 不更新）——更新 `cnn_rtl/src/` 后需重新 Generate QSys，或手动拷 5 个 .v 到 submodules/。
 
 **最终时钟状态（当前工程，非历史）**：`ip/pll` 的 outclk_1 现配置为 **100 MHz**
 （`pll_inst.v` `gui_output_clock_frequency1=100.0`；`C5TB_top.sdc` 注释 "clk_cnn 150→100MHz 收敛"）——

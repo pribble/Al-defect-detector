@@ -22,8 +22,8 @@ SDMMC、USB、UART）接到 QSys 生成的 `soc_system` 系统上，并在其中
 | `cnn_top_spec.md` | **cnn_top 规格书**：接口/寄存器/指令格式/数据布局/数值语义（现行行为契约；附 A 47 层实测参数、附 B CPU 算法） |
 | `cnn_rtl/` | **cnn_top 开源复现工作区**：上游卷积数据通路（MIT）+ 差距矩阵与分阶段改造路线图 |
 | `soc_system_board_info.xml` / `hps_common_board_info.xml` | 生成设备树时使用的板级信息（供 sopc2dts） |
-| `ip/cnn_top_hw.tcl` | 自定义 CNN 加速器 IP 硬件描述（引用 `cnn_top.v`/`cnn_top_core.v`/`cnn_core_v2.v`/`mac8x8_dsp.v`/`mac8x8_lut.v` 五个 RTL 文件，已替换旧黑盒归档） |
-| `ip/cnn_top.v` 等五个 `.v` | cnn_top 的 RTL 实现（QSys 适配层 + 核心 + 卷积执行器 + 8×8 乘法器，见 `cnn_rtl/README.md`） |
+| `ip/cnn_top_hw.tcl` | 自定义 CNN 加速器 IP 硬件描述（fileset 引用 `cnn_rtl/src/` 下 `cnn_top.v`/`cnn_top_core.v`/`cnn_core_v2.v`/`mac8x8_dsp.v`/`mac8x8_lut.v` 五个 RTL 文件，已替换旧黑盒归档；RTL 仅此一份） |
+| `cnn_rtl/src/` | cnn_top 的 RTL 唯一实现（QSys 适配层 + 核心 + 卷积执行器 + 8×8 乘法器，见 `cnn_rtl/README.md`） |
 | `ip/pll/` | PLL IP：`FPGA_CLK1_50`（50 MHz 参考）分出三路：`fpga_clk_50`（outclk_0，50 MHz）/ `fpga_clk_cnn`（outclk_1，**100 MHz**，驱动 cnn_top）/ `fpga_clk_stp`（outclk_2，100 MHz） |
 | `tools/` | 构建辅助脚本与**已提交的生成产物**（见下） |
 
@@ -64,7 +64,7 @@ QSys 系统中 `cnn_top_0` 的参数（`ip/cnn_top_hw.tcl`）：4 个 Avalon 主
 | 2026-08-10 | box 头（conv2d_69-80，act=0）与黑盒仍有 30-55% 差异 | requant 输出缺**负值 -1 修正**：黑盒实测语义是 `round_half_away(fv)` 后负值再 -1（floor 除法特性），RTL 只做 `(v+2^29)>>30`，所有负 logits 偏大 1-2 LSB | `S_REQ_OUT3` 输出截断前加 `v_shifted<0 → v_shifted-1`（`& 64'hFF` 截断）；同步 `ref_int8.py conv_s8` / `ref_cnn_top.py post_np`。修复后 47 层黑盒 log 对比：主干 100%、box 头 97-100%（= float 公式同精度） |
 | 2026-08-10 | Quartus 时序失败（换 seed 无法解决）：`mac_c_valid_r → mac_p_r` slack -0.167ns | pad 列清零在**乘法器内部**（`mac8x8_dsp/lut` 的 `en` 选择 a），路径 = `mac_c_valid_r → mux → 乘法 → mac_p_r` 穿乘法器，单拍超限 | 乘法器去掉 `en` 端口（纯 `a×b`）；pad 列清零提前到 `S_MAC_MUL` 采样处（`mac_a_q <= mac_c_valid_r ? lb_q : 0`，0×b=0 等价）。关键路径退化为纯乘法器；verilator 对拍 16/16 + 6/6 保持 PASS |
 
-> **修改 `ip/cnn_top/*.v` 后必须重新 QSys Generate**（Qsys 把 HDL 复制到
+> **修改 `cnn_rtl/src/*.v` 后必须重新 QSys Generate**（Qsys 把 HDL 复制到
 > `soc_system/synthesis/` 后才参与编译），再全编译 + 重新烧录 `.rbf`。
 
 ## 构建流程
@@ -73,7 +73,7 @@ QSys 系统中 `cnn_top_0` 的参数（`ip/cnn_top_hw.tcl`）：4 个 Avalon 主
 1. Quartus Prime（23.1 Lite Edition；qpf 版本 17.1，SDC 为 18.1 生成，兼容正常）打开 C5TB_top.qpf
 2. 全编译（Analysis & Synthesis → Fitter → Assembler）
    —— 顶层 = C5TB_top.v + soc_system/synthesis/soc_system.qip（QSys 生成，目录被 gitignore）
-        + ip/pll/pll_inst.qip + ip/cnn_top（cnn_top_hw.tcl + 5 个 .v）
+        + ip/pll/pll_inst.qip + ip/cnn_top_hw.tcl（fileset 引用 cnn_rtl/src 的 5 个 .v）
    —— 产物：output_files/C5TB_top.sof
 3. 运行 tools/sof_to_rbf.bat   → tools/soc_system.rbf（FPGA 配置比特流）
 4. 运行 tools/gen_dtb.bat      → tools/soc_system.dts / soc_system.dtb（设备树）
@@ -87,7 +87,7 @@ QSys 系统中 `cnn_top_0` 的参数（`ip/cnn_top_hw.tcl`）：4 个 Avalon 主
 ## 源码与生成物的区分（.gitignore）
 
 **提交到 git 的源码**：`C5TB_top.v/.qsf/.qpf/.sdc`、`soc_system.qsys/.sopcinfo`、
-板级 xml、`ip/`（cnn_top 与 pll 的源）、`tools/` 脚本及其生成的 rbf/dtb/dts。
+板级 xml、`ip/`（cnn_top_hw.tcl 与 pll 的源）、`cnn_rtl/src/`（唯一 RTL 源）、`tools/` 脚本及其生成的 rbf/dtb/dts。
 
 **被 gitignore 的构建产物**（每次编译重新生成，不入库）：
 

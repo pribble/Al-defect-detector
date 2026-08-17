@@ -39,11 +39,13 @@ add_fileset QUARTUS_SYNTH QUARTUS_SYNTH "" ""
 set_fileset_property QUARTUS_SYNTH TOP_LEVEL cnn_top
 set_fileset_property QUARTUS_SYNTH ENABLE_RELATIVE_INCLUDE_PATHS false
 set_fileset_property QUARTUS_SYNTH ENABLE_FILE_OVERWRITE_MODE false
-add_fileset_file cnn_top.v VERILOG PATH cnn_top.v
-add_fileset_file cnn_top_core.v VERILOG PATH cnn_top_core.v
-add_fileset_file cnn_core_v2.v VERILOG PATH cnn_core_v2.v
-add_fileset_file mac8x8_dsp.v VERILOG PATH mac8x8_dsp.v
-add_fileset_file mac8x8_lut.v VERILOG PATH mac8x8_lut.v
+# 2026-08-18：RTL 源码唯一化——fileset 直接引用 ../cnn_rtl/src/（原 ip/ 下 5 个
+# 副本已删除，避免两份拷贝不同步；改 RTL 后需重新 QSys Generate）
+add_fileset_file cnn_top.v VERILOG PATH ../cnn_rtl/src/cnn_top.v
+add_fileset_file cnn_top_core.v VERILOG PATH ../cnn_rtl/src/cnn_top_core.v
+add_fileset_file cnn_core_v2.v VERILOG PATH ../cnn_rtl/src/cnn_core_v2.v
+add_fileset_file mac8x8_dsp.v VERILOG PATH ../cnn_rtl/src/mac8x8_dsp.v
+add_fileset_file mac8x8_lut.v VERILOG PATH ../cnn_rtl/src/mac8x8_lut.v
 
 
 # 
