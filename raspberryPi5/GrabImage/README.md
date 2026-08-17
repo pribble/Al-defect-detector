@@ -100,7 +100,11 @@ COOLDOWN: 5 帧冷却，防止同一铝片重复触发
 
 坐标映射：`_draw_defect_box` 按 `self._crop_box (x0, y0, side)` 把推理坐标从
 300×300 空间先映射回裁剪图、再平移到全帧；未裁剪时保持旧的整帧等比缩放。
-`draw_overlay=1` 时在保存的标注图与 `/debug_disc` 流上画绿色圆 + 黄色裁剪框。
+`draw_overlay=1` 时在保存的标注图上画绿色圆 + 黄色裁剪框。
+
+> 现场调参提示：`/debug_disc` 流是**对实时帧直接跑圆检测**（`probe_disc()`，与
+> 触发/推理解耦），把铝片放进画面即可立即看到检出圆与裁剪框；未检出时第二行
+> 文字显示 reject 原因（Otsu 阈值/圆形度/半径范围等），据此调 `[disc]` 参数。
 
 > 注意：`method`/`enabled`/`margin_ratio` 等为**启动时读取**，改动需重启服务
 > （`systemctl restart detect-api.service`）。
@@ -148,7 +152,7 @@ datetime('now','localtime'), UNIQUE(uuid, path, name))`。
 | `GET /img` | MJPEG 实时流（前端视频源） |
 | `GET /debug_mask` | SSIM 调试流（二值掩码 + SSIM/white_ratio） |
 | `GET /debug_stages` | 软处理中间结果调试流（diff/binary/mask 三列） |
-| `GET /debug_disc` | 圆识别调试流（实时帧 + 检出圆 + 裁剪框，现场调 [disc] 参数用） |
+| `GET /debug_disc` | 圆识别调试流：**对实时帧直接跑 `probe_disc`**（与推理管线解耦），叠加检出圆 + 裁剪框，未检出时显示 reject 原因；现场调 [disc] 参数用 |
 | `GET /` | Bootstrap 简单页面 |
 
 ## 配置（config.ini）

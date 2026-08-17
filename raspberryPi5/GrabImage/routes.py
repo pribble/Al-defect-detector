@@ -17,6 +17,7 @@ from flask import Blueprint, Response, render_template, request
 
 import database
 import shared
+from disc_detect import probe_disc
 
 bp = Blueprint('main', __name__)
 
@@ -334,7 +335,11 @@ def debug_stages():
 
 
 def _generate_disc_debug_frames():
-    """圆识别调试流: 实时帧 + 检出圆(绿) + 智能裁剪框(黄)"""
+    """圆识别调试流: 对实时帧直接跑 probe_disc, 叠加检出圆(绿)与裁剪框(黄).
+
+    注意: 这里是实时检测, 与生产推理管线(SSIM 触发后才定圆)解耦——调试时把
+    铝片/任意物体放进画面即可立刻看到检出结果与失败原因.
+    """
     while True:
         time.sleep(0.1)
         frame = shared.stream_image_ref[0]
@@ -348,24 +353,36 @@ def _generate_disc_debug_frames():
         sx, sy = 640.0 / w, 480.0 / h
         display = cv2.resize(display, (640, 480), interpolation=cv2.INTER_AREA)
 
-        disc = getattr(shared, 'last_disc', None)
-        box = getattr(shared, 'last_crop_box', None)
-        if disc:
-            cx, cy, r = (int(v) for v in disc)
+        method = getattr(shared, 'disc_method', 'mask')
+        cfg = getattr(shared, 'disc_cfg', None)
+        circle, info = probe_disc(frame, method=method, cfg=cfg)
+
+        if circle is not None:
+            cx, cy, r = (int(v) for v in circle)
             cv2.circle(display, (int(cx * sx), int(cy * sy)), max(int(r * sx), 1), (0, 255, 0), 2)
             cv2.circle(display, (int(cx * sx), int(cy * sy)), 2, (0, 255, 0), -1)
-        if box:
-            x0, y0, side = box
+            # 实时预览裁剪框 (与 api.Consumer._smart_crop 相同逻辑)
+            margin = int(r * getattr(shared, 'disc_margin_ratio', 0.10))
+            side = min(int(2 * (r + margin)), w, h)
+            x0 = min(max(int(cx) - side // 2, 0), w - side)
+            y0 = min(max(int(cy) - side // 2, 0), h - side)
             cv2.rectangle(
                 display,
                 (int(x0 * sx), int(y0 * sy)),
                 (int((x0 + side) * sx), int((y0 + side) * sy)),
                 (0, 255, 255), 2,
             )
+
         enabled = getattr(shared, 'disc_enabled', 1)
-        method = getattr(shared, 'disc_method', 'mask')
-        cv2.putText(display, 'disc: enabled={} method={} found={}'.format(enabled, method, disc is not None),
+        found = circle is not None
+        cv2.putText(display, 'disc: enabled={} method={} found={}'.format(enabled, method, found),
                     (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 1)
+        if found:
+            cx, cy, r = circle
+            detail = 'circle=({:.0f},{:.0f}) r={:.0f}'.format(cx, cy, r)
+        else:
+            detail = 'reject: {}'.format((info or {}).get('reject') or '未知')
+        cv2.putText(display, detail, (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
         _ret, jpeg = cv2.imencode('.jpg', display)
         yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n\r\n')
 

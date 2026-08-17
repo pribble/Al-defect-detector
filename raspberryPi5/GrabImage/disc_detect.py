@@ -14,6 +14,9 @@
   hough: Canny + HoughCircles 圆弧投票, 边缘残缺/局部反光也能定圆, 但参数
                需要现场调整 (hough_param1/param2).
 
+调试: probe_disc() 返回 (circle, info), info["reject"] 给出未检出/被过滤的
+      原因(中文), 供 /debug_disc 调试流实时展示; find_disc() 是它的薄封装.
+
 依赖: opencv-python, numpy. 不依赖 api.py, 可独立测试.
 """
 
@@ -34,14 +37,22 @@ DEFAULTS = {
 
 
 def _mask_circle(gray, cfg):
-    """mask 方法: 二值化 → 形态学 → 最大外轮廓 → 外接圆."""
+    """mask 方法: 二值化 → 形态学 → 最大外轮廓 → 外接圆.
+
+    Returns: (circle, diag). circle=(cx,cy,r) 或 None; diag 为诊断 dict
+    (threshold/area/circularity/reject), 供调试流展示失败原因.
+    """
+    diag = {"threshold": None, "area": None, "circularity": None, "reject": None}
     blurred = cv2.GaussianBlur(gray, (9, 9), 0)
     if cfg["mask_threshold"] > 0:
         _, binary = cv2.threshold(blurred, cfg["mask_threshold"], 255, cv2.THRESH_BINARY)
+        diag["threshold"] = cfg["mask_threshold"]
     else:
         t, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         if t < cfg["otsu_min_threshold"]:  # 纯暗背景下限保护
             _, binary = cv2.threshold(blurred, cfg["otsu_min_threshold"], 255, cv2.THRESH_BINARY)
+            t = cfg["otsu_min_threshold"]
+        diag["threshold"] = float(t)
 
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)  # 去散斑
@@ -50,21 +61,31 @@ def _mask_circle(gray, cfg):
 
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
-        return None
+        diag["reject"] = "二值图无前景轮廓 (阈值 t={})".format(diag["threshold"])
+        return None, diag
     contour = max(contours, key=cv2.contourArea)
     hull = cv2.convexHull(contour)
     area = cv2.contourArea(hull)
+    diag["area"] = float(area)
     if area < 8:
-        return None
+        diag["reject"] = "最大轮廓过小 (面积 {:.0f})".format(area)
+        return None, diag
     (cx, cy), r = cv2.minEnclosingCircle(hull)
-    # 圆形度: 凸包面积 / 外接圆面积. 圆→≈1; 矩形机械臂等→明显 <1
-    if area / (np.pi * r * r) < cfg["circularity"]:
-        return None
-    return (float(cx), float(cy), float(r))
+    diag["radius"] = float(r)
+    circ = area / (np.pi * r * r)
+    diag["circularity"] = float(circ)
+    if circ < cfg["circularity"]:
+        diag["reject"] = "圆形度 {:.2f} < {:.2f} (可能是非圆亮斑)".format(circ, cfg["circularity"])
+        return None, diag
+    return (float(cx), float(cy), float(r)), diag
 
 
 def _hough_circle(gray, cfg):
-    """hough 方法: Canny + HoughCircles, 取半径最大(画面主导)的候选圆."""
+    """hough 方法: Canny + HoughCircles, 取半径最大(画面主导)的候选圆.
+
+    Returns: (circle, diag).
+    """
+    diag = {"radius": None, "reject": None}
     blurred = cv2.medianBlur(gray, 5)
     h, w = gray.shape[:2]
     min_dist = int(cfg["hough_min_dist"]) if cfg["hough_min_dist"] else max(h, w) // 4
@@ -76,10 +97,12 @@ def _hough_circle(gray, cfg):
         minRadius=min_r, maxRadius=max_r,
     )
     if circles is None:
-        return None
+        diag["reject"] = "HoughCircles 未检出候选圆"
+        return None, diag
     circles = np.round(circles[0]).astype(int)
     best = max(circles, key=lambda c: c[2])
-    return (float(best[0]), float(best[1]), float(best[2]))
+    diag["radius"] = float(best[2])
+    return (float(best[0]), float(best[1]), float(best[2])), diag
 
 
 def _sanity_check(cx, cy, r, h, w, cfg):
@@ -95,6 +118,49 @@ def _sanity_check(cx, cy, r, h, w, cfg):
     return True
 
 
+def probe_disc(gray, method="mask", cfg=None):
+    """
+    定位铝片圆心与半径, 并附带诊断信息 (供 /debug_disc 调试流展示).
+
+    Args:
+        gray: 灰度帧 (BGR 会自动转灰度).
+        method: "mask" | "hough".
+        cfg: dict, 缺省用 DEFAULTS (与 config.ini [disc] 段一致).
+
+    Returns:
+        (circle, info): circle=(cx, cy, r) 或 None;
+        info 含 threshold/area/circularity/radius 与 reject(失败原因, 中文).
+    """
+    info = {"threshold": None, "area": None, "circularity": None, "radius": None, "reject": None}
+    if gray is None:
+        info["reject"] = "无图像帧"
+        return None, info
+    if gray.ndim == 3:
+        gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
+    merged = dict(DEFAULTS)
+    if cfg:
+        merged.update(cfg)
+    h, w = gray.shape[:2]
+
+    if method == "mask":
+        circle, diag = _mask_circle(gray, merged)
+    else:
+        circle, diag = _hough_circle(gray, merged)
+    info.update(diag or {})
+
+    if circle is None:
+        info["reject"] = info.get("reject") or "未检出圆"
+        return None, info
+
+    cx, cy, r = circle
+    if not _sanity_check(cx, cy, r, h, w, merged):
+        min_r = merged["min_radius_ratio"] * min(h, w)
+        max_r = merged["max_radius_ratio"] * min(h, w)
+        info["reject"] = "半径 {:.0f} 超出合理范围 [{:.0f}, {:.0f}]".format(r, min_r, max_r)
+        return None, info
+    return (cx, cy, r), info
+
+
 def find_disc(gray, method="mask", cfg=None):
     """
     定位铝片圆心与半径.
@@ -106,20 +172,7 @@ def find_disc(gray, method="mask", cfg=None):
 
     Returns:
         (cx, cy, r) 或 None (未检出 / 合理性过滤不通过).
+        需要失败原因时用 probe_disc().
     """
-    if gray is None:
-        return None
-    if gray.ndim == 3:
-        gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
-    merged = dict(DEFAULTS)
-    if cfg:
-        merged.update(cfg)
-    h, w = gray.shape[:2]
-
-    circle = _mask_circle(gray, merged) if method == "mask" else _hough_circle(gray, merged)
-    if circle is None:
-        return None
-    cx, cy, r = circle
-    if not _sanity_check(cx, cy, r, h, w, merged):
-        return None
-    return (cx, cy, r)
+    circle, _ = probe_disc(gray, method=method, cfg=cfg)
+    return circle

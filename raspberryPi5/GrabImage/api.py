@@ -138,6 +138,8 @@ DISC_CFG = {
 }
 shared.disc_method = DISC_METHOD
 shared.disc_enabled = DISC_ENABLED
+shared.disc_cfg = DISC_CFG
+shared.disc_margin_ratio = DISC_MARGIN_RATIO
 
 # 机械臂控制参数缓存 (路由 /change_conf 同步更新)
 GRAB_SPEED = shared.config.get("Configuration", "speed")
