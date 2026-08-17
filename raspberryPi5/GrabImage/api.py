@@ -285,6 +285,7 @@ class Consumer(threading.Thread):
         self._tracking_frames = []  # 跟踪帧队列，头部始终是中间帧
         self._selected_frame = None  # 跟踪结束后选中的中间帧
         self._crop_box = None  # 本次推理的裁剪信息 (x0, y0, side); None=整帧缩放
+        self._record_box = None  # 保存记录图时应用的裁剪框 (同 _crop_box); None=整帧
         self._buf = 0  # 状态切换缓冲计数（入口/出口共用）
         # 标定模式: 追踪 white_ratio 变化以计算传送带速度
         self._cal_last_ratio = 0.0
@@ -536,7 +537,11 @@ class Consumer(threading.Thread):
             return None, None
 
     def _draw_disc_overlay(self, image):
-        """在标注图上叠加绿色圆与黄色裁剪框 (现场调参/验证用, draw_overlay 控制)."""
+        """在标注图上叠加绿色圆与黄色裁剪框 (现场调参/验证用, draw_overlay 控制).
+
+        在【全帧】上绘制 (坐标是全帧坐标); 若本次裁剪成功 (_record_box 已设),
+        黄框就是记录图的边界, 不再重复画.
+        """
         if not DISC_DRAW_OVERLAY:
             return image
         disc = shared.last_disc
@@ -544,11 +549,21 @@ class Consumer(threading.Thread):
             cx, cy, r = (int(v) for v in disc)
             cv2.circle(image, (cx, cy), r, (0, 255, 0), 1)
             cv2.circle(image, (cx, cy), 2, (0, 255, 0), -1)
-        box = shared.last_crop_box
-        if box is not None:
-            x0, y0, side = box
-            cv2.rectangle(image, (x0, y0), (x0 + side, y0 + side), (0, 255, 255), 1)
+        if self._record_box is None:
+            box = shared.last_crop_box
+            if box is not None:
+                x0, y0, side = box
+                cv2.rectangle(image, (x0, y0), (x0 + side, y0 + side), (0, 255, 255), 1)
         return image
+
+    def _make_record(self, image):
+        """生成记录图: 裁剪成功时把(已标注/原)图裁成以铝片为中心的方形记录; 否则原样返回."""
+        box = self._record_box
+        if box is None:
+            return image
+        x0, y0, side = box
+        h, w = image.shape[:2]
+        return image[y0:min(y0 + side, h), x0:min(x0 + side, w)]
 
     # ---- 推理管线 ----
 
@@ -565,6 +580,11 @@ class Consumer(threading.Thread):
         if inference_image is None:
             inference_image = annotated_image
             self._crop_box = None
+            self._record_box = None
+        else:
+            # 裁剪成功: 保存的记录图(original.jpg / files/ / detect.jpg)同样用
+            # 以铝片为中心的方形图, 保证"提取的图片中铝片在中间"
+            self._record_box = self._crop_box
 
         # Resize to 300×300 for FPGA inference (SSD MobileNet input size)
         # 裁剪图/整帧均为正方形缩放: 缩小用 INTER_AREA 防锯齿, 放大用 INTER_LINEAR
@@ -601,10 +621,11 @@ class Consumer(threading.Thread):
             annotated_image = cv2.cvtColor(annotated_image, cv2.COLOR_GRAY2RGB)
         except Exception:
             pass
-        self._draw_disc_overlay(annotated_image)
-        cv2.imwrite(file_name, annotated_image)
+        self._draw_disc_overlay(annotated_image)  # 全帧坐标叠加 (3 通道), 再裁记录图
+        record = self._make_record(annotated_image)
+        cv2.imwrite(file_name, record)
         database.insert_data(uid, file_name, 'zheng_chang', None, None)
-        cv2.imwrite(original_image_path, original_image)
+        cv2.imwrite(original_image_path, self._make_record(original_image))
         if os.path.exists(detect_image_path):
             os.remove(detect_image_path)
 
@@ -624,15 +645,20 @@ class Consumer(threading.Thread):
             annotated_image = self._draw_defect_box(
                 annotated_image, detection['loc'], shared.defect_name[class_name], detection['score']
             )
-            cv2.imwrite(file_name, annotated_image)
             database.insert_data(uid, file_name, class_name, detection['prediction_time'], detection['score'])
             database.insert_data(uid, 'detect.jpg', class_name, None, None)
             logger.info("数据库写入完成")
 
+        # 记录图: 全帧叠加圆/框后, 裁成以铝片为中心的方形 (提取的图片铝片居中)
+        try:
+            annotated_image = cv2.cvtColor(annotated_image, cv2.COLOR_GRAY2RGB)
+        except Exception:
+            pass
         self._draw_disc_overlay(annotated_image)
-        cv2.imwrite(file_name, annotated_image)
-        cv2.imwrite(original_image_path, original_image)
-        cv2.imwrite(detect_image_path, annotated_image)
+        record = self._make_record(annotated_image)
+        cv2.imwrite(file_name, record)
+        cv2.imwrite(original_image_path, self._make_record(original_image))
+        cv2.imwrite(detect_image_path, record)
 
     def _draw_defect_box(self, image, loc, class_name_cn: str, score: float):
         # 推理坐标 (300×300 空间) → 全帧坐标
