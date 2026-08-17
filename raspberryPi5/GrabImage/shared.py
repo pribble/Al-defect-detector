@@ -40,3 +40,10 @@ last_crop_box = None    # (x0, y0, side) 最近一次智能裁剪框 (全帧坐�
 disc_method = "mask"    # api.py 启动时从 config.ini [disc] 同步
 disc_enabled = 1
 debug_background = None  # Consumer 的 EMA 背景模型 (float32 低分辨率, 供背景差分定圆/调试)
+
+# 触发/推理链路健康状态 (供 /get_status 路由诊断断点位置, Consumer 写入)
+trigger_state = 0        # 0=IDLE, 1=TRACKING, 2=COOLDOWN
+last_trigger_time = None  # 最近一次进入 TRACKING 的时间戳 (触发是否发生)
+last_inference_time = None  # 最近一次开始推理的时间戳 (触发后是否走到推理)
+last_consumer_error = None  # Consumer 线程最近一次异常信息 (None=无)
+baseline_stats = None     # (baseline_mean, baseline_std, baseline_len) 空皮带基线统计

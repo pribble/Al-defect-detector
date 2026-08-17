@@ -397,6 +397,45 @@ def debug_disc():
     return Response(_generate_disc_debug_frames(), mimetype='multipart/x-mixed-replace;boundary=frame')
 
 
+def _fmt_ts(ts):
+    """时间戳 → 本地时间字符串 (None/0 返回 None)"""
+    if not ts:
+        return None
+    return time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts))
+
+
+@bp.route('/get_status')
+def get_status():
+    """触发/推理链路健康状态 (JSON): 现场诊断"铝片经过但无推理图"断点位置.
+
+    判读:
+      - trigger_state 恒为 0 且 last_trigger_time=None → 触发未发生 (基线/前景信号问题)
+      - last_trigger_time 有更新但 last_inference_time=None → 卡在 TRACKING (铝片未离开视野)
+      - last_inference_time 有更新但无图片 → 推理/存图失败 (看 last_consumer_error)
+      - last_consumer_error 非 None → Consumer 线程异常详情
+    """
+    st = getattr(shared, 'trigger_state', 0)
+    baseline = getattr(shared, 'baseline_stats', None)
+    return json.dumps({
+        'trigger_state': st,
+        'state_name': {0: 'IDLE', 1: 'TRACKING', 2: 'COOLDOWN'}.get(st, '?'),
+        'last_trigger_time': _fmt_ts(getattr(shared, 'last_trigger_time', None)),
+        'last_inference_time': _fmt_ts(getattr(shared, 'last_inference_time', None)),
+        'last_consumer_error': getattr(shared, 'last_consumer_error', None),
+        'last_ssim': getattr(shared, 'last_ssim', None),
+        'last_white_ratio': getattr(shared, 'last_white_ratio', None),
+        'baseline': None if baseline is None else {
+            'mean': round(float(baseline[0]), 5),
+            'std': round(float(baseline[1]), 5),
+            'n': int(baseline[2]),
+        },
+        'disc_enabled': getattr(shared, 'disc_enabled', 1),
+        'disc_method': getattr(shared, 'disc_method', 'mask'),
+        'last_disc': getattr(shared, 'last_disc', None),
+        'last_crop_box': getattr(shared, 'last_crop_box', None),
+    }, ensure_ascii=False)
+
+
 @bp.route('/img')
 def video_feed():
     """实时视频流 (MJPEG)"""

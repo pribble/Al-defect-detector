@@ -66,6 +66,7 @@ Consumer 每帧处理（`_process_sampling_frame`）：resize 64×48 → Gaussia
 IDLE:     current_ssim < 0.8 && white_ratio > 0.1  连续 3 帧 → TRACKING
 TRACKING: 收集帧并维护中间帧（单数帧 append、双数帧 pop 头部再 append）
           SSIM 回升 ≥ 0.8 && white_ratio < 0.1 连续 3 帧 → 取中间帧跑推理 → COOLDOWN
+          [超时保护] 超过 tracking_timeout_frames 帧仍不回落 → 强制取中间帧推理 (防卡死)
 COOLDOWN: 5 帧冷却，防止同一铝片重复触发
 ```
 
@@ -160,7 +161,8 @@ datetime('now','localtime'), UNIQUE(uuid, path, name))`。
 | `GET /img` | MJPEG 实时流（前端视频源） |
 | `GET /debug_mask` | SSIM 调试流（二值掩码 + SSIM/white_ratio） |
 | `GET /debug_stages` | 软处理中间结果调试流（diff/binary/mask 三列） |
-| `GET /debug_disc` | 圆识别调试流：**对实时帧直接跑 `probe_disc`**（与推理管线解耦），叠加检出圆 + 裁剪框，未检出时显示 reject 原因；现场调 [disc] 参数用 |
+| `GET /debug_disc` | 圆识别调试流：**对实时帧直接跑 `find_disc_robust`**（与推理管线解耦），叠加检出圆 + 裁剪框，未检出时显示 reject 原因；现场调 [disc] 参数用 |
+| `GET /get_status` | 触发/推理链路健康状态（JSON）：trigger_state、最近触发/推理时间、Consumer 异常、基线统计——诊断"铝片经过但无推理图"的断点位置 |
 | `GET /` | Bootstrap 简单页面 |
 
 ## 配置（config.ini）
@@ -210,6 +212,24 @@ systemctl restart detect-api.service
 journalctl -u detect-api.service -n 50 --no-pager -l
 tail -f /var/logs/detect_server.log
 ```
+
+## 故障排查：铝片经过但网页无推理图
+
+视频流（`/img`）由 Producer 线程更新，与触发/推理链路（Consumer 线程）独立——
+视频正常 ≠ 推理正常。按以下顺序定位断点：
+
+1. 浏览器开 `http://172.16.68.111:7777/get_status`，过一片铝片后看字段：
+   - `trigger_state` 恒为 `IDLE` 且 `last_trigger_time` 为空 → **触发未发生**：
+     空皮带暖机未完成（`baseline.n < 30`）或前景信号不达标（调 `[detection]`
+     的 `trigger_k`/`otsu_min_threshold`；铝片需**在皮带上移动**通过视野，静止
+     铝片会卡在 TRACKING 不回落）。
+   - `last_trigger_time` 有更新但 `last_inference_time` 为空 → **卡在 TRACKING**：
+     退出条件（前景回落到基线）未满足，铝片未离开视野/皮带未动。
+   - `last_inference_time` 有更新但无图片 → 推理/存图失败：看
+     `last_consumer_error` 与日志（FPGA 不可达会卡 30s 超时）。
+2. 日志定位：`tail -n 200 /var/logs/detect_server.log`，找
+   `触发进入 TRACKING` / `触发回落` / `开始检测` / `推理服务耗费` /
+   `consumer thread error` 各出现在哪一层。
 
 ## 已知问题（当前代码状态）
 

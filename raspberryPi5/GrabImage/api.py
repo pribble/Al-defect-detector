@@ -114,6 +114,9 @@ TRIGGER_K = float(_det_cfg("trigger_k", "3.0"))
 TRIGGER_CONFIRM = int(_det_cfg("trigger_confirm_frames", "3"))
 CAL_RATIO_THRESHOLD = float(_det_cfg("cal_ratio_threshold", "0.01"))
 USE_SSIM_GATE = int(_det_cfg("use_ssim_gate", "0"))
+# TRACKING 超时帧数: 进入跟踪后超过该帧数仍不回落, 强制取中间帧推理 (防铝片停
+# 留在视野内导致状态机永久卡死、后续铝片不再触发)
+TRACKING_TIMEOUT_FRAMES = int(_det_cfg("tracking_timeout_frames", "90"))
 
 # ---- 圆形铝片识别 + 智能裁剪参数 (config.ini [disc] 段, 改动后需重启服务) ----
 
@@ -306,7 +309,9 @@ class Consumer(threading.Thread):
                 self._process_sampling_frame()
 
             except Exception as e:
-                logger.error('consumer thread error：{}'.format(str(e)))
+                # 记录最近一次异常到 shared, 供 /get_status 诊断; exc_info 输出完整堆栈
+                shared.last_consumer_error = '{}'.format(e)
+                logger.error('consumer thread error：{}'.format(str(e)), exc_info=True)
 
     # ---- 单帧处理 ----
 
@@ -327,6 +332,8 @@ class Consumer(threading.Thread):
 
         # 供 /debug_disc 与智能裁剪使用: EMA 背景 (硬处理路径下为 None → 走原始阈值)
         shared.debug_background = getattr(self, '_background', None)
+        # 供 /get_status 诊断: 空皮带基线统计 (暖机期 n < BASELINE_INIT_FRAMES)
+        shared.baseline_stats = (self._baseline_mean, self._baseline_std, len(self._baseline))
 
         self._run_state_machine(enter, exit_cond, ratio, image)
 
@@ -456,6 +463,8 @@ class Consumer(threading.Thread):
                     self._tracking_count = 1
                     self._tracking_frames = [image.copy()]
                     self._buf = 0
+                    shared.last_trigger_time = time.time()
+                    logger.info('触发进入 TRACKING, ratio=%.3f', ratio)
             else:
                 self._buf = 0
 
@@ -480,11 +489,21 @@ class Consumer(threading.Thread):
                 if self._tracking_count % 2 == 0:
                     self._tracking_frames.pop(0)
                 self._tracking_frames.append(image.copy())
+                # 超时保护: 铝片停留/皮带停住时退出条件永不满足, 强制推理防卡死
+                if self._tracking_count >= TRACKING_TIMEOUT_FRAMES:
+                    self._selected_frame = self._tracking_frames[0]
+                    logger.warning('TRACKING 超时(%d帧), 强制取中间帧推理', self._tracking_count)
+                    self._run_inference_pipeline()
+                    self._state = 2
+                    self._cooldown = TRIGGER_COOLDOWN
 
         elif self._state == 2:  # COOLDOWN — 冷却
             self._cooldown -= 1
             if self._cooldown <= 0:
                 self._state = 0
+
+        # 实时反映状态机位置 (供 /get_status 诊断)
+        shared.trigger_state = self._state
 
     # ---- 圆形铝片识别 + 智能裁剪 ----
 
@@ -568,6 +587,7 @@ class Consumer(threading.Thread):
     # ---- 推理管线 ----
 
     def _run_inference_pipeline(self):
+        shared.last_inference_time = time.time()  # 供 /get_status 诊断
         annotated_image = self._selected_frame.copy()
         original_image = annotated_image.copy()
 
