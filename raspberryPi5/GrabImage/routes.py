@@ -334,6 +334,41 @@ def debug_stages():
     return Response(_generate_stage_frames(), mimetype='multipart/x-mixed-replace;boundary=frame')
 
 
+def _disc_frame_overlay(display, frame):
+    """对实时帧定圆, 在 display (640×480) 上叠加绿圆与黄裁剪框.
+
+    Returns: (found, detail). detail: 检出时为圆信息/方法, 否则为 reject 原因.
+    """
+    method = getattr(shared, 'disc_method', 'mask')
+    cfg = getattr(shared, 'disc_cfg', None)
+    circle, info = find_disc_robust(
+        frame, method=method, cfg=cfg,
+        background=getattr(shared, 'debug_background', None),
+    )
+    h, w = frame.shape[:2]
+    sx, sy = 640.0 / w, 480.0 / h
+    if circle is not None:
+        cx, cy, r = (int(v) for v in circle)
+        cv2.circle(display, (int(cx * sx), int(cy * sy)), max(int(r * sx), 1), (0, 255, 0), 2)
+        cv2.circle(display, (int(cx * sx), int(cy * sy)), 2, (0, 255, 0), -1)
+        # 实时预览裁剪框 (与 api.Consumer._smart_crop 相同逻辑)
+        margin = int(r * getattr(shared, 'disc_margin_ratio', 0.10))
+        side = min(int(2 * (r + margin)), w, h)
+        x0 = min(max(int(cx) - side // 2, 0), w - side)
+        y0 = min(max(int(cy) - side // 2, 0), h - side)
+        cv2.rectangle(
+            display,
+            (int(x0 * sx), int(y0 * sy)),
+            (int((x0 + side) * sx), int((y0 + side) * sy)),
+            (0, 255, 255), 2,
+        )
+        detail = 'circle=({:.0f},{:.0f}) r={:.0f} [{}]'.format(
+            cx, cy, r, (info or {}).get('used_method', '?'))
+        return True, detail
+    detail = 'reject: {}'.format((info or {}).get('reject') or '未知')
+    return False, detail
+
+
 def _generate_disc_debug_frames():
     """圆识别调试流: 对实时帧直接跑 find_disc_robust, 叠加检出圆(绿)与裁剪框(黄).
 
@@ -349,43 +384,13 @@ def _generate_disc_debug_frames():
             display = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
         else:
             display = frame.copy()
-        h, w = display.shape[:2]
-        sx, sy = 640.0 / w, 480.0 / h
         display = cv2.resize(display, (640, 480), interpolation=cv2.INTER_AREA)
 
-        method = getattr(shared, 'disc_method', 'mask')
-        cfg = getattr(shared, 'disc_cfg', None)
-        circle, info = find_disc_robust(
-            frame, method=method, cfg=cfg,
-            background=getattr(shared, 'debug_background', None),
-        )
-
-        if circle is not None:
-            cx, cy, r = (int(v) for v in circle)
-            cv2.circle(display, (int(cx * sx), int(cy * sy)), max(int(r * sx), 1), (0, 255, 0), 2)
-            cv2.circle(display, (int(cx * sx), int(cy * sy)), 2, (0, 255, 0), -1)
-            # 实时预览裁剪框 (与 api.Consumer._smart_crop 相同逻辑)
-            margin = int(r * getattr(shared, 'disc_margin_ratio', 0.10))
-            side = min(int(2 * (r + margin)), w, h)
-            x0 = min(max(int(cx) - side // 2, 0), w - side)
-            y0 = min(max(int(cy) - side // 2, 0), h - side)
-            cv2.rectangle(
-                display,
-                (int(x0 * sx), int(y0 * sy)),
-                (int((x0 + side) * sx), int((y0 + side) * sy)),
-                (0, 255, 255), 2,
-            )
-
+        found, detail = _disc_frame_overlay(display, frame)
         enabled = getattr(shared, 'disc_enabled', 1)
-        found = circle is not None
+        method = getattr(shared, 'disc_method', 'mask')
         cv2.putText(display, 'disc: enabled={} method={} found={}'.format(enabled, method, found),
                     (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 1)
-        if found:
-            cx, cy, r = circle
-            detail = 'circle=({:.0f},{:.0f}) r={:.0f} [{}]'.format(
-                cx, cy, r, (info or {}).get('used_method', '?'))
-        else:
-            detail = 'reject: {}'.format((info or {}).get('reject') or '未知')
         cv2.putText(display, detail, (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
         _ret, jpeg = cv2.imencode('.jpg', display)
         yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n\r\n')
@@ -395,6 +400,30 @@ def _generate_disc_debug_frames():
 def debug_disc():
     """圆识别 + 智能裁剪调试流: 实时帧叠加检出圆(绿)与裁剪框(黄)"""
     return Response(_generate_disc_debug_frames(), mimetype='multipart/x-mixed-replace;boundary=frame')
+
+
+def _generate_disc_stream_frames():
+    """主监控页视频流: 实时帧 + 圆检测叠加 (绿圆 + 黄裁剪框, 无文字)"""
+    while True:
+        time.sleep(0.1)
+        frame = shared.stream_image_ref[0]
+        if frame is None:
+            continue
+        if frame.ndim == 2:
+            display = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+        else:
+            display = frame.copy()
+        display = cv2.resize(display, (640, 480), interpolation=cv2.INTER_AREA)
+
+        _found, _detail = _disc_frame_overlay(display, frame)
+        _ret, jpeg = cv2.imencode('.jpg', display)
+        yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n\r\n')
+
+
+@bp.route('/img_disc')
+def img_disc():
+    """主监控页视频流: 实时帧叠加检出圆(绿)与裁剪框(黄), 不带调试文字"""
+    return Response(_generate_disc_stream_frames(), mimetype='multipart/x-mixed-replace;boundary=frame')
 
 
 def _fmt_ts(ts):

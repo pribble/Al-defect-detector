@@ -87,7 +87,8 @@ logger = setup_log('detect', 'detect_server.log')   # 或 ('arm', 'api_server.lo
 
 功能：实时 MJPEG 画面、检测统计（缺陷分布饼图 + 当月趋势）、手动机械臂控制、
 传送带速度标定、历史记录与缺陷图像浏览。视频流源：
-`http://172.16.68.111:7777/img`。
+`http://172.16.68.111:7777/img_disc`（带圆检测叠加：绿圆 + 黄裁剪框；原始流
+`/img` 保留备用）。
 
 ## MVS SDK 绑定（MvImport/）
 

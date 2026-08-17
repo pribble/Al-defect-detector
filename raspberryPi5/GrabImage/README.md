@@ -70,11 +70,12 @@ TRACKING: 每帧对 64×48 前景掩码拟合圆, 打分 S = r × 圆在画面�
 COOLDOWN: 5 帧冷却，防止同一铝片重复触发
 ```
 
-> 说明：推理帧由旧"窗口中间帧"→"fg_ratio 峰值帧"→现为 **"圆完整度打分"最佳帧**
-> （`S = r × 圆在画面内占比`）。fg_ratio 会被入口反光撑大导致选到铝片刚进入的
-> 帧（裁剪缺片）；圆打分只由外边界决定、抗反光，且"可见 < 一半时拟合圆变小、
-> 可见 ≥ 一半时占比变小"，两个信号合成后随完整度单调。早期版本的
-> diff_curr/diff_prev 导数判定已废弃，文档以此状态机为准。
+> 说明：推理帧的选帧依据演进为**两阶段排序键**——每帧对 64×48 前景掩码拟合圆：
+> 圆完整度 `in_frac ≥ center_complete(0.9)` 的"完整帧"档内，选圆心最接近画面
+> 水平中心的帧（原长方形图中铝片横向最中间）；无完整帧时按完整度打分
+> `S = r × in_frac` 兜底。fg_ratio 会被入口反光撑大导致选帧错位，圆打分只由
+> 外边界决定、抗反光。早期版本的 diff_curr/diff_prev 导数判定已废弃，文档以此
+> 状态机为准。
 
 ## 推理管线（_run_inference_pipeline）
 
@@ -164,7 +165,8 @@ datetime('now','localtime'), UNIQUE(uuid, path, name))`。
 | `GET /get_original_pic` `GET /get_detect_pic` | 最近一次原图 / 缺陷标注图 |
 | `GET /get_num` `/get_this_month_num` `/get_today_num` `/get_seven_days_num` `/get_seven_days_by_type` `/get_statistics` | 统计（按类型/当月/当日/7 天/总体） |
 | `POST /calibration` `GET /calibration_status` | 传送带速度标定（`camera_distance/速度` 建议 delay） |
-| `GET /img` | MJPEG 实时流（前端视频源） |
+| `GET /img` | MJPEG 实时流（原始画面，前端备用源） |
+| `GET /img_disc` | MJPEG 实时流（带圆检测叠加：绿圆 + 黄裁剪框，无文字；前端主监控页视频源） |
 | `GET /debug_mask` | SSIM 调试流（二值掩码 + SSIM/white_ratio） |
 | `GET /debug_stages` | 软处理中间结果调试流（diff/binary/mask 三列） |
 | `GET /debug_disc` | 圆识别调试流：**对实时帧直接跑 `find_disc_robust`**（与推理管线解耦），叠加检出圆 + 裁剪框，未检出时显示 reject 原因；现场调 [disc] 参数用 |
@@ -201,6 +203,7 @@ hough_param2 = 30      # hough 方法: 累加器阈值
 hough_min_dist = 0     # 0=自动 max(w,h)/4
 method_fallback = 1    # 主方法未检出时尝试另一方法 (mask 优先背景差分)
 min_completeness = 0.7 # 圆在画面内占比低于此值回退整帧 (铝片未完整进入视野)
+center_complete = 0.9  # 完整帧门槛: ≥此值进入"横向居中"优先档, 否则按完整度选帧
 ```
 
 > 说明：`gaussian_kernel` 可从 config 读（默认 21）；`grab_position`/

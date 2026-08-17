@@ -384,7 +384,7 @@ var app = new Vue({
       self.config = cfg;
       self.title = cfg.title;
       self.version = cfg.version;
-      self.streamUrl = cfg.url + '/img';
+      self.streamUrl = cfg.url + '/img_disc';   // 带圆检测叠加的视频流 (原 /img 保留)
 
       // Load arm config
       apiGetConf(cfg).then(function(r){
