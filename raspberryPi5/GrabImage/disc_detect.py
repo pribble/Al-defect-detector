@@ -44,6 +44,10 @@ DEFAULTS = {
     "method_fallback": 1,         # 主方法未检出时是否尝试另一方法
 }
 
+# 圆出界检查容差 (px): 拟合噪声/低分辨率掩码块状误差会让外接圆偏大 ~12px,
+# 严格 0 容差会误拒贴边但完整的铝片; 真正部分出画面的铝片(几十 px 以上)仍会被拒
+EDGE_TOL = 8
+
 
 def _threshold_binary(blurred, cfg, diag):
     """Otsu(带下限保护) 或固定阈值, 返回二值图; 同时记录所用阈值到 diag."""
@@ -147,7 +151,11 @@ def _sanity_check(cx, cy, r, h, w, cfg):
     max_r = cfg["max_radius_ratio"] * min(h, w)
     if not (min_r <= r <= max_r):
         return False
-    if not (-r <= cx <= w + r and -r <= cy <= h + r):
+    # 圆须(基本)完整落在画面内: 部分出画面的圆(铝片未完全进入视野)拟合不可靠,
+    # 按它裁剪会切掉铝片, 因此直接判为无效 (由调用方回退整帧); EDGE_TOL 容差
+    # 用于吸收拟合噪声, 真正缺片的圆仍会被拒
+    if not (cx - r >= -EDGE_TOL and cx + r <= w + EDGE_TOL and
+            cy - r >= -EDGE_TOL and cy + r <= h + EDGE_TOL):
         return False
     return True
 
@@ -189,6 +197,11 @@ def probe_disc(gray, method="mask", cfg=None, background=None):
         return None, info
 
     cx, cy, r = circle
+    # 圆必须(基本)完整落在画面内 (单独检查以便给出明确 reject 原因)
+    if not (cx - r >= -EDGE_TOL and cx + r <= w + EDGE_TOL and
+            cy - r >= -EDGE_TOL and cy + r <= h + EDGE_TOL):
+        info["reject"] = "圆超出画面边界 (铝片未完整进入视野), 回退整帧"
+        return None, info
     if not _sanity_check(cx, cy, r, h, w, merged):
         min_r = merged["min_radius_ratio"] * min(h, w)
         max_r = merged["max_radius_ratio"] * min(h, w)

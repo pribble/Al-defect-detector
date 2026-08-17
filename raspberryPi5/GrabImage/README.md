@@ -64,19 +64,20 @@ Consumer 每帧处理（`_process_sampling_frame`）：resize 64×48 → Gaussia
 
 ```
 IDLE:     current_ssim < 0.8 && white_ratio > 0.1  连续 3 帧 → TRACKING
-TRACKING: 收集帧并维护中间帧（单数帧 append、双数帧 pop 头部再 append）
-          SSIM 回升 ≥ 0.8 && white_ratio < 0.1 连续 3 帧 → 取中间帧跑推理 → COOLDOWN
-          [超时保护] 超过 tracking_timeout_frames 帧仍不回落 → 强制取中间帧推理 (防卡死)
+TRACKING: 每帧比较 fg_ratio, 维护【峰值帧】(铝片在视野中最完整的一帧)
+          SSIM 回升 ≥ 0.8 && white_ratio < 0.1 连续 3 帧 → 取峰值帧跑推理 → COOLDOWN
+          [超时保护] 超过 tracking_timeout_frames 帧仍不回落 → 取峰值帧强制推理 (防卡死)
 COOLDOWN: 5 帧冷却，防止同一铝片重复触发
 ```
 
-> 注意：这是当前实现（帧级状态机 + 中间帧选取）。早期版本的
-> diff_curr/diff_prev 导数判定已废弃，文档以此状态机为准。
+> 说明：推理帧由旧"窗口中间帧"改为 **fg_ratio 峰值帧**——快速通过/前景闪烁时
+> 中间帧会选到铝片刚进入视野的帧（导致圆出界、裁剪缺片），峰值帧保证铝片
+> 最完整。早期版本的 diff_curr/diff_prev 导数判定已废弃，文档以此状态机为准。
 
 ## 推理管线（_run_inference_pipeline）
 
 ```
-中间帧 → 圆识别+智能裁剪 → resize(300×300) → tobytes()（灰度 raw，无 JPEG）
+峰值帧 → 圆识别+智能裁剪 → resize(300×300) → tobytes()（灰度 raw，无 JPEG）
   → POST FPGA /predict
   → 响应 {"len", "action", "result":[{class_name, loc[x1,y1,x2,y2], score, prediction_time}]}
   → len>0 且 action=NG：报警 + NG 抓取 + 画框标注（_draw_defect_box）写库
@@ -99,7 +100,10 @@ COOLDOWN: 5 帧冷却，防止同一铝片重复触发
 2. 以 `(cx, cy)` 为中心裁**正方形**：边长 `side = 2×(r + r×margin_ratio)`（默认留
    半径 10% 的黑边，不完全切边，减少背景干扰），越界自动钳制到帧内。
 3. 裁剪图等比缩放到 300×300 送 FPGA —— 内容不失真、铝片居中。
-4. **未检出圆/裁剪过小时回退整帧缩放**（记 warning，不影响流程）。`_smart_crop`
+4. **圆必须完整落在画面内**（`cx±r`、`cy±r` 不越界，含 hough 结果）——铝片
+   部分在画面外时拟合不可靠，直接拒绝并回退整帧，从根上杜绝"裁剪缺片"；
+   `/debug_disc` 会显示 `圆超出画面边界 (铝片未完整进入视野)`。
+5. **未检出圆/裁剪过小时回退整帧缩放**（记 warning，不影响流程）。`_smart_crop`
    整体有 try/except 保护——定圆代码出意外也不会中断推理/存图链路。
 
 坐标映射：`_draw_defect_box` 按 `self._crop_box (x0, y0, side)` 把推理坐标从

@@ -302,8 +302,9 @@ class Consumer(threading.Thread):
         self._state = 0  # 0=IDLE, 1=TRACKING, 2=COOLDOWN
         self._cooldown = 0  # 冷却倒计帧数
         self._tracking_count = 0  # 跟踪周期帧总数
-        self._tracking_frames = []  # 跟踪帧队列，头部始终是中间帧
-        self._selected_frame = None  # 跟踪结束后选中的中间帧
+        self._best_ratio = 0.0  # 跟踪周期内 fg_ratio 峰值 (铝片最完整进入视野的帧)
+        self._best_frame = None  # fg_ratio 峰值帧, 推理时取它 (替代旧"中间帧"逻辑)
+        self._selected_frame = None  # 跟踪结束后选中的帧
         self._crop_box = None  # 本次推理的裁剪信息 (x0, y0, side); None=整帧缩放
         self._record_box = None  # 保存记录图时应用的裁剪框 (同 _crop_box); None=整帧
         self._buf = 0  # 状态切换缓冲计数（入口/出口共用）
@@ -495,22 +496,26 @@ class Consumer(threading.Thread):
                 if self._buf >= TRIGGER_CONFIRM:
                     self._state = 1
                     self._tracking_count = 1
-                    self._tracking_frames = [image.copy()]
+                    # 记录 fg_ratio 峰值帧: 铝片在视野中最完整的一帧, 保证
+                    # 推理/裁剪时铝片完整 (旧"中间帧"逻辑在快速通过/闪烁时
+                    # 会选到铝片刚进入的帧, 导致裁剪缺片)
+                    self._best_ratio = ratio
+                    self._best_frame = image.copy()
                     self._buf = 0
                     shared.last_trigger_time = time.time()
                     logger.info('触发进入 TRACKING, ratio=%.3f', ratio)
             else:
                 self._buf = 0
 
-        elif self._state == 1:  # TRACKING — 收集跟踪帧，取中间帧
+        elif self._state == 1:  # TRACKING — 收集帧, 维护 fg_ratio 峰值帧
             if exit_cond:
                 self._buf += 1
                 if self._buf >= TRIGGER_CONFIRM:
-                    self._selected_frame = self._tracking_frames[0]
+                    self._selected_frame = self._best_frame
                     self._buf = 0
                     logger.info(
-                        '触发回落 ratio:{:.3f}, total_frames:{}'.format(
-                            ratio, self._tracking_count,
+                        '触发回落 ratio:{:.3f}, total_frames:{}, 峰值ratio:{:.3f}'.format(
+                            ratio, self._tracking_count, self._best_ratio,
                         )
                     )
                     self._run_inference_pipeline()
@@ -519,14 +524,14 @@ class Consumer(threading.Thread):
             else:
                 self._buf = 0
                 self._tracking_count += 1
-                # 单数帧 append，双数帧 pop 头部再 append
-                if self._tracking_count % 2 == 0:
-                    self._tracking_frames.pop(0)
-                self._tracking_frames.append(image.copy())
+                # 记录 fg_ratio 峰值帧 (铝片最完整进入视野的一帧)
+                if ratio > self._best_ratio:
+                    self._best_ratio = ratio
+                    self._best_frame = image.copy()
                 # 超时保护: 铝片停留/皮带停住时退出条件永不满足, 强制推理防卡死
                 if self._tracking_count >= TRACKING_TIMEOUT_FRAMES:
-                    self._selected_frame = self._tracking_frames[0]
-                    logger.warning('TRACKING 超时(%d帧), 强制取中间帧推理', self._tracking_count)
+                    self._selected_frame = self._best_frame
+                    logger.warning('TRACKING 超时(%d帧), 取峰值帧推理', self._tracking_count)
                     self._run_inference_pipeline()
                     self._state = 2
                     self._cooldown = TRIGGER_COOLDOWN
