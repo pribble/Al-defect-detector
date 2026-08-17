@@ -12,7 +12,8 @@
 |------|------|
 | `api.py` | Flask 入口 + Consumer 检测线程 + 报警/抓取触发 + cleanup 清理 |
 | `camera.py` | MVS SDK 相机封装：Producer 采集线程、FrameBuffer 单槽帧缓冲 |
-| `routes.py` | HTTP API（Blueprint）：配置、历史、统计、标定、视频流 |
+| `disc_detect.py` | 圆形铝片识别：推理前定位圆心/半径（mask/hough 两方法），供智能裁剪 |
+| `routes.py` | HTTP API（Blueprint）：配置、历史、统计、标定、视频流、调试流 |
 | `shared.py` | 共享可变状态（api.py 与 routes.py 之间传引用） |
 | `database.py` | SQLite 线程安全封装（defect.db） |
 | `config.ini` | 传送带参数 + 缺陷中文名映射 |
@@ -74,11 +75,35 @@ COOLDOWN: 5 帧冷却，防止同一铝片重复触发
 ## 推理管线（_run_inference_pipeline）
 
 ```
-中间帧 → resize(300×300) → tobytes()（灰度 raw，无 JPEG）→ POST FPGA /predict
+中间帧 → 圆识别+智能裁剪 → resize(300×300) → tobytes()（灰度 raw，无 JPEG）
+  → POST FPGA /predict
   → 响应 {"len", "action", "result":[{class_name, loc[x1,y1,x2,y2], score, prediction_time}]}
   → len>0 且 action=NG：报警 + NG 抓取 + 画框标注（_draw_defect_box）写库
   → 否则：OK 抓取 + 正常结果写库
 ```
+
+### 圆识别 + 智能裁剪（[disc] 段，默认开启）
+
+整帧 768×512（3:2）直接 `resize(300,300)` 是**各向异性压缩**（水平 2.56×、垂直 1.71×），
+缺陷形状会被挤压。因此推理前先定位铝片圆心：
+
+1. `find_disc()`（disc_detect.py）在**选中帧**上定圆，返回 `(cx, cy, r)`：
+   - `method=mask`（默认）：Otsu 二值化（带下限保护）→ 形态学开/闭 → 最大外轮廓 →
+     `minEnclosingCircle`。反射高光在圆内部不影响外边界；圆形度过滤剔除机械臂等
+     非圆亮斑。**抗反光、无参数，推荐现场先用它**。
+   - `method=hough`：`Canny + HoughCircles` 圆弧投票，边缘残缺也能定圆；参数
+     （`hough_param1/param2`）需现场调。
+2. 以 `(cx, cy)` 为中心裁**正方形**：边长 `side = 2×(r + r×margin_ratio)`（默认留
+   半径 10% 的黑边，不完全切边，减少背景干扰），越界自动钳制到帧内。
+3. 裁剪图等比缩放到 300×300 送 FPGA —— 内容不失真、铝片居中。
+4. **未检出圆/裁剪过小时回退整帧缩放**（记 warning，不影响流程）。
+
+坐标映射：`_draw_defect_box` 按 `self._crop_box (x0, y0, side)` 把推理坐标从
+300×300 空间先映射回裁剪图、再平移到全帧；未裁剪时保持旧的整帧等比缩放。
+`draw_overlay=1` 时在保存的标注图与 `/debug_disc` 流上画绿色圆 + 黄色裁剪框。
+
+> 注意：`method`/`enabled`/`margin_ratio` 等为**启动时读取**，改动需重启服务
+> （`systemctl restart detect-api.service`）。
 
 - 坐标从 300×300 缩放回实际帧尺寸（`scale_x = w/300`，`scale_y = h/300`）。
 - 标注用 PIL + `Font/platech.ttf` 绘制中文缺陷名（config.ini 的 defect_name 映射）。
@@ -122,6 +147,8 @@ datetime('now','localtime'), UNIQUE(uuid, path, name))`。
 | `POST /calibration` `GET /calibration_status` | 传送带速度标定（`camera_distance/速度` 建议 delay） |
 | `GET /img` | MJPEG 实时流（前端视频源） |
 | `GET /debug_mask` | SSIM 调试流（二值掩码 + SSIM/white_ratio） |
+| `GET /debug_stages` | 软处理中间结果调试流（diff/binary/mask 三列） |
+| `GET /debug_disc` | 圆识别调试流（实时帧 + 检出圆 + 裁剪框，现场调 [disc] 参数用） |
 | `GET /` | Bootstrap 简单页面 |
 
 ## 配置（config.ini）
@@ -138,10 +165,24 @@ zhen_kong = 针孔       # Pinhole
 zang_wu = 脏污         # Dirt/stain
 zhe_zhou = 褶皱        # Wrinkle
 zheng_chang = 正常     # Normal（无缺陷）
+
+[disc]
+enabled = 1            # 1=启用圆识别+智能裁剪, 0=回退整帧缩放
+method = mask          # mask | hough（定圆方法）
+margin_ratio = 0.10    # 裁剪黑边 = 半径 × 该值
+min_radius_ratio = 0.15
+max_radius_ratio = 0.50
+circularity = 0.60     # 圆形度下限（mask 方法, 过滤非圆亮斑）
+mask_threshold = 0     # 0=Otsu(带下限), >0=固定阈值
+otsu_min_threshold = 50
+draw_overlay = 1       # 标注图/调试流上画圆与裁剪框
+hough_param1 = 100     # hough 方法: Canny 高阈值
+hough_param2 = 30      # hough 方法: 累加器阈值
+hough_min_dist = 0     # 0=自动 max(w,h)/4
 ```
 
 > 说明：`gaussian_kernel` 可从 config 读（默认 21）；`grab_position`/
-> `release_position` 旧键已移除。
+> `release_position` 旧键已移除。`[disc]` 段为启动时读取，改动需重启服务。
 
 ## 运行
 

@@ -333,6 +333,49 @@ def debug_stages():
     return Response(_generate_stage_frames(), mimetype='multipart/x-mixed-replace;boundary=frame')
 
 
+def _generate_disc_debug_frames():
+    """圆识别调试流: 实时帧 + 检出圆(绿) + 智能裁剪框(黄)"""
+    while True:
+        time.sleep(0.1)
+        frame = shared.stream_image_ref[0]
+        if frame is None:
+            continue
+        if frame.ndim == 2:
+            display = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+        else:
+            display = frame.copy()
+        h, w = display.shape[:2]
+        sx, sy = 640.0 / w, 480.0 / h
+        display = cv2.resize(display, (640, 480), interpolation=cv2.INTER_AREA)
+
+        disc = getattr(shared, 'last_disc', None)
+        box = getattr(shared, 'last_crop_box', None)
+        if disc:
+            cx, cy, r = (int(v) for v in disc)
+            cv2.circle(display, (int(cx * sx), int(cy * sy)), max(int(r * sx), 1), (0, 255, 0), 2)
+            cv2.circle(display, (int(cx * sx), int(cy * sy)), 2, (0, 255, 0), -1)
+        if box:
+            x0, y0, side = box
+            cv2.rectangle(
+                display,
+                (int(x0 * sx), int(y0 * sy)),
+                (int((x0 + side) * sx), int((y0 + side) * sy)),
+                (0, 255, 255), 2,
+            )
+        enabled = getattr(shared, 'disc_enabled', 1)
+        method = getattr(shared, 'disc_method', 'mask')
+        cv2.putText(display, 'disc: enabled={} method={} found={}'.format(enabled, method, disc is not None),
+                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 1)
+        _ret, jpeg = cv2.imencode('.jpg', display)
+        yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n\r\n')
+
+
+@bp.route('/debug_disc')
+def debug_disc():
+    """圆识别 + 智能裁剪调试流: 实时帧叠加检出圆(绿)与裁剪框(黄)"""
+    return Response(_generate_disc_debug_frames(), mimetype='multipart/x-mixed-replace;boundary=frame')
+
+
 @bp.route('/img')
 def video_feed():
     """实时视频流 (MJPEG)"""

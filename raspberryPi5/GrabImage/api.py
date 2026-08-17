@@ -27,6 +27,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '../tools'))
 from logger import setup_log
 
 from camera import frame_queue, Producer
+from disc_detect import find_disc
 import database
 import shared
 
@@ -113,6 +114,30 @@ TRIGGER_K = float(_det_cfg("trigger_k", "3.0"))
 TRIGGER_CONFIRM = int(_det_cfg("trigger_confirm_frames", "3"))
 CAL_RATIO_THRESHOLD = float(_det_cfg("cal_ratio_threshold", "0.01"))
 USE_SSIM_GATE = int(_det_cfg("use_ssim_gate", "0"))
+
+# ---- 圆形铝片识别 + 智能裁剪参数 (config.ini [disc] 段, 改动后需重启服务) ----
+
+def _disc_cfg(key, fallback):
+    """读取 [disc] 段配置 (config.ini 缺段/缺键时回退默认值)."""
+    return shared.config.get("disc", key, fallback=fallback)
+
+
+DISC_ENABLED = int(_disc_cfg("enabled", "1"))
+DISC_METHOD = _disc_cfg("method", "mask")
+DISC_MARGIN_RATIO = float(_disc_cfg("margin_ratio", "0.10"))
+DISC_DRAW_OVERLAY = int(_disc_cfg("draw_overlay", "1"))
+DISC_CFG = {
+    "min_radius_ratio": float(_disc_cfg("min_radius_ratio", "0.15")),
+    "max_radius_ratio": float(_disc_cfg("max_radius_ratio", "0.50")),
+    "circularity": float(_disc_cfg("circularity", "0.60")),
+    "mask_threshold": float(_disc_cfg("mask_threshold", "0")),
+    "otsu_min_threshold": float(_disc_cfg("otsu_min_threshold", "50")),
+    "hough_param1": float(_disc_cfg("hough_param1", "100")),
+    "hough_param2": float(_disc_cfg("hough_param2", "30")),
+    "hough_min_dist": float(_disc_cfg("hough_min_dist", "0")),
+}
+shared.disc_method = DISC_METHOD
+shared.disc_enabled = DISC_ENABLED
 
 # 机械臂控制参数缓存 (路由 /change_conf 同步更新)
 GRAB_SPEED = shared.config.get("Configuration", "speed")
@@ -256,6 +281,7 @@ class Consumer(threading.Thread):
         self._tracking_count = 0  # 跟踪周期帧总数
         self._tracking_frames = []  # 跟踪帧队列，头部始终是中间帧
         self._selected_frame = None  # 跟踪结束后选中的中间帧
+        self._crop_box = None  # 本次推理的裁剪信息 (x0, y0, side); None=整帧缩放
         self._buf = 0  # 状态切换缓冲计数（入口/出口共用）
         # 标定模式: 追踪 white_ratio 变化以计算传送带速度
         self._cal_last_ratio = 0.0
@@ -453,6 +479,58 @@ class Consumer(threading.Thread):
             if self._cooldown <= 0:
                 self._state = 0
 
+    # ---- 圆形铝片识别 + 智能裁剪 ----
+
+    def _smart_crop(self, image):
+        """
+        定位铝片圆心, 以其为中心裁正方形(四周留黑边), 返回 (裁剪图, (x0, y0, side)).
+        未启用 / 未检出圆 / 裁剪过小时返回 (None, None), 由调用方回退整帧缩放.
+
+        理由: 整帧 768×512 (3:2) 被各向异性压缩成 300×300 会挤压缺陷形状;
+        以铝片为中心裁方形再等比缩放, 内容不失真, 黑边也减少了背景干扰.
+        """
+        shared.last_disc = None
+        shared.last_crop_box = None
+        if not DISC_ENABLED:
+            return None, None
+        h, w = image.shape[:2]
+        circle = find_disc(image, method=DISC_METHOD, cfg=DISC_CFG)
+        if circle is None:
+            logger.warning('智能裁剪: 未检出铝片圆, 回退整帧缩放')
+            return None, None
+        cx, cy, r = circle
+        margin = int(r * DISC_MARGIN_RATIO)
+        side = int(2 * (r + margin))
+        side = min(side, w, h)  # 窗口不得超出画面
+        if side < 32:
+            logger.warning('智能裁剪: 裁剪边长过小(%d), 回退整帧缩放', side)
+            return None, None
+        x0 = min(max(int(cx) - side // 2, 0), w - side)
+        y0 = min(max(int(cy) - side // 2, 0), h - side)
+        crop = image[y0:y0 + side, x0:x0 + side]
+        if crop.shape[0] < 32 or crop.shape[1] < 32:
+            return None, None
+        shared.last_disc = (cx, cy, r)
+        shared.last_crop_box = (x0, y0, side)
+        logger.info('智能裁剪: 圆(cx=%.1f, cy=%.1f, r=%.1f) → 裁剪(%d,%d,%d)',
+                    cx, cy, r, x0, y0, side)
+        return crop, (x0, y0, side)
+
+    def _draw_disc_overlay(self, image):
+        """在标注图上叠加绿色圆与黄色裁剪框 (现场调参/验证用, draw_overlay 控制)."""
+        if not DISC_DRAW_OVERLAY:
+            return image
+        disc = shared.last_disc
+        if disc is not None:
+            cx, cy, r = (int(v) for v in disc)
+            cv2.circle(image, (cx, cy), r, (0, 255, 0), 1)
+            cv2.circle(image, (cx, cy), 2, (0, 255, 0), -1)
+        box = shared.last_crop_box
+        if box is not None:
+            x0, y0, side = box
+            cv2.rectangle(image, (x0, y0), (x0 + side, y0 + side), (0, 255, 255), 1)
+        return image
+
     # ---- 推理管线 ----
 
     def _run_inference_pipeline(self):
@@ -462,8 +540,17 @@ class Consumer(threading.Thread):
         uid = str(uuid.uuid1())
         file_name = os.path.join(FILES_DIR, '{}.jpg'.format(uid))
 
+        # 圆形铝片识别 + 智能裁剪: 以铝片中心裁正方形(四周留黑边), 避免整帧
+        # 3:2 图被各向异性压缩成 300×300 导致缺陷变形 (未检出圆时回退整帧)
+        inference_image, self._crop_box = self._smart_crop(annotated_image)
+        if inference_image is None:
+            inference_image = annotated_image
+            self._crop_box = None
+
         # Resize to 300×300 for FPGA inference (SSD MobileNet input size)
-        inference_image = cv2.resize(annotated_image, (300, 300))
+        # 裁剪图/整帧均为正方形缩放: 缩小用 INTER_AREA 防锯齿, 放大用 INTER_LINEAR
+        interp = cv2.INTER_AREA if inference_image.shape[0] > 300 else cv2.INTER_LINEAR
+        inference_image = cv2.resize(inference_image, (300, 300), interpolation=interp)
         # Send raw grayscale pixels — no JPEG encode/decode overhead
         image_bytes = inference_image.tobytes()
 
@@ -490,12 +577,12 @@ class Consumer(threading.Thread):
             shared.thread_pool.submit(trigger_grab, "OK")
             self._save_normal_result(uid, file_name, annotated_image, original_image)
 
-    @staticmethod
-    def _save_normal_result(uid, file_name, annotated_image, original_image):
+    def _save_normal_result(self, uid, file_name, annotated_image, original_image):
         try:
             annotated_image = cv2.cvtColor(annotated_image, cv2.COLOR_GRAY2RGB)
         except Exception:
             pass
+        self._draw_disc_overlay(annotated_image)
         cv2.imwrite(file_name, annotated_image)
         database.insert_data(uid, file_name, 'zheng_chang', None, None)
         cv2.imwrite(original_image_path, original_image)
@@ -523,16 +610,25 @@ class Consumer(threading.Thread):
             database.insert_data(uid, 'detect.jpg', class_name, None, None)
             logger.info("数据库写入完成")
 
+        self._draw_disc_overlay(annotated_image)
+        cv2.imwrite(file_name, annotated_image)
         cv2.imwrite(original_image_path, original_image)
         cv2.imwrite(detect_image_path, annotated_image)
 
-    @staticmethod
-    def _draw_defect_box(image, loc, class_name_cn: str, score: float):
-        # Scale coordinates from 300×300 inference space to actual image size
+    def _draw_defect_box(self, image, loc, class_name_cn: str, score: float):
+        # 推理坐标 (300×300 空间) → 全帧坐标
         h, w = image.shape[:2]
-        scale_x = w / 300.0
-        scale_y = h / 300.0
-        x1, y1, x2, y2 = [int(v * (scale_x if i % 2 == 0 else scale_y)) for i, v in enumerate(loc)]
+        box = self._crop_box
+        if box is None:
+            # 整帧缩放路径 (未启用裁剪 / 未检出圆)
+            scale_x = w / 300.0
+            scale_y = h / 300.0
+            x1, y1, x2, y2 = [int(round(v * (scale_x if i % 2 == 0 else scale_y))) for i, v in enumerate(loc)]
+        else:
+            # 智能裁剪路径: 300×300 → 裁剪图 → 全帧
+            x0, y0, side = box
+            scale = side / 300.0
+            x1, y1, x2, y2 = [int(round(v * scale)) + (x0 if i % 2 == 0 else y0) for i, v in enumerate(loc)]
         cv2.rectangle(image, (x1, y1), (x2, y2), (255, 0, 0), 1)
 
         try:

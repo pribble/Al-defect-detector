@@ -33,3 +33,9 @@ thread_pool = ThreadPoolExecutor()
 
 # 软处理调试中间结果 (供 /debug_stages 路由逐段可视化: diff/binary/mask)
 debug_intermediates = None
+
+# 圆识别 + 智能裁剪调试状态 (供 /debug_disc 路由可视化, Consumer 写入)
+last_disc = None        # (cx, cy, r) 最近一次检出的铝片圆
+last_crop_box = None    # (x0, y0, side) 最近一次智能裁剪框 (全帧坐标)
+disc_method = "mask"    # api.py 启动时从 config.ini [disc] 同步
+disc_enabled = 1
