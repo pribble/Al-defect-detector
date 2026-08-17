@@ -27,7 +27,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '../tools'))
 from logger import setup_log
 
 from camera import frame_queue, Producer
-from disc_detect import find_disc_robust
+from disc_detect import find_disc_robust, score_mask, in_frame_fraction
 import database
 import shared
 
@@ -130,6 +130,9 @@ DISC_ENABLED = int(_disc_cfg("enabled", "1"))
 DISC_METHOD = _disc_cfg("method", "mask")
 DISC_MARGIN_RATIO = float(_disc_cfg("margin_ratio", "0.10"))
 DISC_DRAW_OVERLAY = int(_disc_cfg("draw_overlay", "1"))
+# 裁剪最低完整度: 检出的圆在画面内占比低于此值时回退整帧 (低于该值说明铝片
+# 未完整进入视野, 硬裁会切掉铝片)
+DISC_MIN_COMPLETENESS = float(_disc_cfg("min_completeness", "0.7"))
 DISC_CFG = {
     "min_radius_ratio": float(_disc_cfg("min_radius_ratio", "0.15")),
     "max_radius_ratio": float(_disc_cfg("max_radius_ratio", "0.50")),
@@ -302,8 +305,8 @@ class Consumer(threading.Thread):
         self._state = 0  # 0=IDLE, 1=TRACKING, 2=COOLDOWN
         self._cooldown = 0  # 冷却倒计帧数
         self._tracking_count = 0  # 跟踪周期帧总数
-        self._best_ratio = 0.0  # 跟踪周期内 fg_ratio 峰值 (铝片最完整进入视野的帧)
-        self._best_frame = None  # fg_ratio 峰值帧, 推理时取它 (替代旧"中间帧"逻辑)
+        self._best_score = 0.0  # 跟踪周期内"圆完整度打分"峰值 (S = r × 圆在画面内占比)
+        self._best_frame = None  # 打分最高帧, 推理时取它 (铝片最完整的一帧)
         self._selected_frame = None  # 跟踪结束后选中的帧
         self._crop_box = None  # 本次推理的裁剪信息 (x0, y0, side); None=整帧缩放
         self._record_box = None  # 保存记录图时应用的裁剪框 (同 _crop_box); None=整帧
@@ -370,7 +373,11 @@ class Consumer(threading.Thread):
         # 供 /get_status 诊断: 空皮带基线统计 (暖机期 n < BASELINE_INIT_FRAMES)
         shared.baseline_stats = (self._baseline_mean, self._baseline_std, len(self._baseline))
 
-        self._run_state_machine(enter, exit_cond, ratio, image)
+        # 圆完整度打分 (选帧用): 从当前帧前景掩码拟合圆, S = r × 圆在画面内占比.
+        # 比 fg_ratio 抗反光 (反光在圆内部不改变外边界, 在圆外部被圆形度过滤)
+        frame_score, _in_frac, _ = score_mask(getattr(shared, 'debug_mask', None), DISC_CFG)
+
+        self._run_state_machine(enter, exit_cond, ratio, image, frame_score)
 
     # ---- 软处理: 光照鲁棒前景提取 (背景建模 + 自适应二值化) ----
 
@@ -488,34 +495,37 @@ class Consumer(threading.Thread):
             self._cal_entry_time = None
         self._cal_last_ratio = ratio
 
-    def _run_state_machine(self, enter, exit_cond, ratio, image):
-        """统一触发状态机: 0=IDLE → 1=TRACKING → 2=COOLDOWN."""
+    def _run_state_machine(self, enter, exit_cond, ratio, image, frame_score):
+        """统一触发状态机: 0=IDLE → 1=TRACKING → 2=COOLDOWN.
+
+        frame_score: 当前帧的"圆完整度打分" (S = r × 圆在画面内占比, 抗反光),
+        用于维护"铝片最完整"的帧作为推理帧.
+        """
         if self._state == 0:  # IDLE — 等待铝片进入
             if enter:
                 self._buf += 1
                 if self._buf >= TRIGGER_CONFIRM:
                     self._state = 1
                     self._tracking_count = 1
-                    # 记录 fg_ratio 峰值帧: 铝片在视野中最完整的一帧, 保证
-                    # 推理/裁剪时铝片完整 (旧"中间帧"逻辑在快速通过/闪烁时
-                    # 会选到铝片刚进入的帧, 导致裁剪缺片)
-                    self._best_ratio = ratio
+                    # 记录圆完整度打分最高帧 (比 fg_ratio 抗反光, 避免选到
+                    # 入口反光撑大 fg_ratio 的帧导致裁剪缺片)
+                    self._best_score = frame_score
                     self._best_frame = image.copy()
                     self._buf = 0
                     shared.last_trigger_time = time.time()
-                    logger.info('触发进入 TRACKING, ratio=%.3f', ratio)
+                    logger.info('触发进入 TRACKING, ratio=%.3f, score=%.1f', ratio, frame_score)
             else:
                 self._buf = 0
 
-        elif self._state == 1:  # TRACKING — 收集帧, 维护 fg_ratio 峰值帧
+        elif self._state == 1:  # TRACKING — 收集帧, 维护"圆完整度打分"最高帧
             if exit_cond:
                 self._buf += 1
                 if self._buf >= TRIGGER_CONFIRM:
                     self._selected_frame = self._best_frame
                     self._buf = 0
                     logger.info(
-                        '触发回落 ratio:{:.3f}, total_frames:{}, 峰值ratio:{:.3f}'.format(
-                            ratio, self._tracking_count, self._best_ratio,
+                        '触发回落 ratio:{:.3f}, total_frames:{}, 最佳score:{:.1f}'.format(
+                            ratio, self._tracking_count, self._best_score,
                         )
                     )
                     self._run_inference_pipeline()
@@ -524,14 +534,14 @@ class Consumer(threading.Thread):
             else:
                 self._buf = 0
                 self._tracking_count += 1
-                # 记录 fg_ratio 峰值帧 (铝片最完整进入视野的一帧)
-                if ratio > self._best_ratio:
-                    self._best_ratio = ratio
+                # 记录"圆完整度打分"最高帧 (铝片最完整进入视野的一帧)
+                if frame_score > self._best_score:
+                    self._best_score = frame_score
                     self._best_frame = image.copy()
                 # 超时保护: 铝片停留/皮带停住时退出条件永不满足, 强制推理防卡死
                 if self._tracking_count >= TRACKING_TIMEOUT_FRAMES:
                     self._selected_frame = self._best_frame
-                    logger.warning('TRACKING 超时(%d帧), 取峰值帧推理', self._tracking_count)
+                    logger.warning('TRACKING 超时(%d帧), 取最佳帧推理', self._tracking_count)
                     self._run_inference_pipeline()
                     self._state = 2
                     self._cooldown = TRIGGER_COOLDOWN
@@ -574,6 +584,13 @@ class Consumer(threading.Thread):
                                (info or {}).get('reject') or '未知原因')
                 return None, None
             cx, cy, r = circle
+            # 圆完整度门槛: 圆在画面内占比 < min_completeness 时回退整帧 (铝片
+            # 未完整进入视野, 硬裁会切掉铝片); 否则出界的圆也照裁, 黑边吸收小越界
+            in_frac = in_frame_fraction((cx, cy, r), h, w)
+            if in_frac < DISC_MIN_COMPLETENESS:
+                logger.warning('智能裁剪: 圆完整度 %.2f < %.2f, 回退整帧缩放',
+                               in_frac, DISC_MIN_COMPLETENESS)
+                return None, None
             margin = int(r * DISC_MARGIN_RATIO)
             side = int(2 * (r + margin))
             side = min(side, w, h)  # 窗口不得超出画面

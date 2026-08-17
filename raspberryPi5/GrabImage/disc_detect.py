@@ -144,18 +144,18 @@ def _hough_circle(gray, cfg):
 
 
 def _sanity_check(cx, cy, r, h, w, cfg):
-    """通用合理性过滤: 半径范围 + 圆心大致落在帧内."""
+    """通用合理性过滤: 半径范围 + 圆心大致落在帧内.
+
+    注意: 不再要求圆完整落在画面内——圆完整度交由 score_mask() 选帧 + 调用方
+    (api._smart_crop) 的 min_completeness 门槛决定, 出界圆不直接判废.
+    """
     if r <= 0 or not np.isfinite(r):
         return False
     min_r = cfg["min_radius_ratio"] * min(h, w)
     max_r = cfg["max_radius_ratio"] * min(h, w)
     if not (min_r <= r <= max_r):
         return False
-    # 圆须(基本)完整落在画面内: 部分出画面的圆(铝片未完全进入视野)拟合不可靠,
-    # 按它裁剪会切掉铝片, 因此直接判为无效 (由调用方回退整帧); EDGE_TOL 容差
-    # 用于吸收拟合噪声, 真正缺片的圆仍会被拒
-    if not (cx - r >= -EDGE_TOL and cx + r <= w + EDGE_TOL and
-            cy - r >= -EDGE_TOL and cy + r <= h + EDGE_TOL):
+    if not (-EDGE_TOL <= cx <= w + EDGE_TOL and -EDGE_TOL <= cy <= h + EDGE_TOL):
         return False
     return True
 
@@ -197,10 +197,10 @@ def probe_disc(gray, method="mask", cfg=None, background=None):
         return None, info
 
     cx, cy, r = circle
-    # 圆必须(基本)完整落在画面内 (单独检查以便给出明确 reject 原因)
-    if not (cx - r >= -EDGE_TOL and cx + r <= w + EDGE_TOL and
-            cy - r >= -EDGE_TOL and cy + r <= h + EDGE_TOL):
-        info["reject"] = "圆超出画面边界 (铝片未完整进入视野), 回退整帧"
+    # 圆心须在画面内: 残片拟合的圆心可能出画面, 按它裁剪没有意义 (圆本身可
+    # 部分出画面, 完整度由调用方 min_completeness 门槛决定)
+    if not (-EDGE_TOL <= cx <= w + EDGE_TOL and -EDGE_TOL <= cy <= h + EDGE_TOL):
+        info["reject"] = "圆心超出画面边界, 忽略"
         return None, info
     if not _sanity_check(cx, cy, r, h, w, merged):
         min_r = merged["min_radius_ratio"] * min(h, w)
@@ -272,3 +272,62 @@ def find_disc(gray, method="mask", cfg=None, background=None):
     """
     circle, _ = probe_disc(gray, method=method, cfg=cfg, background=background)
     return circle
+
+
+def score_mask(mask, cfg=None):
+    """
+    在低分辨率前景掩码上拟合圆并计算"圆完整度"打分 (Consumer 逐帧选帧用).
+
+    打分 S = 拟合半径 r × (圆落在画面内的面积占比):
+      - 完整居中的圆: S ≈ r × 1.0 (最大)
+      - 刚进入的残片: 拟合圆半径小(可见<一半) 或 占比低(可见≥一半但出界) → S 小
+      - 反光在圆内部不改变外边界、在圆外部会被圆形度过滤 → 打分抗反光
+
+    Args:
+        mask: 前景掩码 (48×64, 与 EMA 背景同分辨率; 即软处理 stages["mask"]).
+        cfg: dict, 缺省用 DEFAULTS.
+
+    Returns:
+        (score, in_frac, circle_mask_scale):
+        score = r × in_frac (掩码尺度); in_frac = 圆在画面内占比 (0~1);
+        circle_mask_scale = (cx, cy, r) 掩码坐标, 无有效圆时为 None.
+    """
+    if mask is None or mask.size == 0:
+        return 0.0, 0.0, None
+    merged = dict(DEFAULTS)
+    if cfg:
+        merged.update(cfg)
+    h, w = mask.shape[:2]
+
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return 0.0, 0.0, None
+    contour = max(contours, key=cv2.contourArea)
+    hull = cv2.convexHull(contour)
+    area = cv2.contourArea(hull)
+    if area < 4:
+        return 0.0, 0.0, None
+    (cx, cy), r = cv2.minEnclosingCircle(hull)
+
+    # 半径范围过滤 (选帧用放宽下限, 最终以 find_disc 的严格过滤为准)
+    min_r = 0.5 * merged["min_radius_ratio"] * min(h, w)
+    max_r = merged["max_radius_ratio"] * min(h, w)
+    if not (min_r <= r <= max_r):
+        return 0.0, 0.0, None
+    # 圆心须在画面内: 残片拟合的圆心可能出画面, 打分无意义
+    if not (0 <= cx <= w and 0 <= cy <= h):
+        return 0.0, 0.0, None
+
+    # 圆在画面内占比: 光栅化计数 (cv2.circle 自动裁剪到数组边界 = 画面边界)
+    cm = np.zeros((h, w), np.uint8)
+    cv2.circle(cm, (int(cx), int(cy)), max(int(r), 1), 255, -1)
+    in_frac = np.count_nonzero(cm) / (np.pi * r * r)
+    return float(r * in_frac), float(in_frac), (float(cx), float(cy), float(r))
+
+
+def in_frame_fraction(circle, h, w):
+    """圆落在画面内的面积占比 (全分辨率坐标, 光栅化计数; 0~1)."""
+    cx, cy, r = circle
+    cm = np.zeros((h, w), np.uint8)
+    cv2.circle(cm, (int(cx), int(cy)), max(int(r), 1), 255, -1)
+    return float(np.count_nonzero(cm) / (np.pi * r * r))
