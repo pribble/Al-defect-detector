@@ -130,9 +130,6 @@ DISC_ENABLED = int(_disc_cfg("enabled", "1"))
 DISC_METHOD = _disc_cfg("method", "mask")
 DISC_MARGIN_RATIO = float(_disc_cfg("margin_ratio", "0.10"))
 DISC_DRAW_OVERLAY = int(_disc_cfg("draw_overlay", "1"))
-# 是否在保存的记录图/标注图上画缺陷框与中文标签: 0=纯净图 (采集训练样本用,
-# 下载/历史图无任何标注; 配合 draw_overlay=0 连圆框也不画)
-DISC_DRAW_ANNOTATION = int(_disc_cfg("draw_annotation", "1"))
 # 裁剪最低完整度: 检出的圆在画面内占比低于此值时回退整帧 (低于该值说明铝片
 # 未完整进入视野, 硬裁会切掉铝片)
 DISC_MIN_COMPLETENESS = float(_disc_cfg("min_completeness", "0.7"))
@@ -736,11 +733,9 @@ class Consumer(threading.Thread):
             if class_name == LABEL_NORMAL:
                 continue
 
-            if DISC_DRAW_ANNOTATION:
-                # 纯净图模式 (draw_annotation=0) 不画框/标签, 仅保留 DB 记录
-                annotated_image = self._draw_defect_box(
-                    annotated_image, detection['loc'], shared.defect_name[class_name], detection['score']
-                )
+            annotated_image = self._draw_defect_box(
+                annotated_image, detection['loc'], shared.defect_name[class_name], detection['score']
+            )
             database.insert_data(uid, file_name, class_name, detection['prediction_time'], detection['score'])
             database.insert_data(uid, 'detect.jpg', class_name, None, None)
             logger.info("数据库写入完成")

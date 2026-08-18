@@ -198,7 +198,6 @@ circularity = 0.60     # 圆形度下限（mask 方法, 过滤非圆亮斑）
 mask_threshold = 0     # 0=Otsu(带下限), >0=固定阈值
 otsu_min_threshold = 50
 draw_overlay = 1       # 标注图/调试流上画圆与裁剪框
-draw_annotation = 1    # 记录图上画缺陷框与中文标签; 0=纯净图(采集样本用, 配合 draw_overlay=0 无任何标注)
 hough_param1 = 100     # hough 方法: Canny 高阈值
 hough_param2 = 30      # hough 方法: 累加器阈值
 hough_min_dist = 0     # 0=自动 max(w,h)/4
