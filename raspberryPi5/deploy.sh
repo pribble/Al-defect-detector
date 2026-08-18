@@ -6,12 +6,12 @@ DEST="${2:-/opt/HaoYao}"
 DIR="$(cd "$(dirname "$0")" && pwd)"
 
 rsync -avzc --delete --dry-run \
-    --exclude={.git/,.gitattributes,.gitignore,__pycache__/,*.pyc,*.pyo,.idea/,defect.db,files/,original_files/,detect_files/,fpga/,deploy.sh,CLAUDE.md,README.md,GrabImage/yuanshi.jpg} \
+    --exclude={.git/,.gitattributes,.gitignore,__pycache__/,*.pyc,*.pyo,.idea/,defect.db,files/,original_files/,detect_files/,samples_crop/,fpga/,deploy.sh,CLAUDE.md,README.md,GrabImage/yuanshi.jpg} \
     "$DIR/" "$PI:$DEST/"
 
 read -p "确认同步? [y/N] " -r
 if [[ $REPLY =~ ^[Yy]$ ]]; then
     rsync -avz --delete \
-        --exclude={.git/,.gitattributes,.gitignore,__pycache__/,*.pyc,*.pyo,.idea/,defect.db,files/,original_files/,detect_files/,fpga/,deploy.sh,CLAUDE.md,README.md,GrabImage/yuanshi.jpg} \
+        --exclude={.git/,.gitattributes,.gitignore,__pycache__/,*.pyc,*.pyo,.idea/,defect.db,files/,original_files/,detect_files/,samples_crop/,fpga/,deploy.sh,CLAUDE.md,README.md,GrabImage/yuanshi.jpg} \
         "$DIR/" "$PI:$DEST/"
 fi

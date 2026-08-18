@@ -136,6 +136,11 @@ DISC_MIN_COMPLETENESS = float(_disc_cfg("min_completeness", "0.7"))
 # 横向居中优先级: 圆完整度 ≥ 此值的帧进入"完整帧"档, 档内选圆心最接近画面
 # 水平中心的帧 (原长方形图中铝片横向最中间); 低于此值按完整度打分选帧
 DISC_CENTER_COMPLETE = float(_disc_cfg("center_complete", "0.9"))
+# 样本存档: 把每次送入推理的输入图(裁剪正方形 或 整帧回退)额外保存到
+# SAMPLES_DIR (相对 GrabImage/), 供批量采集训练样本 (纯净图, 无任何标注)
+SAVE_SAMPLES = int(_disc_cfg("save_samples", "1"))
+SAMPLES_DIR_NAME = _disc_cfg("samples_dir", "samples_crop")
+SAMPLES_DIR = os.path.join(BASE_DIR, SAMPLES_DIR_NAME)
 DISC_CFG = {
     "min_radius_ratio": float(_disc_cfg("min_radius_ratio", "0.15")),
     "max_radius_ratio": float(_disc_cfg("max_radius_ratio", "0.50")),
@@ -655,6 +660,20 @@ class Consumer(threading.Thread):
         h, w = image.shape[:2]
         return image[y0:min(y0 + side, h), x0:min(x0 + side, w)]
 
+    def _save_sample(self, image, uid):
+        """把推理输入图(裁剪正方形 或 整帧回退)额外存档到 SAMPLES_DIR 供批量提取.
+
+        纯净图 (原始灰度, 无任何标注); 文件名 = 时间戳 + uid 前 8 位.
+        """
+        if not SAVE_SAMPLES:
+            return
+        try:
+            os.makedirs(SAMPLES_DIR, exist_ok=True)
+            name = '{}_{}.jpg'.format(time.strftime('%Y%m%d_%H%M%S'), uid[:8])
+            cv2.imwrite(os.path.join(SAMPLES_DIR, name), image)
+        except Exception as e:
+            logger.error('样本存档失败: %s', e)
+
     # ---- 推理管线 ----
 
     def _run_inference_pipeline(self):
@@ -676,6 +695,10 @@ class Consumer(threading.Thread):
             # 裁剪成功: 保存的记录图(original.jpg / files/ / detect.jpg)同样用
             # 以铝片为中心的方形图, 保证"提取的图片中铝片在中间"
             self._record_box = self._crop_box
+
+        # 样本存档: 把送入推理的原始输入图(裁剪正方形 或 整帧回退)额外保存到
+        # SAMPLES_DIR, 供批量采集训练样本 (纯净图, 无任何标注)
+        self._save_sample(inference_image, uid)
 
         # Resize to 300×300 for FPGA inference (SSD MobileNet input size)
         # 裁剪图/整帧均为正方形缩放: 缩小用 INTER_AREA 防锯齿, 放大用 INTER_LINEAR
