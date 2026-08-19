@@ -31,8 +31,7 @@
 | `templates/index.html` | 简单 MJPEG 页面 |
 
 运行时生成目录：`files/`（缺陷图片）、`original_files/`（原图）、`detect_files/`
-（标注图）、`samples_crop/`（样本存档：每次推理输入图——裁剪正方形或整帧回退，
-纯净无标注，供批量采集训练样本）——均在部署时排除、不入库。
+（标注图）——均在部署时排除、不入库。
 
 ## 机械臂硬件接口（arm_control.py）
 
@@ -284,8 +283,6 @@ hough_min_dist = 0     # 0=自动 max(w,h)/4
 method_fallback = 1    # 主方法未检出时尝试另一方法 (mask 优先背景差分)
 min_completeness = 0.7 # 圆在画面内占比低于此值回退整帧 (铝片未完整进入视野)
 center_complete = 0.9  # 完整帧门槛: ≥此值进入"横向居中"优先档, 否则按完整度选帧
-save_samples = 1       # 1=把每次推理输入图额外存档到 samples_dir (样本采集)
-samples_dir = samples_crop  # 样本存档目录 (相对 main/, 部署时排除)
 ```
 
 > 说明：`gaussian_kernel` 可从 config 读（默认 21）；`grab_position`/
