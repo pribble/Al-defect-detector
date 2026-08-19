@@ -11,7 +11,7 @@ python3 tools/gen_cnn_top_vectors.py "$N" "$SEED"
 rm -rf /tmp/cnn_top_vlt
 verilator --binary --timing --public-flat-rw -Wno-lint -Wno-fatal -DSIMULATION \
     --Mdir /tmp/cnn_top_vlt -o sim_top \
-    src/cnn_top.v src/cnn_top_core.v src/cnn_core_v2.v src/mac8x8_dsp.v src/mac8x8_lut.v \
+    src/cnn_top.v src/cnn_top_core.v src/cnn_core.v src/requant_store.v src/mac8x8_dsp.v src/mac8x8_lut.v \
     verification/tb/tb_cnn_top.v
 cd verification
 pass=0; fail=0

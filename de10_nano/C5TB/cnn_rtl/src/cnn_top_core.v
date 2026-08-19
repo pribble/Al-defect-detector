@@ -69,19 +69,17 @@ module cnn_top_core (
     // 寄存器
     //-----------------------------------------------------------------------
     reg [31:0] reg_ddrin, reg_ddrw, reg_ddrout, reg_param, reg_scale;
-    reg [31:0] reg_start;
-    reg        start_clear_pending;
+    reg reg_start;
 
     assign as_waitrequest = 1'b0;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             reg_ddrin <= 0; reg_ddrw <= 0; reg_ddrout <= 0;
-            reg_param <= 0; reg_scale <= 0; reg_start <= 0;
+            reg_param <= 0; reg_scale <= 0;
         end else begin
             if (as_write) begin
                 case (as_address)
-                    8'h00: reg_start   <= as_writedata;
                     8'h10: reg_ddrin   <= as_writedata;
                     8'h1C: reg_ddrw   <= as_writedata;
                     8'h28: reg_ddrout <= as_writedata;
@@ -90,8 +88,6 @@ module cnn_top_core (
                     default: ;
                 endcase
             end
-            if (start_clear_pending)
-                reg_start <= 0;
         end
     end
 
@@ -192,7 +188,6 @@ module cnn_top_core (
     localparam S_WR_TILE   = 4'd12;   // 每行块写 core cfg 11（实际输出行数，最后行块裁剪）
     localparam S_RUN       = 4'd7;
     localparam S_NEXT_RB   = 4'd8;
-    localparam S_CLEAR     = 4'd9;
 
     reg [3:0] state;
     reg [31:0] rd_cnt;          // param/scale 读计数
@@ -206,23 +201,9 @@ module cnn_top_core (
     reg [7:0]  dma_ocb;                 // 输出：块（≤4）
     reg [15:0] dma_obeat;             // 输出：段内拍（≤out_seg_words）
 
-    // 主接口读握手（mm_bridge_sdram0 为流水读桥：waitrequest 拉低仅表示命令
-    // 被接受，数据由 readdatavalid 延迟返回）：
-    //   每笔读 = read 拉高 → 命令接受（read && !waitrequest）→ 拉低 read
-    //            → 等 readdatavalid（数据与 valid 同拍）→ 完成
-    //   lr/wr 多笔在途（≤4，桥 MAX_PENDING_RESPONSES=4）：命令在 core 消费
-    //   节奏下提前发出（地址/计数在命令接受拍推进），数据按序返回。
-    //   流式化后每 o_group 轮重读输入，单笔在途每 8B 等一轮 DDR 延迟会
-    //   把 fpga_time 拖到秒级，必须多笔在途隐藏延迟。
-    //   pr/sr（param/scale 块读）保持单笔：pr 27 字开销可忽略，sr 后续优化。
-    // 写完成 = write && !waitrequest，协议不变。
-    reg pr_pending, sr_pending;
     reg [7:0]  lr_pending, wr_pending;   // 在途笔数 0..4（8-bit：3-bit 会回绕，
     // 回绕后 lr_p<4 恒真 → lr_read 失去在途限制 → 命令洪泛 → 死锁（板上
     // 实测 lr_cmd=52772 远超 lr_rdv=24528）
-
-    wire pr_got = pr_pending && pr_readdatavalid;
-    wire sr_got = sr_pending && sr_readdatavalid;
     // lr/wr 共享 load master：cnn_top.v 把 lr/wr 的 readdatavalid 都接到
     // load_avm_readdatavalid，任一方的数据返回都会广播到两路。命令串行
     // （S_LOAD/S_WEIGHT 互斥，lr_read 与 wr_read 不同时拉高），但返回会
@@ -357,12 +338,10 @@ module cnn_top_core (
     //-----------------------------------------------------------------------
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            state <= S_IDLE;
+            state <= S_IDLE; reg_start <= 0;
             rb <= 0; rd_cnt <= 0; cfg_idx <= 0;
             pr_read <= 0; sr_read <= 0;
-            pr_pending <= 0; sr_pending <= 0;
             core_cfg_we <= 0; core_start <= 0;
-            start_clear_pending <= 0;
             dma_icb <= 0; dma_ibeat <= 0; dma_wbeat <= 0;
             dma_ocb <= 0; dma_obeat <= 0;
             wr_slice_q <= 8'd0;
@@ -370,78 +349,32 @@ module cnn_top_core (
         end else begin
             case (state)
                 S_IDLE: begin
-                    start_clear_pending <= 0;
-                    // 自清拍（start_clear_pending=1）不重启：reg_start 在本拍沿
-                    // 才被清 0，沿前判定会误触发新一轮执行
-                    if (reg_start[0] && !start_clear_pending) begin
+                    if (as_write && (as_address == 8'h00) && as_writedata[0]) begin
+                        reg_start <= 1;
                         rd_cnt <= 0;
+                        pr_read <= 1'b1;
                         pr_address <= reg_param;
                         sr_address <= reg_scale;
-                        pr_pending <= 0; sr_pending <= 0;
                         state <= S_RD_PARAM;
                     end
                 end
 
                 //---- 读 param 块（27 字）：每笔 read 拉高 → 接受后拉低 → 等 readdatavalid ----
                 S_RD_PARAM: begin
-                    if (pr_got) begin
+                    if (pr_readdatavalid) begin
                         param_buf[rd_cnt] <= pr_readdata;
                         pr_address <= pr_address + 4;
-                        pr_pending <= 0;
                         if (rd_cnt == 26) begin
                             pr_read <= 0;
                             rd_cnt <= 0;
                             state <= S_CFG;
                         end else begin
+                            pr_read <= 1'b1;
                             rd_cnt <= rd_cnt + 1;
                         end
-                    end else if (!pr_pending) begin
-                        // 无在途：发新请求（read 拉高，地址已稳定）
-                        pr_read <= 1'b1;
-                        pr_pending <= 1'b1;
                     end else if (pr_read && !pr_waitrequest) begin
                         // 命令被桥接受：拉低 read，只发这一笔，等 readdatavalid
                         pr_read <= 1'b0;
-                    end
-                end
-
-                //---- 读 scale（4×out_c 字），边读边写 core requant 数组 ----
-                // 数据返回拍直接把 sr_readdata 写进 core（无需 req_buf 中转：
-                // 4096 字寄存器堆爆资源；布局与软件一致：mult/bias/shift/rcl6
-                // 各 out_c 字），S_WR_CFG 只写标量 0..15。数组/标量写入顺序
-                // 无依赖（core 按地址索引）。
-                S_RD_SCALE: begin
-                    core_cfg_we <= 1'b0;
-                    if (sr_got) begin
-                        core_cfg_we    <= 1'b1;
-                        core_cfg_wdata <= sr_readdata;
-                        if (rd_cnt < p_out_c) begin
-                            core_cfg_sel  <= 3'd2;                 // mult
-                            core_cfg_addr <= rd_cnt;
-                        end else if (rd_cnt < 2 * p_out_c) begin
-                            core_cfg_sel  <= 3'd1;                 // bias_int
-                            core_cfg_addr <= rd_cnt - p_out_c;
-                        end else if (rd_cnt < 3 * p_out_c) begin
-                            core_cfg_sel  <= 3'd3;                 // shift
-                            core_cfg_addr <= rd_cnt - 2 * p_out_c;
-                        end else begin
-                            core_cfg_sel  <= 3'd4;                 // rcl6
-                            core_cfg_addr <= rd_cnt - 3 * p_out_c;
-                        end
-                        sr_address <= sr_address + 4;
-                        sr_pending <= 0;
-                        if (rd_cnt == 4 * p_out_c - 1) begin
-                            sr_read <= 0;
-                            rd_cnt <= 0;
-                            state <= S_WR_CFG;
-                        end else begin
-                            rd_cnt <= rd_cnt + 1;
-                        end
-                    end else if (!sr_pending) begin
-                        sr_read <= 1'b1;
-                        sr_pending <= 1'b1;
-                    end else if (sr_read && !sr_waitrequest) begin
-                        sr_read <= 1'b0;
                     end
                 end
 
@@ -494,7 +427,45 @@ module cnn_top_core (
                         out_rb_stride_r <= (p_out_row_tile * p_out_w) << 3;
                         w_rb_beats_r    <= w_cb_r * wr_slice_q;   // 16×8 乘法（原 32-bit×mux 链）
                         w_rb_beats_last_q <= w_cb_r * wr_slice_q - 24'd1;   // 末值-1 提前（拆 S_RUN 减法链）
+
+                        sr_read <= 1'b1;
                         state <= S_RD_SCALE;
+                    end
+                end
+
+                        //---- 读 scale（4×out_c 字），边读边写 core requant 数组 ----
+                // 数据返回拍直接把 sr_readdata 写进 core（无需 req_buf 中转：
+                // 4096 字寄存器堆爆资源；布局与软件一致：mult/bias/shift/rcl6
+                // 各 out_c 字），S_WR_CFG 只写标量 0..15。数组/标量写入顺序
+                // 无依赖（core 按地址索引）。
+                S_RD_SCALE: begin
+                    core_cfg_we <= sr_readdatavalid;
+                    if (sr_readdatavalid) begin
+                        core_cfg_wdata <= sr_readdata;
+                        if (rd_cnt < p_out_c) begin
+                            core_cfg_sel  <= 3'd2;                 // mult
+                            core_cfg_addr <= rd_cnt;
+                        end else if (rd_cnt < 2 * p_out_c) begin
+                            core_cfg_sel  <= 3'd1;                 // bias_int
+                            core_cfg_addr <= rd_cnt - p_out_c;
+                        end else if (rd_cnt < 3 * p_out_c) begin
+                            core_cfg_sel  <= 3'd3;                 // shift
+                            core_cfg_addr <= rd_cnt - 2 * p_out_c;
+                        end else begin
+                            core_cfg_sel  <= 3'd4;                 // rcl6
+                            core_cfg_addr <= rd_cnt - 3 * p_out_c;
+                        end
+                        sr_address <= sr_address + 4;
+                        if (rd_cnt == 4 * p_out_c - 1) begin
+                            sr_read <= 0;
+                            rd_cnt <= 0;
+                            state <= S_WR_CFG;
+                        end else begin
+                            rd_cnt <= rd_cnt + 1;
+                            sr_read <= 1'b1;
+                        end
+                    end else if (sr_read && !sr_waitrequest) begin
+                        sr_read <= 1'b0;
                     end
                 end
 
@@ -639,9 +610,10 @@ module cnn_top_core (
                 end
 
                 S_NEXT_RB: begin
-                    if (rb == p_row_block - 1)
-                        state <= S_CLEAR;
-                    else begin
+                    if (rb == p_row_block - 1) begin
+                        reg_start <= 0;
+                        state <= S_IDLE;
+                    end else begin
                         rb <= rb + 1;
                         rb_base_r <= rb_base_r + rb_tile_stride_r;   // 增量：base += tile*stride
                         dma_icb <= 0; dma_ibeat <= 0; dma_wbeat <= 0;
@@ -650,10 +622,6 @@ module cnn_top_core (
                     end
                 end
 
-                S_CLEAR: begin
-                    start_clear_pending <= 1;
-                    state <= S_IDLE;
-                end
                 default: state <= S_IDLE;
             endcase
         end

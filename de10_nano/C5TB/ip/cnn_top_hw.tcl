@@ -43,7 +43,8 @@ set_fileset_property QUARTUS_SYNTH ENABLE_FILE_OVERWRITE_MODE false
 # 副本已删除，避免两份拷贝不同步；改 RTL 后需重新 QSys Generate）
 add_fileset_file cnn_top.v VERILOG PATH ../cnn_rtl/src/cnn_top.v
 add_fileset_file cnn_top_core.v VERILOG PATH ../cnn_rtl/src/cnn_top_core.v
-add_fileset_file cnn_core_v2.v VERILOG PATH ../cnn_rtl/src/cnn_core_v2.v
+add_fileset_file cnn_core.v VERILOG PATH ../cnn_rtl/src/cnn_core.v
+add_fileset_file requant_store.v VERILOG PATH ../cnn_rtl/src/requant_store.v
 add_fileset_file mac8x8_dsp.v VERILOG PATH ../cnn_rtl/src/mac8x8_dsp.v
 add_fileset_file mac8x8_lut.v VERILOG PATH ../cnn_rtl/src/mac8x8_lut.v
 

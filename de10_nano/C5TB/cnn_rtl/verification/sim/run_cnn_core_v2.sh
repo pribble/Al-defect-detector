@@ -11,7 +11,7 @@ python3 tools/gen_cnn_core_v2_vectors.py "$N" "$SEED"
 rm -rf /tmp/cnn_core_v2_vlt
 verilator --binary --timing --public-flat-rw -Wno-lint -Wno-fatal -DSIMULATION \
     --Mdir /tmp/cnn_core_v2_vlt -o sim_v2 \
-    src/cnn_core_v2.v src/mac8x8_dsp.v src/mac8x8_lut.v verification/tb/tb_cnn_core_v2.v
+    src/cnn_core.v src/requant_store.v src/mac8x8_dsp.v src/mac8x8_lut.v verification/tb/tb_cnn_core_v2.v
 cd verification
 pass=0; fail=0
 for d in v2/layer_*; do

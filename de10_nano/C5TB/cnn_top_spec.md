@@ -15,8 +15,8 @@
 
 - `cnn_top` 是 QSys 自定义 IP（Component Editor 18.1，v2.0，`ip/cnn_top_hw.tcl`）。
   原黑盒网表 `ip/cnn_top.qxp`（8.3MB，无 RTL 源码）已于 **2026-08 由开源复现 RTL
-  （`cnn_rtl/src/` 下 `cnn_top.v`/`cnn_top_core.v`/`cnn_core_v2.v`/`mac8x8_dsp.v`/`mac8x8_lut.v`
-  五个 `.v`，hw.tcl fileset 唯一引用）替代并删除**。
+  （`cnn_rtl/src/` 下 `cnn_top.v`/`cnn_top_core.v`/`cnn_core.v`/`requant_store.v`/`mac8x8_dsp.v`/`mac8x8_lut.v`
+  六个 `.v`，hw.tcl fileset 唯一引用）替代并删除**。
 - 软件侧协议：`ssd_detection/intelfpga.cc`（寄存器读写、DMA、重排）、
   `ssd_detection/include/intelfpga.h`（指令结构）、
   `ssd_detection/paddle_lite/lite/kernels/intel_fpga/conv_op.cc`（参数/scale 填充）。

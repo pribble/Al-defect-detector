@@ -37,7 +37,8 @@ cnn_rtl/
 本分支数值/架构底子源自 Intel intelfpga 开源卷积数据通路
 （`conv_layer.vhd`，MIT 协议）：单层流式卷积（行缓冲 3+1 行、int32 累加、
 定点乘移位 requant、valid/ready 流控）。2026-08 已完全重写为自研 Verilog
-（`src/cnn_core_v2.v`，仿真与综合共用同一份，NHWC8 块序流 + 乘后域定点），
+（`src/cnn_core.v`，仿真与综合共用同一份，NHWC8 块序流 + 乘后域定点；
+2026-08 由 `cnn_core_v2.v` 重命名，lane requant 参数存储拆分为 `src/requant_store.v` ×8 实例），
 上游 VHDL 源码及其 GHDL 验证框架已从分支移除（历史见 git）。
 
 ## 差距矩阵（上游 → cnn_top 规格）
@@ -65,7 +66,7 @@ cnn_rtl/
 | 1 ✅ | `src/conv_layer_s8.v`（定点卷积数据通路，Verilog，阶段 1 中间产物）——**2026-08 清理删除**（历史见 git） | `verification/sim/run_conv_s8.sh`（iverilog/verilator）全绿 |
 | 2 ✅ | `tools/ref_cnn_top.py`（numpy 行为模型，裁判） | 80 随机层 + 真实 47 层 ALL PASS |
 | 3 ✅ | `src/cnn_core.v`（参数驱动单层执行器，k=3 子集）——**2026-08 清理删除**（历史见 git） | `verification/sim/run_cnn_core.sh` 24 层 bit-exact |
-| 4 ✅ | `src/cnn_core_v2.v`（**NHWC8 块序流**：slice 权重、行块 acc 缓冲、单行块执行供 DMA 调度） | `verification/sim/run_cnn_core_v2.sh` 24 层 bit-exact（**均为 k=3**；k=1 层 2026-08 权重布局修复后未重新对拍） |
+| 4 ✅ | `src/cnn_core.v`（**NHWC8 块序流**：slice 权重、行块 acc 缓冲、单行块执行供 DMA 调度；2026-08 由 `cnn_core_v2.v` 重命名，requant 参数存储拆为 `requant_store.v` ×8） | `verification/sim/run_cnn_core_v2.sh` 24 层 bit-exact（**均为 k=3**；k=1 层 2026-08 权重布局修复后未重新对拍） |
 | 5 ✅ | `cnn_top.v` Avalon 顶层（从接口 + 6 寄存器 + param/scale 解析 + DMA + 行块调度）；requant 定点参数**软件侧预转**（`conv_op.cc` scale 区每通道 4 字：mult/bias_mul(q22)/shift/rcl6(q22)，乘后域，RTL 无浮点） | 端到端 tb：**6/6 层 bit-exact**（单块/多块/多组、38 高长层） |
 | 6 ✅ | depthwise（type=4）：权重对角化 + MAC 复用 | v2 回归覆盖 dw 层 |
 | 7 ✅ | 打包 QSys IP 上板替换（黑盒 `cnn_top.qxp` 已删除） | 上板 `test.sh` 全链路运行；**检测正确性验证中**（见下节调试历史） |
@@ -78,7 +79,7 @@ cnn_rtl/
 > run 脚本、向量生成器）已被 v2/top 取代，随 `STAGE1_plan.md` 一并删除，历史见 git；
 > `tools/ref_int8.py` 保留（`conv_op.cc` 定点公式的对齐依据）。
 
-**阶段 5 交付（Quartus 接入）**：`cnn_top.v`（QSys 适配层，端口与 `ip/cnn_top_hw.tcl` 一致）+ `cnn_top_core.v`（RTL 本体，tb 直接对拍）+ `cnn_core_v2.v` + `mac8x8_dsp.v`/`mac8x8_lut.v`（8×8 乘法器，lane 0-3 DSP / 4-7 LUT）；`ip/cnn_top_hw.tcl` 已把 `cnn_top.qxp` 黑盒引用改为这 5 个 `.v`（fileset 指向 `../cnn_rtl/src/`，RTL 仅此一份）。接入步骤（Windows Quartus）：
+**阶段 5 交付（Quartus 接入）**：`cnn_top.v`（QSys 适配层，端口与 `ip/cnn_top_hw.tcl` 一致）+ `cnn_top_core.v`（RTL 本体，tb 直接对拍）+ `cnn_core.v`（2026-08 由 `cnn_core_v2.v` 重命名，requant 参数存储拆为 `requant_store.v`）+ `mac8x8_dsp.v`/`mac8x8_lut.v`（8×8 乘法器，lane 0-3 DSP / 4-7 LUT）；`ip/cnn_top_hw.tcl` 已把 `cnn_top.qxp` 黑盒引用改为这 6 个 `.v`（fileset 指向 `../cnn_rtl/src/`，RTL 仅此一份）。接入步骤（Windows Quartus）：
 1. RTL 源随工程提交（`cnn_rtl/src/`）；Platform Designer 打开 `soc_system.qsys` → Generate HDL（顶层会例化 `cnn_top` = 新 wrapper）
    **⚠ 编译实际引用 `soc_system/synthesis/submodules/` 下的副本**（`soc_system.qip:7110-7114` 指向 submodules 而非 `cnn_rtl/src/`）——改了 `cnn_rtl/src/` 的 `.v` 后**必须**重新 Generate QSys（或手动覆盖 submodules/ 同名文件），否则编译用的还是旧副本（现象：Flow Summary 数字与旧版逐位相同）
 2. 全量编译（Analysis & Synthesis → Fitter → Timing；黑盒换 RTL 不能增量）
