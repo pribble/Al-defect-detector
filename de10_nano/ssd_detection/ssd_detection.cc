@@ -89,16 +89,14 @@ public:
 
     std::string label_path = config_.at("label_path");
     class_names_ = ReadLine(label_path);
-
-    // label_list 每行格式: <class_name> [threshold]
-    // 第二列缺失时默认 0.45 (向后兼容)
     class_thresholds_.resize(class_names_.size(), 0.45f);
+
+    // label_list 每行: <class_name> [threshold]，缺省 0.45
     for (size_t i = 0; i < class_names_.size(); i++) {
       auto parts = split(class_names_[i], ' ');
-      if (parts.size() >= 2) {
-        class_names_[i] = parts[0];
-        class_thresholds_[i] = std::stof(parts[1]);
-      }
+      if (parts.size() < 2) continue;
+      class_names_[i] = parts[0];
+      class_thresholds_[i] = std::stof(parts[1]);
     }
 
     loadModel();
@@ -321,14 +319,14 @@ void detect_camera_frame(Detector& detector){
     // Pi sends raw 300×300 grayscale pixels (no JPEG encode/decode, no cvtColor)
     if (image_file.content.size() != input_shape * input_shape) {
       std::cerr << "[ERROR] Invalid image data size: " << image_file.content.size() << "\n";
-      res.set_content("{\"len\":0,\"action\":\"OK\",\"result\":[]}", "application/json");
+      res.set_content("{\"len\":0,\"action\":\"NONE\",\"result\":[]}", "application/json");
       return;
     }
     cv::Mat img_decode(input_shape, input_shape, CV_8UC1, (void*)image_file.content.data());
 
     if (img_decode.empty()) {
       std::cerr << "[ERROR] Failed to decode image\n";
-      res.set_content("{\"len\":0,\"result\":[]}", "application/json");
+      res.set_content("{\"len\":0,\"action\":\"NONE\",\"result\":[]}", "application/json");
       return;
     }
 
@@ -338,10 +336,20 @@ void detect_camera_frame(Detector& detector){
     float prediction_time = std::chrono::duration<float, std::milli>(end - start).count();
 
     // Build JSON response matching HaoYao GrabImage expectations
+    // action: NONE=无任何检测框(不做动作) / NG=检出缺陷类 / OK=检出正常类 zheng_chang
     std::ostringstream json;
-    bool has_defect = objects.size() > 0;
+    std::string action = "NONE";
+    if (!objects.empty()) {
+      action = "NG";
+      for (const auto& obj : objects) {
+        if (detector.GetClassName(obj.class_id) == "zheng_chang") {
+          action = "OK";
+          break;
+        }
+      }
+    }
     json << "{\"len\":" << objects.size()
-         << ",\"action\":\"" << (has_defect ? "NG" : "OK") << "\""
+         << ",\"action\":\"" << action << "\""
          << ",\"result\":[";
     for (size_t i = 0; i < objects.size(); i++) {
       if (i > 0) json << ",";

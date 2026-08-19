@@ -84,8 +84,10 @@ COOLDOWN: 5 帧冷却，防止同一铝片重复触发
 最佳帧 → 圆识别+智能裁剪 → resize(300×300) → tobytes()（灰度 raw，无 JPEG）
   → POST FPGA /predict
   → 响应 {"len", "action", "result":[{class_name, loc[x1,y1,x2,y2], score, prediction_time}]}
-  → len>0 且 action=NG：报警 + NG 抓取 + 画框标注（_draw_defect_box）写库
-  → 否则：OK 抓取 + 正常结果写库
+  → action=NONE（无任何检测框）：不做动作（不抓取/不报警/不写库），仅记日志
+  → action=NG（检出缺陷类）：报警 + NG 抓取 + 画框标注（_draw_defect_box）写库
+  → action=OK（检出 zheng_chang）：OK 抓取 + 正常结果写库
+  （正常类也会产生框，len>0 不再代表缺陷，一律以 action 为准分派）
 ```
 
 ### 圆识别 + 智能裁剪（[disc] 段，默认开启）

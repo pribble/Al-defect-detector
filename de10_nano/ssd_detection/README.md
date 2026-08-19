@@ -101,8 +101,13 @@ FPGA: Mat(300×300, CV_8UC1) → preprocessImgGray（NEON 1ch→3ch NCHW，减 m
   {"class_name": "ca_shang", "loc": [x1,y1,x2,y2], "score": 0.95, "prediction_time": 45.2}]}
 ```
 
-  空检测：`{"len": 0, "action": "OK", "result": []}`；非法图片大小返回
-  `{"len":0,"action":"OK","result":[]}`。服务端 `ThreadPool(1)` 串行处理请求。
+  **action 判定（关键）**：
+  - `NONE`：无任何检测框（漏检/无目标）——Pi 侧不做动作；
+  - `OK`：检出正常类 `zheng_chang`（label_list 首行）；
+  - `NG`：检出缺陷类（结果中无 `zheng_chang`）。
+  正常铝片也会产生 `zheng_chang` 框，`len` 只表示框数量，不再是 OK/NG 判据。
+  空检测：`{"len": 0, "action": "NONE", "result": []}`；非法图片大小同样返回
+  `{"len":0,"action":"NONE","result":[]}`。服务端 `ThreadPool(1)` 串行处理请求。
 
 ## 配置
 
@@ -115,9 +120,11 @@ mean 127.5,127.5,127.5
 std 127.502231,127.502231,127.502231
 ```
 
-`deploy/label_list`（每类独立阈值）：
+`deploy/label_list`（每类独立阈值；**首行必须是正常类 `zheng_chang`**，
+action 以"是否检出该行类别"判定 OK/NG）：
 
 ```
+zheng_chang 0.50
 ca_shang 0.40
 zang_wu 0.40
 zhe_zhou 0.60

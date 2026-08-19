@@ -14,7 +14,7 @@ arm-linux-gnueabihf-g++ \
 echo "=== [2/3] Paddle-Lite ==="
 cd "$ROOT/paddle_lite"
 bash build_paddlelite.sh
-cp "$ROOT/lib/libpaddle_light_api_shared.so" "$ROOT/deploy/paddlelite_lib/"
+cp "$ROOT/lib/libpaddle_light_api_shared.so" "$ROOT/deploy/lib/"
 
 echo "=== [3/3] ssd_detection ==="
 cd "$ROOT"
@@ -33,4 +33,4 @@ if [ ! -f Makefile ] || [ "$CACHE_ROOT" != "$ROOT" ]; then
 fi
 make -j4 ssd_detection
 cp ssd_detection "$ROOT/deploy/"
-cp "$ROOT/lib/libvnna.so" "$ROOT/deploy/paddlelite_lib/"
+cp "$ROOT/lib/libvnna.so" "$ROOT/deploy/lib/"

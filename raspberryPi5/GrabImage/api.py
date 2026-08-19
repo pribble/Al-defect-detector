@@ -715,7 +715,13 @@ class Consumer(threading.Thread):
         inference_result = json.loads(response.text)
         logger.info(inference_result)
 
-        if inference_result['len'] > 0:
+        # action (FPGA 判定): NONE=无任何检测框 → 不做动作; NG=检出缺陷类; OK=检出 zheng_chang
+        action = inference_result.get('action')
+        if action == 'NONE':
+            # 无检测框 (漏检/无目标): 不抓取/不报警/不写库, 仅记日志 (推理输入图已由 _save_sample 存档)
+            logger.info('推理无检测框 (len=0), 跳过动作')
+            return
+        if action == 'NG':
             self._handle_inference_result(inference_result, uid, file_name, annotated_image, original_image)
         else:
             _submit_pool(trigger_grab, "OK")
@@ -757,7 +763,7 @@ class Consumer(threading.Thread):
                 continue
 
             annotated_image = self._draw_defect_box(
-                annotated_image, detection['loc'], shared.defect_name[class_name], detection['score']
+                annotated_image, detection['loc'], shared.defect_name.get(class_name, class_name), detection['score']
             )
             database.insert_data(uid, file_name, class_name, detection['prediction_time'], detection['score'])
             database.insert_data(uid, 'detect.jpg', class_name, None, None)
