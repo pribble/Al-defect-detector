@@ -11,7 +11,7 @@
 // 执行（START 置位后）：
 //   1) param 块（27 字 struct parameter）→ 解析
 //   2) scale 区（4×out_c 字）→ requant 参数
-//   3) 配 cnn_core_v2 → 行块循环 rb=0..row_block-1：
+//   3) 配 cnn_core → 行块循环 rb=0..row_block-1：
 //        base_row = rb*tile*stride - pad；core start；DMA 跟随流喂/收
 //   4) START 自清
 //
@@ -104,7 +104,7 @@ module cnn_top_core (
     end
 
     //-----------------------------------------------------------------------
-    // cnn_core_v2
+    // cnn_core
     //-----------------------------------------------------------------------
     reg         core_cfg_we, core_start;
     wire        core_done;
@@ -118,7 +118,7 @@ module cnn_top_core (
     wire        core_o_valid, core_o_ready;
     wire [63:0] core_o_data;
 
-    cnn_core_v2 core (
+    cnn_core core (
         .clk(clk), .rst_n(rst_n),
         .cfg_we(core_cfg_we), .cfg_sel(core_cfg_sel),
         .cfg_addr(core_cfg_addr), .cfg_wdata(core_cfg_wdata),

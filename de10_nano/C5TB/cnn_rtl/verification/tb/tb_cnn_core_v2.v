@@ -40,7 +40,7 @@ module tb_cnn_core_v2;
     wire [63:0] o_data;
     wire o_done;
 
-    cnn_core_v2 dut (
+    cnn_core dut (
         .clk(clk), .rst_n(rst_n),
         .cfg_we(cfg_we), .cfg_sel(cfg_sel), .cfg_addr(cfg_addr),
         .cfg_wdata(cfg_wdata),
