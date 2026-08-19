@@ -139,8 +139,10 @@ COOLDOWN: 5 帧冷却，防止同一铝片重复触发
 > 圆完整度 `in_frac ≥ center_complete(0.9)` 的"完整帧"档内，选圆心最接近画面
 > 水平中心的帧（原长方形图中铝片横向最中间）；无完整帧时按完整度打分
 > `S = r × in_frac` 兜底。fg_ratio 会被入口反光撑大导致选帧错位，圆打分只由
-> 外边界决定、抗反光。早期版本的 diff_curr/diff_prev 导数判定已废弃，文档以此
-> 状态机为准。
+> 外边界决定、抗反光。另有**软降级门槛** `min_radius_ratio_frame(0.18)`：检出圆
+> 半径相对帧短边占比低于此值的帧降为档 0（仍按完整度互相比较、不淘汰，排在任何
+> 达标帧之后），过滤"铝片刚进入/偏远"的过小圆帧，保证超时强制推理时仍有相对
+> 最好的候选。早期版本的 diff_curr/diff_prev 导数判定已废弃，文档以此状态机为准。
 
 ## 推理管线（_run_inference_pipeline）
 
@@ -283,6 +285,7 @@ hough_min_dist = 0     # 0=自动 max(w,h)/4
 method_fallback = 1    # 主方法未检出时尝试另一方法 (mask 优先背景差分)
 min_completeness = 0.7 # 圆在画面内占比低于此值回退整帧 (铝片未完整进入视野)
 center_complete = 0.9  # 完整帧门槛: ≥此值进入"横向居中"优先档, 否则按完整度选帧
+min_radius_ratio_frame = 0.18  # 圆 r/帧短边 占比下限: 低于此值的帧选帧软降级(档0,不淘汰)
 ```
 
 > 说明：`gaussian_kernel` 可从 config 读（默认 21）；`grab_position`/

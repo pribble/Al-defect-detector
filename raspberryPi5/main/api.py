@@ -135,6 +135,11 @@ DISC_MIN_COMPLETENESS = float(_disc_cfg("min_completeness", "0.7"))
 # 横向居中优先级: 圆完整度 ≥ 此值的帧进入"完整帧"档, 档内选圆心最接近画面
 # 水平中心的帧 (原长方形图中铝片横向最中间); 低于此值按完整度打分选帧
 DISC_CENTER_COMPLETE = float(_disc_cfg("center_complete", "0.9"))
+# 圆半径相对帧短边占比下限 (选帧软降级用): 检出圆 r/帧短边 低于此值的帧在
+# 选帧时降为档 0 —— 排在所有达标帧之后, 档内仍按完整度互相比较 (不淘汰,
+# 保证 TRACKING 超时强制推理时仍有相对最好的候选, 不额外回退整帧); 用于过滤
+# "铝片刚进入/偏远"导致的过小圆帧, 正常完整铝片 (r/帧短边≈0.24) 不受影响
+DISC_MIN_RADIUS_RATIO_FRAME = float(_disc_cfg("min_radius_ratio_frame", "0.18"))
 DISC_CFG = {
     "min_radius_ratio": float(_disc_cfg("min_radius_ratio", "0.15")),
     "max_radius_ratio": float(_disc_cfg("max_radius_ratio", "0.50")),
@@ -384,11 +389,21 @@ class Consumer(threading.Thread):
         self._run_state_machine(enter, exit_cond, ratio, image, frame_key)
 
     def _selection_key(self, score, in_frac, circ, image):
-        """两阶段选帧排序键: 完整帧优先, 完整帧内比横向居中; 否则按完整度."""
+        """两阶段选帧排序键: 完整帧优先, 完整帧内比横向居中; 否则按完整度.
+
+        软降级门槛: 检出圆半径相对帧短边占比 < DISC_MIN_RADIUS_RATIO_FRAME 的
+        帧降为档 0 (排在任何达标帧之后, 档内仍按完整度互相比较)——不淘汰该帧,
+        保证 TRACKING 超时强制推理时仍有相对最好的候选, 不额外回退整帧.
+        """
+        h, w = image.shape[:2]
+        mask = getattr(shared, 'debug_mask', None)
+        mask_h = mask.shape[0] if mask is not None else SSIM_HEIGHT
+        mask_w = mask.shape[1] if mask is not None else SSIM_WIDTH
+        if circ is not None:
+            r_full = circ[2] * (h / mask_h)  # 掩码坐标半径 → 全分辨率
+            if r_full / min(h, w) < DISC_MIN_RADIUS_RATIO_FRAME:
+                return (0, score)
         if in_frac >= DISC_CENTER_COMPLETE and circ is not None:
-            h, w = image.shape[:2]
-            mask_w = getattr(shared, 'debug_mask', None)
-            mask_w = mask_w.shape[1] if mask_w is not None else SSIM_WIDTH
             cx_full = circ[0] * (w / mask_w)  # 掩码坐标 → 全分辨率
             return (2, -abs(cx_full - w / 2.0))
         return (1, score)
