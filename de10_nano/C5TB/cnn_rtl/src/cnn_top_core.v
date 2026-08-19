@@ -9,7 +9,7 @@
 //   DDROUT=0x28、PARAM=0x34、SCALE=0x40
 //
 // 执行（START 置位后）：
-//   1) param 块（27 字 struct parameter）→ 解析
+//   1) param 块（20 字，0..19；边读边解析，无需缓存）
 //   2) scale 区（4×out_c 字）→ requant 参数
 //   3) 配 cnn_core → 行块循环 rb=0..row_block-1：
 //        base_row = rb*tile*stride - pad；core start；DMA 跟随流喂/收
@@ -71,7 +71,7 @@ module cnn_top_core (
     reg [31:0] reg_ddrin, reg_ddrw, reg_ddrout, reg_param, reg_scale;
     reg reg_start;
 
-    assign as_waitrequest = 1'b0;
+    assign as_waitrequest = 0;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -129,9 +129,8 @@ module cnn_top_core (
     );
 
     //-----------------------------------------------------------------------
-    // param 解析缓存 + 派生量
+    // param 解析 + 派生量
     //-----------------------------------------------------------------------
-    reg [31:0] param_buf [0:26];
 
     reg [15:0] p_in_c, p_in_h, p_in_w, p_out_c, p_out_h, p_out_w;   // ≤302
     reg [31:0] p_input_offset, p_weight_offset, p_output_offset;   // param[0/1/3]，字偏移（×8 = 字节）
@@ -176,18 +175,17 @@ module cnn_top_core (
     //-----------------------------------------------------------------------
     // 执行状态机
     //-----------------------------------------------------------------------
-    localparam S_IDLE      = 4'd0;
-    localparam S_RD_PARAM  = 4'd1;
-    localparam S_RD_SCALE  = 4'd2;
-    localparam S_CFG       = 4'd3;
-    localparam S_WR_CFG    = 4'd4;
-    localparam S_PREP_L    = 4'd11;   // 层级派生量预计算（每层一次）
-    localparam S_WR_BASE   = 4'd5;
-    localparam S_PREP      = 4'd10;   // 行块派生量预计算（每行块一次）
-    localparam S_START     = 4'd6;
-    localparam S_WR_TILE   = 4'd12;   // 每行块写 core cfg 11（实际输出行数，最后行块裁剪）
-    localparam S_RUN       = 4'd7;
-    localparam S_NEXT_RB   = 4'd8;
+    localparam S_IDLE     = 4'd0;
+    localparam S_RD_PARAM = 4'd1;   // 读 param 块（0..19，边读边解析）
+    localparam S_PREP_L   = 4'd2;   // 层级派生量预计算（每层一次）
+    localparam S_RD_SCALE = 4'd3;   // 读 scale（4×out_c 字），边读边写 requant 数组
+    localparam S_WR_CFG   = 4'd4;   // 写标量 cfg（0..15）
+    localparam S_WR_BASE  = 4'd5;   // 每行块写 base_row
+    localparam S_PREP     = 4'd6;   // 行块派生量预计算（每行块一次）
+    localparam S_WR_TILE  = 4'd7;   // 每行块写 cfg 11（本行块实际输出行数）
+    localparam S_START    = 4'd8;   // 拉高 core start
+    localparam S_RUN      = 4'd9;   // 运行：DMA 跟随 core 流
+    localparam S_NEXT_RB  = 4'd10;  // 下一行块 / 完成
 
     reg [3:0] state;
     reg [31:0] rd_cnt;          // param/scale 读计数
@@ -264,23 +262,22 @@ module cnn_top_core (
     reg  lr_last_seg_q;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            lr_round_end_q <= 1'b0;
-            lr_last_seg_q  <= 1'b0;
+            lr_round_end_q <= 0;
+            lr_last_seg_q  <= 0;
         end else if (core_done) begin
-            lr_round_end_q <= 1'b0;
-            lr_last_seg_q  <= 1'b0;
+            lr_round_end_q <= 0;
+            lr_last_seg_q  <= 0;
         end else if (lr_round_reset) begin
-            lr_round_end_q <= 1'b0;
+            lr_round_end_q <= 0;
         end else if (lr_round_end_q && lr_pending == 8'd0 && !core_i_ready && !lr_last_seg_q) begin
-            lr_round_end_q <= 1'b0;   // 中间段：返回清空 + core 离开 S_LOAD → 解锁
+            lr_round_end_q <= 0;   // 中间段：返回清空 + core 离开 S_LOAD → 解锁
         end else if (lr_last_cmd && lr_read && !lr_waitrequest) begin
-            lr_round_end_q <= 1'b1;
+            lr_round_end_q <= 1;
             lr_last_seg_q  <= (dma_icb == lr_last_cb_r);
         end
     end
-    wire lr_round_end   = lr_round_end_q;
-    wire lr_round_reset = (lr_pending == 8'd0) && lr_round_end && core_i_ready && lr_last_seg_q;
-    assign lr_read = core_i_ready && (lr_pending < 8'd4) && !lr_round_end && !lr_round_reset;
+    wire lr_round_reset = (lr_pending == 8'd0) && lr_round_end_q && core_i_ready && lr_last_seg_q;
+    assign lr_read = core_i_ready && (lr_pending < 8'd4) && !lr_round_end_q && !lr_round_reset;
     // wr 轮末（每 o_group 一轮 = p_k==1 ? 8 : 72 个字）：轮内计数到末值且
     // 命令发出后停止——否则 wbeat 卡在末值而 (dma_wbeat < w_rb_beats_r)
     // 恒真，重复命令无限发出；也避免轮间在途返回在 core 非 S_WEIGHT 时
@@ -291,22 +288,22 @@ module cnn_top_core (
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             wr_ibeat_q <= 8'd0;
-            wr_round_end_q <= 1'b0;
+            wr_round_end_q <= 0;
         end else if (core_done) begin
             wr_ibeat_q <= 8'd0;
-            wr_round_end_q <= 1'b0;
+            wr_round_end_q <= 0;
         end else if (wr_round_end_q && wr_pending == 8'd0 && !core_ow_ready) begin
-            wr_round_end_q <= 1'b0;
+            wr_round_end_q <= 0;
         end else if (!wr_round_end_q && wr_read && !wr_waitrequest) begin
             if (wr_ibeat_q == (p_k == 1 ? 8'd7 : 8'd71)) begin
                 wr_ibeat_q <= 8'd0;
-                wr_round_end_q <= 1'b1;
+                wr_round_end_q <= 1;
             end else
                 wr_ibeat_q <= wr_ibeat_q + 8'd1;
         end
     end
     assign wr_read = core_ow_ready && (wr_pending < 8'd4) && (dma_wbeat < w_rb_beats_r) && !wr_round_end_q;
-    assign core_o_ready  = 1'b1;   // core 输出不阻塞（与 v2 tb 的 o_ready=1 一致）
+    assign core_o_ready  = 1;   // core 输出不阻塞（与 v2 tb 的 o_ready=1 一致）
     assign ow_writedata  = core_o_data;
     assign ow_write      = core_o_valid;
 
@@ -352,59 +349,55 @@ module cnn_top_core (
                     if (as_write && (as_address == 8'h00) && as_writedata[0]) begin
                         reg_start <= 1;
                         rd_cnt <= 0;
-                        pr_read <= 1'b1;
+                        pr_read <= 1;
                         pr_address <= reg_param;
                         sr_address <= reg_scale;
                         state <= S_RD_PARAM;
                     end
                 end
 
-                //---- 读 param 块（27 字）：每笔 read 拉高 → 接受后拉低 → 等 readdatavalid ----
+                //---- 读 param 块（20 字，0..19）：每笔 read 拉高 → 接受后拉低 → 等 readdatavalid ----
+                // 跳过的索引：2=scale_offset（软件每层 memcpy 到同一 cb_scale，恒 0）、
+                // 12=out_pad、16=output_channel_block_num、20+=软件记账（input_scale/lr/...）
                 S_RD_PARAM: begin
                     if (pr_readdatavalid) begin
-                        param_buf[rd_cnt] <= pr_readdata;
                         pr_address <= pr_address + 4;
-                        if (rd_cnt == 26) begin
+                        case (rd_cnt)
+                            0: p_input_offset  <= pr_readdata;
+                            1: p_weight_offset <= pr_readdata;
+                            3: p_output_offset <= pr_readdata;
+                            4: p_in_c  <= pr_readdata;
+                            5: p_in_h  <= pr_readdata;
+                            6: p_in_w  <= pr_readdata;
+                            7: p_out_c <= pr_readdata;
+                            8: p_out_h <= pr_readdata;
+                            9: p_out_w <= pr_readdata;
+                            10: p_k     <= pr_readdata;
+                            11: p_pad   <= pr_readdata;
+                            13: p_stride<= pr_readdata;
+                            14: p_act   <= pr_readdata;
+                            15: p_type  <= pr_readdata;
+                            17: p_out_row_tile <= pr_readdata;
+                            18: p_in_row_tile  <= pr_readdata;
+                            19: p_row_block <= pr_readdata;
+                            default: ;
+                        endcase
+                        if (rd_cnt == 19) begin
                             pr_read <= 0;
                             rd_cnt <= 0;
-                            state <= S_CFG;
+                            p_in_cb <= (p_in_c  + 7) >> 3;
+                            p_out_cb <= (p_out_c + 7) >> 3;
+                            cfg_idx <= 0;
+                            rb <= 0;
+                            state <= S_PREP_L;
                         end else begin
-                            pr_read <= 1'b1;
+                            pr_read <= 1;
                             rd_cnt <= rd_cnt + 1;
                         end
                     end else if (pr_read && !pr_waitrequest) begin
                         // 命令被桥接受：拉低 read，只发这一笔，等 readdatavalid
-                        pr_read <= 1'b0;
+                        pr_read <= 0;
                     end
-                end
-
-                //---- 解析（param_buf → p_*）----
-                // param[0..3] 为 input/weight/scale/output 四区字偏移（软件
-                // conv_op.cc 每层分配并写入；FPGA 必须把 input/weight/output
-                // 偏移加进 DDR 基址，否则第 1 层起读写错位（层 0 偏移恰好全 0
-                // 掩盖了问题）。scale 区每层 memcpy 到同一 cb_scale，偏移恒 0。
-                S_CFG: begin
-                    p_input_offset  <= param_buf[0];
-                    p_weight_offset <= param_buf[1];
-                    p_output_offset <= param_buf[3];
-                    p_in_c  <= param_buf[4];
-                    p_in_h  <= param_buf[5];
-                    p_in_w  <= param_buf[6];
-                    p_out_c <= param_buf[7];
-                    p_out_h <= param_buf[8];
-                    p_out_w <= param_buf[9];
-                    p_k     <= param_buf[10];
-                    p_pad   <= param_buf[11];
-                    p_stride<= param_buf[13];
-                    p_act   <= param_buf[14];
-                    p_type  <= param_buf[15];
-                    p_out_row_tile <= param_buf[17];
-                    p_in_row_tile  <= param_buf[18];
-                    p_row_block <= param_buf[19];
-                    p_in_cb  <= (param_buf[4]  + 7) >> 3;
-                    p_out_cb <= (param_buf[7] + 7) >> 3;
-                    cfg_idx <= 0; rb <= 0;
-                    state <= S_PREP_L;   // 先预计算层级常量，再读 scale（需 p_out_c）
                 end
 
                 //---- 层级派生量预计算（每层一次，2 拍；消除 S_RUN 每拍 32×32 乘法链）----
@@ -428,12 +421,12 @@ module cnn_top_core (
                         w_rb_beats_r    <= w_cb_r * wr_slice_q;   // 16×8 乘法（原 32-bit×mux 链）
                         w_rb_beats_last_q <= w_cb_r * wr_slice_q - 24'd1;   // 末值-1 提前（拆 S_RUN 减法链）
 
-                        sr_read <= 1'b1;
+                        sr_read <= 1;
                         state <= S_RD_SCALE;
                     end
                 end
 
-                        //---- 读 scale（4×out_c 字），边读边写 core requant 数组 ----
+                //---- 读 scale（4×out_c 字），边读边写 core requant 数组 ----
                 // 数据返回拍直接把 sr_readdata 写进 core（无需 req_buf 中转：
                 // 4096 字寄存器堆爆资源；布局与软件一致：mult/bias/shift/rcl6
                 // 各 out_c 字），S_WR_CFG 只写标量 0..15。数组/标量写入顺序
@@ -462,17 +455,17 @@ module cnn_top_core (
                             state <= S_WR_CFG;
                         end else begin
                             rd_cnt <= rd_cnt + 1;
-                            sr_read <= 1'b1;
+                            sr_read <= 1;
                         end
                     end else if (sr_read && !sr_waitrequest) begin
-                        sr_read <= 1'b0;
+                        sr_read <= 0;
                     end
                 end
 
                 //---- 写 cfg（16 标量 + 4×out_c requant + base_row）----
                 //---- 写标量 cfg（0..15）；requant 数组已在 S_RD_SCALE 边读边写 ----
                 S_WR_CFG: begin
-                    core_cfg_we <= 1'b1;
+                    core_cfg_we <= 1;
                     core_cfg_sel <= 0;
                     case (cfg_idx)
                         0:  begin core_cfg_addr <= 0;  core_cfg_wdata <= p_type; end
@@ -505,7 +498,7 @@ module cnn_top_core (
 
                 //---- 行块 base_row（每行块）----
                 S_WR_BASE: begin
-                    core_cfg_we <= 1'b1;
+                    core_cfg_we <= 1;
                     core_cfg_sel <= 0; core_cfg_addr <= 15;
                     core_cfg_wdata <= rb_base_r[31:0];
                     state <= S_PREP;
@@ -547,8 +540,8 @@ module cnn_top_core (
                 // rb_out_rows_r 在 S_PREP rd_cnt==2 拍已算好（= min(tile, out_h - rb*tile)）。
                 //（与 ip/ 版一致：c36fb6d 只改了 ip/，此处同步保证仿真=上板行为）
                 S_WR_TILE: begin
-                    core_cfg_we <= 1'b1;
-                    core_cfg_sel <= 3'd0;
+                    core_cfg_we <= 1;
+                    core_cfg_sel <= 0;
                     core_cfg_addr <= 20'd11;
                     core_cfg_wdata <= {16'd0, rb_out_rows_r};   // cfg 11：本行块实际输出行数
                     state <= S_START;
@@ -559,7 +552,7 @@ module cnn_top_core (
                     lr_address <= reg_ddrin + (p_input_offset << 3) + in_rb_base_r;
                     wr_address <= reg_ddrw + (p_weight_offset << 3);
                     ow_address <= reg_ddrout + (p_output_offset << 3) + out_rb_base_r;
-                    core_start <= 1'b1;
+                    core_start <= 1;
                     state <= S_RUN;
                 end
 

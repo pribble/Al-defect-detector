@@ -88,7 +88,7 @@ cnn_rtl/
 
 **阶段 5 关键设计**：
 - requant 定点参数**软件侧预转**（量化优先、RTL 无浮点）：`conv_op.cc` 把 float scale（ws/bias/os）转成每通道 4 个 int32（mult/bias_mul/shift/rcl6）写入 scale 区，**乘后域**（`v = acc·mult + bias_mul<<8`，与 float 公式 `round(acc·ws·is/os + bias/os)` 对齐；bias/rcl6 用 q22 缩放避免 int32 溢出），公式与舍入（away-from-zero）对齐 `ref_int8.quantize_params`（随机回归 bit-exact 一致）；`intelfpga.cc` memcpy 4×out_c 字
-- `cnn_top.v` 端到端：寄存器（START=0x00/DDRIN=0x10/DDRW=0x1C/DDROUT=0x28/PARAM=0x34/SCALE=0x40）→ param 块 27 字解析 → scale 读取 → cfg 配 cnn_core_v2 → 行块循环（base_row 重定位 + DMA 跟随 core 流握手）
+- `cnn_top.v` 端到端：寄存器（START=0x00/DDRIN=0x10/DDRW=0x1C/DDROUT=0x28/PARAM=0x34/SCALE=0x40）→ param 块 20 字（0..19）边读边解析 → scale 读取 → cfg 配 cnn_core_v2 → 行块循环（base_row 重定位 + DMA 跟随 core 流握手）
 - **DMA 关键修复**（对拍暴露）：地址预取（避免组合读重复）、`lr_read/wr_read/ow_write` 组合直连 core 握手（避免 1 拍残留导致段边界偏移）、cfg 最后一项写入时序（cfg_we 提前拉低丢 rcl6 末通道）
 - **阶段 5 收尾（缺口已关闭）**：长层 1 LSB 差异根因 = **tb DDR 基址重叠**（DDRIN_BASE=0x2000 需 11552B 到 0x4D20，与 DDRW_BASE=0x4000 冲突；rb1 输入段拍 340 起读到 w.hex 数据）——tb 布局问题，非 RTL bug。基址拉开（DDRW=0x10000/DDROUT=0x20000）后 6/6 层 bit-exact；core 24 层回归仍全绿。真实软件内存由 CmaMem 连续分配不重叠，无此问题
 
