@@ -17,8 +17,8 @@
     5. 输出保持裁剪后原始分辨率; 源图灰度 (VOC depth=1), 输出灰度。
 
   [--pipeline] 线上管线原样复刻 (仅图片, 不碰 XML):
-    与 GrabImage/Consumer._smart_crop 完全一致:
-    1. find_disc_robust, 参数读 GrabImage/config.ini 的 [disc] 段。
+    与 main/Consumer._smart_crop 完全一致:
+    1. find_disc_robust, 参数读 main/config.ini 的 [disc] 段。
     2. 圆完整度 in_frame_fraction ≥ min_completeness(0.7) → 输出正方形裁剪;
        否则(圆不完整/未检出) → 保存整帧 (与线上回退行为一致, 不硬切圆)。
 
@@ -41,7 +41,7 @@ import xml.etree.ElementTree as ET
 import cv2
 import numpy as np
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../GrabImage'))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../main'))
 from disc_detect import find_disc_robust, in_frame_fraction
 
 IMAGE_EXTS = ('.jpg', '.jpeg', '.png')
@@ -319,7 +319,7 @@ def main():
 
     # 读取线上 config.ini [disc] 参数 (pipeline 模式必读; 默认模式也用于 margin 兜底)
     cfg, cfg_margin, cfg_min_comp = load_disc_cfg(
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), '../GrabImage/config.ini'))
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), '../main/config.ini'))
     margin_ratio = args.margin_ratio if args.margin_ratio is not None else cfg_margin
 
     if args.pipeline:

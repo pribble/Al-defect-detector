@@ -3,7 +3,7 @@
 > 导航：上一级 [README.md](../README.md) · 相关 [ssd_detection/](ssd_detection/README.md)、[C5TB/](C5TB/README.md)、[kernel/](kernel/README.md)
 
 DE10-Nano（Cyclone V SoC `5CSEBA6U23I7`，HPS 双核 ARM Cortex-A9 + FPGA fabric）
-是检测系统的**推理计算节点**：树莓派 GrabImage 把 300×300 灰度 raw 像素 POST 到
+是检测系统的**推理计算节点**：树莓派 main 把 300×300 灰度 raw 像素 POST 到
 `172.16.68.110:8080/predict`，这里运行 SSD MobileNet V1 量化模型，卷积计算卸载到
 FPGA 侧的自研 CNN 加速器，返回检测框 JSON。
 

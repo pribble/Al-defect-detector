@@ -15,10 +15,9 @@ import numpy as np
 sys.path.append("../MvImport")
 from MvCameraControl_class import *
 
-sys.path.append(os.path.join(os.path.dirname(__file__), '../tools'))
 from logger import setup_log
 
-logger = setup_log('detect', 'detect_server.log')
+logger = setup_log('main', 'server.log')
 
 # 相机错误码 (MVS SDK)
 CAMERA_NEED_RESTART = 2147483655

@@ -1,24 +1,31 @@
-# GrabImage/ — 检测服务（Flask :7777）
+# main/ — 主服务（Flask :7777，检测 + 机械臂分拣）
 
-> 导航：上一级 [raspberryPi5/](../README.md) · 相关 [ArmControl/](../ArmControl/README.md)、[ssd_detection/](../../de10_nano/ssd_detection/README.md)
+> 导航：上一级 [raspberryPi5/](../README.md) · 相关 [ssd_detection/](../../de10_nano/ssd_detection/README.md)
 
-缺陷检测主服务：Hikvision 工业相机实时采集（MVS SDK）→ SSIM 触发判定 → FPGA 推理
-（172.16.68.110:8080）→ 按结果触发机械臂分拣（ArmControl :8899）与蜂鸣器报警
-（/dev/BAOJING）→ 结果与图片写入 SQLite。
+树莓派上的**唯一后端服务**：由原 GrabImage（:7777 检测）与 ArmControl（:8899
+机械臂）两个服务合并而来，单进程单端口。职责：Hikvision 工业相机实时采集
+（MVS SDK）→ SSIM 触发判定 → FPGA 推理（172.16.68.110:8080）→ 按结果直接
+**本地入队**机械臂分拣任务与蜂鸣器报警（/dev/BAOJING）→ 结果与图片写入 SQLite。
+
+> 合并说明：检测结果触发机械臂不再走 `POST http://...:8899/grab` HTTP 自调用，
+> 而是 `api.py` 直接调 `arm_control.enqueue_grab(flags, delay)` 入队；前端
+> `config.json` 的 `ip`/`url` 均指向 :7777；日志统一为 `/var/logs/server.log`。
 
 ## 目录结构
 
 | 文件 | 说明 |
 |------|------|
 | `api.py` | Flask 入口 + Consumer 检测线程 + 报警/抓取触发 + cleanup 清理 |
+| `arm_control.py` | 机械臂控制（Blueprint 'arm'）：动作序列、串行队列、/grab /use_arm /get_arm |
 | `camera.py` | MVS SDK 相机封装：Producer 采集线程、FrameBuffer 单槽帧缓冲 |
 | `disc_detect.py` | 圆形铝片识别：推理前定位圆心/半径（mask/hough 两方法），供智能裁剪 |
-| `routes.py` | HTTP API（Blueprint）：配置、历史、统计、标定、视频流、调试流 |
+| `routes.py` | 检测类 HTTP API（Blueprint）：配置、历史、统计、标定、视频流、调试流 |
 | `shared.py` | 共享可变状态（api.py 与 routes.py 之间传引用） |
 | `database.py` | SQLite 线程安全封装（defect.db） |
-| `config.ini` | 传送带参数 + 缺陷中文名映射 |
+| `logger.py` | 共享日志工具（原 `tools/logger.py`，移入本目录） |
+| `config.ini` | 传送带参数 + 缺陷中文名映射 + 圆识别参数 |
 | `run.sh` | 设置 MVS 库路径后启动 api.py |
-| `detect-api.service` | systemd 单元 |
+| `detect-api.service` | systemd 单元（合并后唯一服务，原 `api.service` 已删除） |
 | `yuanshi.jpg` | SSIM 参考背景图（自动更新） |
 | `Font/platech.ttf` | 缺陷标注用中文字体 |
 | `templates/index.html` | 简单 MJPEG 页面 |
@@ -27,12 +34,70 @@
 （标注图）、`samples_crop/`（样本存档：每次推理输入图——裁剪正方形或整帧回退，
 纯净无标注，供批量采集训练样本）——均在部署时排除、不入库。
 
+## 机械臂硬件接口（arm_control.py）
+
+| 设备 | 接口 | 说明 |
+|------|------|------|
+| 机械臂 | `/dev/XIPAN`（ttyUSB0，9600 baud） | `Arm_Device`（Arm_Lib）写舵机角度 |
+| 气泵继电器 | `/dev/XIPAN`（同一串口，9600） | Modbus-RTU 指令控制吸气/释放 |
+
+气泵指令：
+
+```python
+GRIP_ON  = bytes.fromhex('A0 01 01 A2')   # 继电器吸合 → 吸气
+GRIP_OFF = bytes.fromhex('A0 01 00 A1')   # 继电器断开 → 释放
+```
+
+吸盘时序（秒）：`SUCTION_HOLD=0.6`（吸取保持）、`RELEASE_HOLD=0.4`（释放保持）、
+`LIFT_PAUSE=0.3`、`POST_RELEASE=0.3`。
+
+### 舵机角度预设（占位值 — 必须现场标定！）
+
+`arm_control.py` 顶部的角度常量是 **placeholder**，与实际物理机械臂的尺寸/安装
+位置无关，**上线前必须逐点标定**：
+
+| 常量 | 用途 | 格式 |
+|------|------|------|
+| `HOME` | 初始位（竖直收起，不遮挡相机、不干涉传送带） | `[基座, 肩, 肘, 腕, 末端]` 5 个角度（度） |
+| `PICKUP` | 吸取位：正前方传送带面 200mm | `[90, 30, 62, 0, 90]` ← 需标定 |
+| `PICKUP_LIFT` | 吸取后抬高，留旋转空间 | 需标定 |
+| `OK_ABOVE` / `OK_PLACE` | OK 区上方 / OK 区放置位（基座右转） | 需标定 |
+| `NG_ABOVE` / `NG_PLACE` | NG 区上方 / NG 区放置位（基座左转） | 需标定 |
+
+`arm_move(angles, move_time)`：5 个舵机顺序写角度（ID5 末端舵机较慢，延迟与
+1.2 倍时间补偿），随后 sleep `move_time/1000` 等待到位。
+
+### grab_task 动作序列（单次分拣）
+
+```
+0. 等待传送延迟 time 秒（铝片从相机走到吸取点；time 即 config.ini [Configuration] time）
+1. HOME → PICKUP（各 250ms）
+2. 吸盘吸取（suction_on + 0.15s 稳定）
+3. 抬起 PICKUP_LIFT（250ms）
+4. 平移：OK → OK_ABOVE → OK_PLACE / NG → NG_ABOVE → NG_PLACE
+5. 吸盘释放（suction_off + POST_RELEASE）
+6. 抬起离开放置区（250ms + LIFT_PAUSE，避免复位碰撞工件）
+7. 复位 HOME（500ms）
+```
+
+`_write_pump` 对串口写入异常自动重连（重新实例化 `serial.Serial`）。
+
+### 任务队列：单槽缓存 + 串行消费者
+
+- `enqueue_grab(flags, delay)`（api.py 检测结果直接调用）或 `POST /grab`（外部/
+  调试用）只把请求文本存入**单槽缓存** `_grab_pending`（新任务覆写旧缓存，最多
+  缓存 1 个待执行任务），并 set `_grab_ready` Event —— 立即返回，不阻塞调用方。
+- `GrabTaskConsumer`（daemon 线程）串行执行：等 Event → 取走缓存 → `clear()` →
+  **竞态恢复**（clear 前若有新任务写入则重新 set）→ `grab_task(json)` → 循环。
+- 效果：即使连续来多个请求，机械臂也**一次只动一个**，动作不交叠。
+
 ## 线程模型
 
 | 线程 | 职责 |
 |------|------|
 | **Producer**（camera.py） | 采集相机帧 → 裁 4:3 → 缩小 → 写 `frame_queue`（**FrameBuffer 单槽缓冲**，丢旧帧不阻塞）并更新 `stream_image_ref[0]`；遇 `CAMERA_NEED_RESTART`(2147483655) 自动重开相机 |
 | **Consumer**（api.py） | 读帧 → SSIM 触发状态机 → 命中后跑推理管线；异常记日志继续 |
+| **GrabTaskConsumer**（arm_control.py） | 串行执行机械臂分拣任务（单槽缓存，防并发冲突） |
 | **ThreadPoolExecutor**（shared.py） | fire-and-forget 异步执行 `trigger_grab` / `trigger_alarm`（不等待结果） |
 | **cleanup** | 保留最新 `SAVE_IMAGE_NUM=10` 张缺陷图，删除其余 |
 
@@ -139,7 +204,7 @@ COOLDOWN: 5 帧冷却，防止同一铝片重复触发
 | 触发 | 实现 |
 |------|------|
 | `trigger_alarm` | 打开 `/dev/BAOJING`（`serial.Serial` 9600 8N1），写命令 `7E FF 06 03 00 00 01 EF`；异常时置 None 下次重连 |
-| `trigger_grab(flags)` | `POST http://172.16.68.111:8899/grab`，body `{"flags": "OK"/"NG", "time": GRAB_DELAY}` |
+| `trigger_grab(flags)` | **本地入队**：`arm_control.enqueue_grab(flags, float(shared.GRAB_DELAY))`（合并前为 `POST :8899/grab`） |
 
 两者均经 `shared.thread_pool.submit()` 异步执行（NG 时先报警后 0.1s 再抓取）。
 
@@ -159,7 +224,9 @@ COOLDOWN: 5 帧冷却，防止同一铝片重复触发
 prediction_time CHAR, score CHAR, CreatedTime TIMESTAMP DEFAULT
 datetime('now','localtime'), UNIQUE(uuid, path, name))`。
 
-## HTTP API（routes.py）
+## HTTP API（:7777）
+
+检测类路由（routes.py，Blueprint 'main'）：
 
 | 路由 | 说明 |
 |------|------|
@@ -175,6 +242,16 @@ datetime('now','localtime'), UNIQUE(uuid, path, name))`。
 | `GET /debug_disc` | 圆识别调试流：**对实时帧直接跑 `find_disc_robust`**（与推理管线解耦），叠加检出圆 + 裁剪框，未检出时显示 reject 原因；现场调 [disc] 参数用 |
 | `GET /get_status` | 触发/推理链路健康状态（JSON）：trigger_state、最近触发/推理时间、Consumer 异常、基线统计——诊断"铝片经过但无推理图"的断点位置 |
 | `GET /` | Bootstrap 简单页面 |
+
+机械臂类路由（arm_control.py，Blueprint 'arm'，与检测类同端口）：
+
+| 路由 | 说明 |
+|------|------|
+| `POST /grab` | 入队抓取任务，body `{"flags": "OK"/"NG", "time": <传送延迟秒>}`（合并后检测服务改用本地 `enqueue_grab`，此路由保留供外部/调试） |
+| `POST /use_arm` | 单步手动控制：`{"id": <1-5>, "angle": <度>}` 或 `{"switch": "true"/"false"}` 气泵 |
+| `GET /get_arm?id=<1-5>` | 读取指定舵机当前角度 |
+
+CORS：api.py 统一 `CORS(app, supports_credentials=True)`，覆盖全部路由。
 
 ## 配置（config.ini）
 
@@ -208,25 +285,30 @@ method_fallback = 1    # 主方法未检出时尝试另一方法 (mask 优先背
 min_completeness = 0.7 # 圆在画面内占比低于此值回退整帧 (铝片未完整进入视野)
 center_complete = 0.9  # 完整帧门槛: ≥此值进入"横向居中"优先档, 否则按完整度选帧
 save_samples = 1       # 1=把每次推理输入图额外存档到 samples_dir (样本采集)
-samples_dir = samples_crop  # 样本存档目录 (相对 GrabImage/, 部署时排除)
+samples_dir = samples_crop  # 样本存档目录 (相对 main/, 部署时排除)
 ```
 
 > 说明：`gaussian_kernel` 可从 config 读（默认 21）；`grab_position`/
 > `release_position` 旧键已移除。`[disc]` 段为启动时读取，改动需重启服务。
+> 软处理参数在 `[detection]` 段（`use_soft_processing`、`binarize_mode`、
+> `trigger_k`、`tracking_timeout_frames` 等），同样启动时读取。
 
 ## 运行
 
 ```bash
 # 手动
-cd /opt/HaoYao/GrabImage && bash run.sh
+cd /opt/HaoYao/main && bash run.sh
 # run.sh：export LD_LIBRARY_PATH=/opt/MVS/lib/aarch64; MVCAM_COMMON_RUNENV=/opt/MVS/lib;
 #         CRYPTOGRAPHY_ALLOW_OPENSSL_102=1; python3 api.py
 
-# systemd（开机自启，Restart=always）
+# systemd（开机自启，Restart=always；合并后唯一单元，原 api.service 已废弃）
 systemctl restart detect-api.service
 journalctl -u detect-api.service -n 50 --no-pager -l
-tail -f /var/logs/detect_server.log
+tail -f /var/logs/server.log
 ```
+
+> 日志由 `logger.py`（main/logger.py）写入 `/var/logs/server.log`（10MB 自动截半）。
+> 合并前的 `detect_server.log` / `api_server.log` 已废弃。
 
 ## 故障排查：铝片经过但网页无推理图
 
@@ -242,9 +324,12 @@ tail -f /var/logs/detect_server.log
      退出条件（前景回落到基线）未满足，铝片未离开视野/皮带未动。
    - `last_inference_time` 有更新但无图片 → 推理/存图失败：看
      `last_consumer_error` 与日志（FPGA 不可达会卡 30s 超时）。
-2. 日志定位：`tail -n 200 /var/logs/detect_server.log`，找
+2. 日志定位：`tail -n 200 /var/logs/server.log`，找
    `触发进入 TRACKING` / `触发回落` / `开始检测` / `推理服务耗费` /
    `consumer thread error` 各出现在哪一层。
+
+> 机械臂排查提示：机械臂不动先确认 `/dev/XIPAN` 是否存在、`Arm_Lib` 是否安装；
+> 抓取动作错误多数是**角度未标定**所致，与吸盘时序无关。
 
 ## 已知问题（当前代码状态）
 
@@ -255,3 +340,6 @@ tail -f /var/logs/detect_server.log
 3. `_image_to_base64` 对文件已被 cleanup 删除的情况捕获异常返回空串（前端得到空
    img）——**已缓解**（不再 500，但仍有空图）。
 4. GigE 设备名解析已按 `p != 0` 过滤 null 字节（camera.py `_log_device_info`）。
+5. **机械臂角度是占位值**，必须现场标定（见上文"舵机角度预设"）。
+6. 合并后机械臂硬件（`/dev/XIPAN` + `Arm_Lib`）在服务启动时即初始化——机械臂
+   未接/异常会导致整个服务起不来（原独立服务时只影响机械臂部分）。

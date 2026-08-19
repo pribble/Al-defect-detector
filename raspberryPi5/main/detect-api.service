@@ -1,12 +1,12 @@
 [Unit]
-Description = Robot Practical Training Server Service
+Description = HaoYao Main Server (Detection + Arm Control)
 After = rc.local.service
 
 [Service]
 Type = simple
 User = root
 Group = root
-ExecStart = /bin/sh -c "sudo bash /opt/HaoYao/GrabImage/run.sh"
+ExecStart = /bin/sh -c "sudo bash /opt/HaoYao/main/run.sh"
 Restart = always
 
 [Install]

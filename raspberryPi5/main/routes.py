@@ -1,7 +1,7 @@
 """
-Flask 路由模块 — GrabImage 检测服务的 HTTP API.
+Flask 路由模块 — 主服务 (main/) 的检测类 HTTP API.
 
-所有路由通过 Blueprint 注册, 由 api.py 挂载到 Flask app.
+所有路由通过 Blueprint 注册, 由 api.py 挂载到 Flask app (与机械臂 Blueprint 'arm' 同 app).
 共享运行时状态通过 shared.py 访问.
 """
 

@@ -7,7 +7,7 @@ SSD MobileNet V1 模型（`.nb`），把卷积计算卸载到 FPGA 侧的 CNN �
 （[`C5TB/`](../C5TB/README.md)，通过 [`cmadrv`](../kernel/README.md) 驱动访问），
 以 HTTP 服务（`:8080/predict`）或离线图片检测两种模式工作。
 
-树莓派 GrabImage 把 300×300 灰度 raw 像素 POST 过来，本服务返回检测框 JSON。
+树莓派 main 把 300×300 灰度 raw 像素 POST 过来，本服务返回检测框 JSON。
 坐标在 300×300 空间，由 Pi 侧 `_draw_defect_box` 缩放回 768×512 用于标注。
 
 ## 目录结构

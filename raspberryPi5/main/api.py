@@ -1,15 +1,15 @@
 """
-缺陷检测服务 (Flask :7777)
+主服务 (Flask :7777) — 缺陷检测 + 机械臂分拣 (合并自 GrabImage :7777 与 ArmControl :8899)
 
 通过 Hikvision 工业相机实时采集图像, 调用 FPGA 推理服务进行缺陷检测,
-根据检测结果触发机械臂分拣 (OK/NG) 和蜂鸣器报警。
+根据检测结果直接入队机械臂分拣任务 (本地调用, 不再 HTTP 自调用) 和蜂鸣器报警。
+机械臂控制逻辑见 arm_control.py (Blueprint 'arm' 挂载到同一 app)。
 
-依赖: MVS SDK (MvImport), opencv-python, scikit-image (SSIM), pyserial
+依赖: MVS SDK (MvImport), opencv-python, scikit-image (SSIM), pyserial, Arm_Lib
 """
 
 import json
 import os
-import sys
 import threading
 import time
 import uuid
@@ -23,11 +23,11 @@ from flask_cors import CORS
 from PIL import Image, ImageFont, ImageDraw
 from skimage.metrics import structural_similarity as compare_ssim
 
-sys.path.append(os.path.join(os.path.dirname(__file__), '../tools'))
 from logger import setup_log
 
 from camera import frame_queue, Producer
 from disc_detect import find_disc_robust, score_mask, in_frame_fraction
+import arm_control
 import database
 import shared
 
@@ -52,7 +52,7 @@ shared.detect_image_path = detect_image_path
 # 日志与配置
 # ============================================================
 
-shared.logger = setup_log('detect', 'detect_server.log')
+shared.logger = setup_log('main', 'server.log')
 logger = shared.logger
 
 shared.config.read('config.ini', encoding='utf-8')
@@ -63,7 +63,6 @@ shared.defect_name = dict(shared.config.items('defect_name'))
 # ============================================================
 
 FPGA_URL = 'http://172.16.68.110:8080/predict'
-ARM_URL = 'http://172.16.68.111:8899/grab'
 INFERENCE_TIMEOUT = 30
 
 ALARM_PORT = "/dev/BAOJING"
@@ -137,7 +136,7 @@ DISC_MIN_COMPLETENESS = float(_disc_cfg("min_completeness", "0.7"))
 # 水平中心的帧 (原长方形图中铝片横向最中间); 低于此值按完整度打分选帧
 DISC_CENTER_COMPLETE = float(_disc_cfg("center_complete", "0.9"))
 # 样本存档: 把每次送入推理的输入图(裁剪正方形 或 整帧回退)额外保存到
-# SAMPLES_DIR (相对 GrabImage/), 供批量采集训练样本 (纯净图, 无任何标注)
+# SAMPLES_DIR (相对 main/), 供批量采集训练样本 (纯净图, 无任何标注)
 SAVE_SAMPLES = int(_disc_cfg("save_samples", "1"))
 SAMPLES_DIR_NAME = _disc_cfg("samples_dir", "samples_crop")
 SAMPLES_DIR = os.path.join(BASE_DIR, SAMPLES_DIR_NAME)
@@ -210,9 +209,8 @@ def trigger_alarm():
 # ============================================================
 
 def trigger_grab(flags: str):
-    """发送 HTTP 请求至 ArmControl 服务, 触发机械臂分拣"""
-    data = {"flags": flags, "time": shared.GRAB_DELAY}
-    requests.post(ARM_URL, json=data, timeout=INFERENCE_TIMEOUT)
+    """触发机械臂分拣 — 本地入队 (合并后不再 HTTP 自调用 arm_control)"""
+    arm_control.enqueue_grab(flags, float(shared.GRAB_DELAY))
 
 
 # ============================================================
@@ -848,6 +846,7 @@ def cleanup_loop():
 from routes import bp
 
 app.register_blueprint(bp)
+app.register_blueprint(arm_control.bp)
 
 # ============================================================
 # 入口

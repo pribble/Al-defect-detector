@@ -308,7 +308,7 @@ http.interceptors.response.use(function(r){ return r.status===200?r.data:r });
 
 function loadConfig(){ return http.get('config.json?v=4') }
 
-// Arm control APIs (port 8899, cross-origin)
+// Arm control APIs (same port 7777 after service merge, same origin)
 function apiGetArm(conf, id){
   return http.get(conf.ip+'/get_arm', {params:{id:id}})
 }

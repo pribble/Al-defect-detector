@@ -1,26 +1,26 @@
 """
-机械臂控制服务 (Flask :8899)
+机械臂控制模块 — 合并后的主服务 (main/) 中负责机械臂分拣的部分.
 
-提供机械臂运动控制和气泵吸盘操作的 HTTP API,
-接收 GrabImage 检测服务的抓取请求, 执行 OK/NG 分拣动作序列。
+原独立的 ArmControl 服务 (:8899) 已与检测服务合并为单进程单端口 (:7777):
+  - grab_task(): OK/NG 分拣动作序列 (串行队列执行, 防并发冲突)
+  - GrabTaskConsumer: 单槽缓存 + 串行消费
+  - HTTP API: /grab /use_arm /get_arm (Blueprint 'arm', 由 api.py 挂载到同一 app)
+  - enqueue_grab(): 本地入队接口, 供 api.py 的检测结果直接触发 (替代原 HTTP 自调用)
 
 依赖: Arm_Lib, pyserial
 """
 
 import json
-import os
-import sys
 import threading
 import time
 
 from Arm_Lib import Arm_Device
-from flask import Flask, request
+from flask import Blueprint, request
 import serial
 
-sys.path.append(os.path.join(os.path.dirname(__file__), '../tools'))
 from logger import setup_log
 
-logger = setup_log("arm", "api_server.log")
+logger = setup_log('main', 'server.log')
 
 # ============================================================
 # 常量
@@ -78,24 +78,12 @@ pump_serial = serial.Serial(SERIAL_PORT, SERIAL_BAUD)
 arm_device = Arm_Device()
 time.sleep(0.1)
 
-app = Flask(__name__)
-
 # 单槽任务缓存: 最多缓存1个待执行任务, 新任务覆写旧缓存
 _grab_pending = None
 _grab_lock = threading.Lock()
 _grab_ready = threading.Event()
 
-
-# ============================================================
-# CORS
-# ============================================================
-
-@app.after_request
-def _cors_headers(response):
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,POST')
-    return response
+bp = Blueprint('arm', __name__)
 
 
 # ============================================================
@@ -223,10 +211,28 @@ def grab_task(data: dict):
 
 
 # ============================================================
-# Flask 路由
+# 本地入队接口 (检测服务直接调用, 替代原 HTTP /grab 自调用)
 # ============================================================
 
-@app.route('/use_arm', methods=['POST'])
+def enqueue_grab(flags: str, delay: float = 0):
+    """把一次分拣任务写入单槽缓存并唤醒消费者, 立即返回不阻塞.
+
+    Args:
+        flags: "OK" 或 "NG"
+        delay: 传送带延迟秒数 (相机到吸取点), 即 config.ini [Configuration] time
+    """
+    global _grab_pending
+    raw = json.dumps({"flags": flags, "time": delay})
+    with _grab_lock:
+        _grab_pending = raw
+    _grab_ready.set()
+
+
+# ============================================================
+# HTTP 路由 (Blueprint 'arm')
+# ============================================================
+
+@bp.route('/use_arm', methods=['POST'])
 def use_arm():
     """单步手动控制: 指定舵机 ID/角度, 或控制气泵开关"""
     data = json.loads(request.get_data(as_text=True))
@@ -246,7 +252,7 @@ def use_arm():
     return data
 
 
-@app.route('/get_arm', methods=['GET'])
+@bp.route('/get_arm', methods=['GET'])
 def get_arm():
     """读取指定舵机的当前角度"""
     servo_id = request.args.get("id")
@@ -254,9 +260,13 @@ def get_arm():
     return str(angle)
 
 
-@app.route('/grab', methods=['POST'])
+@bp.route('/grab', methods=['POST'])
 def grab():
-    """接收抓取请求, 覆写缓存 (最多缓存1个), 异步串行执行"""
+    """接收抓取请求, 覆写缓存 (最多缓存1个), 异步串行执行.
+
+    检测服务合并后不再走 HTTP 自调用 (改用 enqueue_grab), 此路由保留供
+    外部/调试直接触发.
+    """
     global _grab_pending
     data = request.get_data(as_text=True)
     with _grab_lock:
@@ -295,6 +305,3 @@ class GrabTaskConsumer(threading.Thread):
 _consumer = GrabTaskConsumer()
 _consumer.daemon = True
 _consumer.start()
-
-if __name__ == '__main__':
-    app.run(debug=False, host='0.0.0.0', port=8899)

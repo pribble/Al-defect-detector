@@ -17,8 +17,7 @@
 ```
 README.md                    总览：数据流、硬件/网络、快速开始、部署、文档地图
 ├── raspberryPi5/README.md   树莓派平台：服务、部署、日志、前端、MVS 绑定
-│   ├── GrabImage/README.md  检测服务：线程模型、SSIM 触发、数据库 API、已知问题
-│   └── ArmControl/README.md 机械臂服务：动作序列、串行队列、角度标定
+│   └── main/README.md       主服务（检测+机械臂）：线程模型、SSIM 触发、动作序列、角度标定
 └── de10_nano/README.md      FPGA 平台：三模块职责、构建/部署流程
     ├── ssd_detection/README.md  推理服务：355 指令、调用链、I/O 名称、调试
     ├── C5TB/README.md            Quartus 工程：构建/烧录、rbf/dtb、源与生成物
@@ -56,20 +55,18 @@ cd de10_nano/ssd_detection && bash build.sh    # 3 阶段：libvnna → Paddle-L
 cd de10_nano/ssd_detection && bash upload.sh   # 增量同步 → root@172.16.68.110:/opt/paddle_frame
 
 # 日志（设备上）
-tail -f /var/logs/detect_server.log   # GrabImage
-tail -f /var/logs/api_server.log      # ArmControl
+tail -f /var/logs/server.log              # 主服务（合并后唯一日志）
 journalctl -u detect-api.service -n 50 --no-pager -l
-journalctl -u api.service -n 50 --no-pager -l
 ```
 
 ## 工作约定（容易踩坑的点）
 
 - **部署 exclude**：`deploy.sh` 的 rsync 排除 `README.md`/`CLAUDE.md`（任意层级）、
-  `defect.db`、`files/`、`original_files/`、`detect_files/`、`GrabImage/yuanshi.jpg`
+  `defect.db`、`files/`、`original_files/`、`detect_files/`、`main/yuanshi.jpg`
   等——文档改动不影响部署，但新增运行时文件需注意排除规则。
 - **config.ini 键**：`[Configuration]` 下为 `time`/`speed`/`camera_distance`，
   `[defect_name]` 为中文映射。改键要同步 `shared.py`/`routes.py` 的读取处。
-- **机械臂角度是占位值**（ArmControl/api.py 的 HOME/PICKUP 等），必须现场标定，
+- **机械臂角度是占位值**（main/arm_control.py 的 HOME/PICKUP 等），必须现场标定，
   不要当作真实参数引用。
 - **`/dev/BAOJING` 硬件类型未确认**：代码按串口打开（9600 8N1），若实际是
   input event 设备则写入无效。
