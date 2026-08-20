@@ -59,15 +59,15 @@ def change_conf():
 
 @bp.route('/get_history', methods=['GET'])
 def get_history():
-    """分页获取历史检测图片 (base64). 参数: page(1起)/page_size(默认5, 上限100)."""
+    """分页获取历史检测图片 (base64). 参数: page(1起)/page_size(默认4, 上限100)."""
     try:
         page = int(request.args.get('page', 1))
     except (TypeError, ValueError):
         page = 1
     try:
-        page_size = int(request.args.get('page_size', 5))
+        page_size = int(request.args.get('page_size', 4))
     except (TypeError, ValueError):
-        page_size = 5
+        page_size = 4
     page = max(page, 1)
     page_size = min(max(page_size, 1), 100)
 
