@@ -1,11 +1,9 @@
 """
-机械臂控制模块 — 合并后的主服务 (main/) 中负责机械臂分拣的部分.
+机械臂控制模块 — 主服务 (main/) 中负责机械臂分拣的部分.
 
-原独立的 ArmControl 服务已与检测服务合并为单进程单端口 (:8080):
-  - grab_task(): OK/NG 分拣动作序列 (串行队列执行, 防并发冲突)
-  - GrabTaskConsumer: 单槽缓存 + 串行消费
-  - HTTP API: /grab /use_arm /get_arm (Blueprint 'arm', 由 api.py 挂载到同一 app)
-  - enqueue_grab(): 本地入队接口, 供 api.py 的检测结果直接触发 (替代原 HTTP 自调用)
+  - grab_task(): OK/NG 分拣动作序列 (互斥锁串行执行, 防并发冲突)
+  - HTTP API: /use_arm /get_arm (Blueprint 'arm', 由 api.py 挂载到同一 app)
+  - enqueue_grab(): 本地触发接口, 供 api.py 的检测结果直接调用; 忙时丢弃不排队
 
 依赖: Arm_Lib, pyserial
 """
@@ -32,56 +30,50 @@ RELEASE_HOLD = 0.4  # 释放后保持, 确保气压释放完毕
 LIFT_PAUSE = 0.3  # 放置后抬起前短暂停顿, 避免带偏工件
 POST_RELEASE = 0.3  # 释放后等待吸盘完全脱离
 
-# --- 舵机角度预设 (以下为占位值, 必须现场标定) ---
-# 格式: [ID1_基座, ID2_肩, ID3_肘, ID4_腕, ID5_末端]
-
 # 初始位: 竖直收起, 不遮挡相机视野, 不干涉传送带
-HOME = [90, 50, 40, 0, 90]
+HOME = [90, 50, 40, 0]
 
 # 吸取位: 基座居中, 末端到达正前方 200mm 传送带面
-PICKUP = [90, 30, 62, 0, 90]  # ← 需标定
+PICKUP = [90, 30, 62, 0]
 
 # 吸取后抬高: 从吸取点垂直抬起, 基座保持居中, 留出旋转空间
-PICKUP_LIFT = [90, 50, 40, 0, 90]
+PICKUP_LIFT = [90, 50, 40, 0]
 
 # OK 放置位上方: 基座右转, 末端在 OK 区正上方 (安全高度)
-OK_ABOVE = [0, 50, 40, 0, 90]  # ← 需标定
+OK_ABOVE = [0, 50, 40, 0]
 
 # OK 放置位: 基座右转, 末端到达右侧区域中心 (+60, 0) 传送带面
-OK_PLACE = [0, 40, 55, 0, 90]  # ← 需标定
+OK_PLACE = [0, 40, 55, 0]
 
 # NG 放置位上方: 基座左转, 末端在 NG 区正上方 (安全高度)
-NG_ABOVE = [180, 50, 40, 0, 90]  # ← 需标定
+NG_ABOVE = [180, 50, 40, 0]
 
 # NG 放置位: 基座左转, 末端到达左侧区域中心 (-60, 0) 传送带面
-NG_PLACE = [180, 40, 55, 0, 90]  # ← 需标定
+NG_PLACE = [180, 40, 55, 0]
 
 # --- 串口 ---
 SERIAL_PORT = '/dev/XIPAN'
-SERIAL_BAUD = 9600
 
 # 气泵控制指令 (Modbus-RTU)
 GRIP_ON = bytes.fromhex('A0 01 01 A2')  # 继电器吸合 → 气泵吸气
 GRIP_OFF = bytes.fromhex('A0 01 00 A1')  # 继电器断开 → 气泵释放
 
-# --- 舵机运动参数 ---
-SLOW_SERVO_ID = 5  # 末端旋转舵机, 运动稍慢
-SLOW_SERVO_FACTOR = 1.2  # 补偿系数
-SLOW_SERVO_DELAY = 0.1  # 启动前延迟 (秒)
 FAST_SERVO_DELAY = 0.01  # 普通舵机间延迟 (秒)
 
 # ============================================================
 # 初始化
 # ============================================================
 
-pump_serial = serial.Serial(SERIAL_PORT, SERIAL_BAUD)
+try:
+    pump_serial = serial.Serial(SERIAL_PORT, 9600)
+except Exception as e:
+    pump_serial = None
+    logger.error(f"吸盘串口初始化失败：{e}", exc_info=True)
 arm_device = Arm_Device()
 time.sleep(0.1)
 
-# 单槽任务缓存: 最多缓存1个待执行任务, 新任务覆写旧缓存
-_grab_pending = None
+# 机械臂动作互斥锁: 同一时刻只执行一次分拣; 忙时新信号直接丢弃 (不缓存)
 _grab_lock = threading.Lock()
-_grab_ready = threading.Event()
 
 bp = Blueprint('arm', __name__)
 
@@ -90,27 +82,26 @@ bp = Blueprint('arm', __name__)
 # 气泵控制
 # ============================================================
 
-def _write_pump(command: bytes, label: str):
-    """向气泵继电器写入指令, 异常时自动重连串口"""
-    global pump_serial
+def _pump(status: bool):
+    """吸合/释放气泵继电器 (写串口)"""
+    if pump_serial is None:
+        return
+    command = GRIP_ON if status else GRIP_OFF
     try:
         pump_serial.write(command)
     except Exception as e:
-        logger.error('%s 错误：%s', label, e, exc_info=True)
-        pump_serial = serial.Serial(SERIAL_PORT, SERIAL_BAUD)
-        logger.info("重新实例化气泵串口")
-        pump_serial.write(command)
+        logger.error("%s错误：%s", "吸取" if status else "释放", e, exc_info=True)
 
 
 def suction_on():
     """吸盘吸取 — 打开真空气泵"""
-    _write_pump(GRIP_ON, "吸取")
+    _pump(True)
     time.sleep(SUCTION_HOLD)
 
 
 def suction_off():
     """吸盘释放 — 关闭真空气泵"""
-    _write_pump(GRIP_OFF, "释放")
+    _pump(False)
     time.sleep(RELEASE_HOLD)
 
 
@@ -119,24 +110,12 @@ def suction_off():
 # ============================================================
 
 def arm_move(angles: list, move_time: int = 500):
-    """
-    控制 5 个舵机同时运动到目标角度.
-
-    Args:
-        angles:  [ID1, ID2, ID3, ID4, ID5] 单位: 度
-        move_time: 运动时间, 单位 ms
-    """
-    for i in range(5):
+    """控制 4 个舵机同时运动到目标角度 (angles=[ID1..ID4] 度, move_time=ms)."""
+    for i in range(4):
         servo_id = i + 1
-        if servo_id == SLOW_SERVO_ID:
-            time.sleep(SLOW_SERVO_DELAY)
-            arm_device.Arm_serial_servo_write(
-                servo_id, angles[i], int(move_time * SLOW_SERVO_FACTOR)
-            )
-        else:
-            arm_device.Arm_serial_servo_write(servo_id, angles[i], move_time)
-            time.sleep(FAST_SERVO_DELAY)
-    time.sleep(move_time / 1000)
+        arm_device.Arm_serial_servo_write(servo_id, angles[i], move_time)
+        time.sleep(FAST_SERVO_DELAY)
+    time.sleep(move_time / 1000 + 0.05)
 
 
 # ============================================================
@@ -211,21 +190,25 @@ def grab_task(data: dict):
 
 
 # ============================================================
-# 本地入队接口 (检测服务直接调用, 替代原 HTTP /grab 自调用)
+# 本地触发接口 (检测服务直接调用)
 # ============================================================
 
 def enqueue_grab(flags: str, delay: float = 0):
-    """把一次分拣任务写入单槽缓存并唤醒消费者, 立即返回不阻塞.
+    """触发一次分拣 — 直接执行; 机械臂忙时丢弃本次信号 (不缓存/不排队).
 
     Args:
         flags: "OK" 或 "NG"
         delay: 传送带延迟秒数 (相机到吸取点), 即 shared.GRAB_DELAY
     """
-    global _grab_pending
-    raw = json.dumps({"flags": flags, "time": delay})
-    with _grab_lock:
-        _grab_pending = raw
-    _grab_ready.set()
+    if not _grab_lock.acquire(blocking=False):
+        logger.warning('机械臂忙, 丢弃本次分拣信号 (flags=%s)', flags)
+        return
+    try:
+        grab_task({"flags": flags, "time": delay})
+    except Exception as e:
+        logger.error("抓取任务异常: %s", e)
+    finally:
+        _grab_lock.release()
 
 
 # ============================================================
@@ -258,50 +241,3 @@ def get_arm():
     servo_id = request.args.get("id")
     angle = arm_device.Arm_serial_servo_read(int(servo_id))
     return str(angle)
-
-
-@bp.route('/grab', methods=['POST'])
-def grab():
-    """接收抓取请求, 覆写缓存 (最多缓存1个), 异步串行执行.
-
-    检测服务合并后不再走 HTTP 自调用 (改用 enqueue_grab), 此路由保留供
-    外部/调试直接触发.
-    """
-    global _grab_pending
-    data = request.get_data(as_text=True)
-    with _grab_lock:
-        _grab_pending = data
-    _grab_ready.set()
-    return data
-
-
-# ============================================================
-# 抓取任务消费者 (单槽缓存, 防并发冲突)
-# ============================================================
-
-class GrabTaskConsumer(threading.Thread):
-    """串行执行: 最多缓存1个待执行任务, 新任务覆写旧缓存"""
-
-    def run(self):
-        global _grab_pending
-        while True:
-            _grab_ready.wait()
-            with _grab_lock:
-                raw_data = _grab_pending
-                _grab_pending = None
-            # 竞态恢复: 若 clear() 前 producer 又写了缓存, 重设信号
-            _grab_ready.clear()
-            with _grab_lock:
-                if _grab_pending is not None:
-                    _grab_ready.set()
-            if raw_data:
-                try:
-                    logger.info("收到抓取请求: %s", raw_data)
-                    grab_task(json.loads(raw_data))
-                except Exception as e:
-                    logger.error("抓取任务异常: %s", e)
-
-
-_consumer = GrabTaskConsumer()
-_consumer.daemon = True
-_consumer.start()

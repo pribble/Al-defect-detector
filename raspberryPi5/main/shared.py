@@ -25,7 +25,7 @@ original_image_path = None
 detect_image_path = None
 
 # 运行时可调配置 (原 config.ini [Configuration], 由路由 /change_conf 更新)
-GRAB_DELAY = 4          # 传送带延迟 (秒) — 相机到抓取点的传输时间
+GRAB_DELAY = 2          # 传送带延迟 (秒) — 相机到抓取点的传输时间
 CAMERA_DISTANCE = 200   # 相机到抓取点的距离 (mm), 标定模式计算建议 delay 用
 
 # 标定模式状态 (路由 /calibration 控制, Consumer 读写)
@@ -43,3 +43,4 @@ disc_method = "mask"        # 定圆方法: mask | hough
 disc_cfg = None             # [disc] 段参数字典 (api.py 启动时构建)
 disc_margin_ratio = 0.10    # 裁剪黑边比例
 debug_background = None     # Consumer 的 EMA 背景模型 (float32 低分辨率, 供背景差分定圆)
+debug_mask = None           # 软处理前景掩码 (48×64, 供选帧打分)

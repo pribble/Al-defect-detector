@@ -132,12 +132,12 @@ def init_camera():
         if not _mv_ok("set trigger mode", cam.MV_CC_SetEnumValue("TriggerMode", MV_TRIGGER_MODE_OFF)):
             continue
 
-        # --- 手动固定曝光 (避免自动曝光导致 SSIM 误触) ---
+        # --- 手动固定曝光 (避免自动曝光导致误触发) ---
         cam.MV_CC_SetEnumValue("ExposureAuto", 0)  # 0=Off
         cam.MV_CC_SetEnumValue("GainAuto", 0)  # 0=Off
         cam.MV_CC_SetFloatValue("ExposureTime", 6000.0)
         cam.MV_CC_SetFloatValue("Gain", 0.0)  # 0 dB
-        logger.info("set manual exposure: ExposureTime=5000us Gain=0dB")
+        logger.info("set manual exposure: ExposureTime=6000us Gain=0dB")
 
         # --- 获取 payload, 准备取流 ---
         stParam = MVCC_INTVALUE()

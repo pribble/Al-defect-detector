@@ -138,14 +138,14 @@ body{width:100%;height:100vh;overflow:hidden}
 
           <!-- Joint selectors -->
           <div class="operation-button">
-            <span v-for="j in 5" :class="{active:active===String(j)}" @click="btnClick(String(j))">{{ j }}</span>
+            <span v-for="j in 4" :class="{active:active===String(j)}" @click="btnClick(String(j))">{{ j }}</span>
           </div>
 
           <!-- Angle slider -->
           <div class="operation-slider">
             <span class="btn" @click="step">{{ active==='1'?'左':'上' }}</span>
             <div class="slider">
-              <el-slider :max="active==='5'?270:180"
+              <el-slider :max="180"
                 v-model="radian" @change="sliderChange"></el-slider>
             </div>
             <span class="btn" @click="next">{{ active==='1'?'右':'下' }}</span>
@@ -451,8 +451,7 @@ var app = new Vue({
       apiUseArm(CONFIG, {id: this.active, angle: String(this.radian), switch: ''});
     },
     next: function(){
-      var m = this.active==='5'?270:180;
-      this.radian = Math.min(m, this.radian + 1);
+      this.radian = Math.min(180, this.radian + 1);
       apiUseArm(CONFIG, {id: this.active, angle: String(this.radian), switch: ''});
     },
     sucker: function(action){

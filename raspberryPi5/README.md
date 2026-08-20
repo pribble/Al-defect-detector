@@ -10,11 +10,11 @@
 
 | 服务 | 目录 | 端口 | 说明 |
 |------|------|------|------|
-| main（Flask） | `main/` | 8080 | 检测 + 机械臂分拣 + 前端合一：相机采集 + 前景触发 + FPGA 推理客户端 + SQLite 记录 + MJPEG 视频流 + 静态托管前端 SPA + 5-DOF 机械臂 OK/NG 分拣（队列化串行执行，串口 9600） |
+| main（Flask） | `main/` | 8080 | 检测 + 机械臂分拣 + 前端合一：相机采集 + 前景触发 + FPGA 推理客户端 + SQLite 记录 + MJPEG 视频流 + 静态托管前端 SPA + 5-DOF 机械臂 OK/NG 分拣（互斥锁串行执行，串口 9600） |
 | systemd | — | — | `detect-api.service`（唯一单元；原 `api.service` 已随服务合并废弃） |
 
 > 原 GrabImage（:7777 检测）与 ArmControl（:8899 机械臂）已合并为 `main/`
-> 单进程；检测结果触发机械臂改为本地入队（`arm_control.enqueue_grab`），不再
+> 单进程；检测结果触发机械臂改为本地触发（`arm_control.enqueue_grab`），不再
 > HTTP 自调用；前端改由 Flask 同端口静态托管，不再依赖 nginx。详见
 > [main/README.md](main/README.md)。
 

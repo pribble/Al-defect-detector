@@ -1,31 +1,9 @@
 """
-圆形铝片识别 — 推理前智能裁剪的定位模块
+圆形铝片识别 — 推理前智能裁剪的定位模块 (不依赖 api.py, 可独立测试).
 
-功能:
-  在选中帧上定位铝片圆心 (cx, cy) 与半径 r, 供 api.py 做:
-    1. 以圆心为中心的方形智能裁剪 (四周留黑边), 避免整帧 3:2 图被各向异性
-       压缩成 300×300 导致缺陷变形;
-    2. 圆心信息本身可用于确认铝片位于裁剪图中央.
-
-定圆方法 (api.py DISC_METHOD):
-  mask (默认): 二值化 → 形态学开/闭 → 最大外轮廓 → minEnclosingCircle.
-       - 传入 background(EMA 背景) 时走【背景差分】路径: 在 48×64 低分辨率下
-         absdiff → 高斯模糊 → Otsu(带下限) → 放大掩码 → 形态学。与触发链路
-         同源且低分辨率下静态高对比物体(反光斑)被背景抵消, 光照变化/皮带反光
-         下最稳, 反射高光在圆内部不影响外边界;
-       - 无 background 时走【原始帧阈值】路径 (亮铝片/暗背景场景), 兼容调试。
-  hough: Canny + HoughCircles 圆弧投票, 边缘残缺/局部反光也能定圆, 但参数
-               需要现场调整 (hough_param1/param2).
-
-回退链: find_disc_robust() 按 主方法 → 另一方法 依次尝试, method_fallback=1 时
-       全部失败才返回 None. 有 EMA 背景时 mask 只走背景差分(不回退 raw, 防止
-       锁定静止反光斑导致裁剪错位); 圆形度过滤剔除机械臂等非圆亮斑, 半径范围
-       过滤剔除超大/超小误检.
-
-调试: probe_disc() 返回 (circle, info), info["reject"] 给出未检出/被过滤的
-      原因(中文); find_disc() 是它的薄封装.
-
-依赖: opencv-python, numpy. 不依赖 api.py, 可独立测试.
+定圆方法: mask(默认, 背景差分/原始阈值) 与 hough(Canny+HoughCircles)。
+find_disc_robust() 按 主方法 → 另一方法 依次回退, method_fallback=1 时全失败才返回 None;
+probe_disc() 返回 (circle, info), info["reject"] 给出未检出原因(中文)。
 """
 
 import cv2
@@ -44,8 +22,7 @@ DEFAULTS = {
     "method_fallback": 1,         # 主方法未检出时是否尝试另一方法
 }
 
-# 圆出界检查容差 (px): 拟合噪声/低分辨率掩码块状误差会让外接圆偏大 ~12px,
-# 严格 0 容差会误拒贴边但完整的铝片; 真正部分出画面的铝片(几十 px 以上)仍会被拒
+# 圆出界检查容差 (px): 拟合噪声会让外接圆偏大, 严格 0 容差会误拒贴边铝片
 EDGE_TOL = 8
 
 
@@ -92,18 +69,10 @@ def _circle_from_binary(binary, cfg, diag):
 
 
 def _mask_circle(gray, cfg, background=None):
-    """mask 方法: 背景差分(有 background) 或 原始帧阈值(无 background).
-
-    Returns: (circle, diag). circle=(cx,cy,r) 或 None; diag 为诊断 dict
-    (threshold/area/circularity/reject), 供调试流展示失败原因.
-    """
+    """mask 方法: 有 background 走背景差分, 否则原始帧阈值; 返回 (circle, diag)."""
     diag = {"threshold": None, "area": None, "circularity": None, "reject": None}
     if background is not None:
-        # 背景差分路径: 与触发链路同源, 光照鲁棒.
-        # 关键: 差分在【低分辨率】(48×64, 与 EMA 背景同尺寸)上做——全分辨率帧与
-        # 上采样背景之间的分辨率不匹配会在静态高对比物体(反光斑/皮带边缘)上产生
-        # 虚假 diff; 低分辨率下两者对齐, 静态边缘被背景抵消, 只有真正的新前景
-        # (铝片)留下. 掩码再放大回全分辨率拟合圆.
+        # 背景差分在低分辨率(与 EMA 背景同尺寸)上做, 避免分辨率不匹配产生虚假 diff
         bh, bw = background.shape[:2]
         small = cv2.resize(gray, (bw, bh), interpolation=cv2.INTER_AREA)
         diff = cv2.absdiff(small, np.clip(background, 0, 255).astype(np.uint8))
@@ -119,14 +88,7 @@ def _mask_circle(gray, cfg, background=None):
 
 
 def _hough_circle(gray, cfg):
-    """hough 方法: Canny + HoughCircles, 取半径最大(画面主导)的候选圆.
-
-    在 1/2 分辨率下跑 HoughCircles (全分辨率约 1.8s, 1/2 约 0.45s, 随像素数近似
-    线性下降), 再把圆心/半径按缩放系数映射回全分辨率; minDist/minRadius/maxRadius
-    同步按缩放计算, 保证半径范围语义不变.
-
-    Returns: (circle, diag). circle 为全分辨率坐标.
-    """
+    """hough 方法: 在 1/2 分辨率跑 HoughCircles, 取半径最大的候选圆并映射回全分辨率."""
     diag = {"radius": None, "reject": None}
     h, w = gray.shape[:2]
     scale = 0.5
@@ -155,11 +117,7 @@ def _hough_circle(gray, cfg):
 
 
 def _sanity_check(cx, cy, r, h, w, cfg):
-    """通用合理性过滤: 半径范围 (圆心是否出画面由 probe_disc 单独检查).
-
-    注意: 不再要求圆完整落在画面内——圆完整度交由 score_mask() 选帧 + 调用方
-    (api._smart_crop) 的 min_completeness 门槛决定, 出界圆不直接判废.
-    """
+    """半径范围合理性过滤 (出界不判废, 完整度由调用方门槛决定)."""
     if r <= 0 or not np.isfinite(r):
         return False
     min_r = cfg["min_radius_ratio"] * min(h, w)
@@ -170,19 +128,11 @@ def _sanity_check(cx, cy, r, h, w, cfg):
 
 
 def probe_disc(gray, method="mask", cfg=None, background=None):
-    """
-    定位铝片圆心与半径, 并附带诊断信息.
+    """定位铝片圆心/半径, 返回 (circle, info); 失败时 info["reject"] 为原因.
 
     Args:
-        gray: 灰度帧 (BGR 会自动转灰度).
-        method: "mask" | "hough".
-        cfg: dict, 缺省用 DEFAULTS.
-        background: 可选 EMA 背景模型 (float32 低分辨率); mask 方法给定时走
-                    背景差分路径, 光照鲁棒性更强.
-
-    Returns:
-        (circle, info): circle=(cx, cy, r) 或 None;
-        info 含 threshold/area/circularity/radius 与 reject(失败原因, 中文).
+        gray: 灰度帧 (BGR 自动转灰度).
+        background: 可选 EMA 背景模型, mask 方法给定时走背景差分.
     """
     info = {"threshold": None, "area": None, "circularity": None, "radius": None, "reject": None}
     if gray is None:
@@ -206,8 +156,7 @@ def probe_disc(gray, method="mask", cfg=None, background=None):
         return None, info
 
     cx, cy, r = circle
-    # 圆心须在画面内: 残片拟合的圆心可能出画面, 按它裁剪没有意义 (圆本身可
-    # 部分出画面, 完整度由调用方 min_completeness 门槛决定)
+    # 圆心须在画面内 (残片拟合的圆心可能出画面)
     if not (-EDGE_TOL <= cx <= w + EDGE_TOL and -EDGE_TOL <= cy <= h + EDGE_TOL):
         info["reject"] = "圆心超出画面边界, 忽略"
         return None, info
@@ -220,21 +169,10 @@ def probe_disc(gray, method="mask", cfg=None, background=None):
 
 
 def find_disc_robust(gray, method="mask", cfg=None, background=None):
-    """
-    主方法 + 回退链定圆 (生产推理与视频流叠加共用的入口).
+    """主方法 + 回退链定圆 (生产与视频流共用入口).
 
-    尝试顺序 (method_fallback=1 时):
-      method=mask + 有背景: mask(背景差分) → hough
-           —— 有背景时【不回退 raw 原始阈值】: 静止高亮物体(反光斑)会被 raw
-              当成圆, 裁剪错位比不裁剪更糟; 背景差分与触发链路同源, 能触发
-              就一定能差分出铝片.
-      method=mask + 无背景: mask(原始阈值) → hough   (硬处理路径/暖机期)
-      method=hough:        hough → mask(背景差分或原始阈值)
-    全部失败返回 (None, 最后一次的 info).
-
-    Returns:
-        (circle, info): circle=(cx,cy,r) 或 None;
-        info["used_method"] 记录最终生效的方法 (如 "mask+bg").
+    有背景时 mask 不回退 raw (防静止反光斑被误当圆)。失败返回 (None, info),
+    info["used_method"] 记录最终生效方法。
     """
     merged = dict(DEFAULTS)
     if cfg:
@@ -266,22 +204,9 @@ def find_disc_robust(gray, method="mask", cfg=None, background=None):
 
 
 def score_mask(mask, cfg=None):
-    """
-    在低分辨率前景掩码上拟合圆并计算"圆完整度"打分 (Consumer 逐帧选帧用).
+    """在低分辨率前景掩码上拟合圆, 返回 (score, in_frac, circle).
 
-    打分 S = 拟合半径 r × (圆落在画面内的面积占比):
-      - 完整居中的圆: S ≈ r × 1.0 (最大)
-      - 刚进入的残片: 拟合圆半径小(可见<一半) 或 占比低(可见≥一半但出界) → S 小
-      - 反光在圆内部不改变外边界、在圆外部会被圆形度过滤 → 打分抗反光
-
-    Args:
-        mask: 前景掩码 (48×64, 与 EMA 背景同分辨率; 即软处理 stages["mask"]).
-        cfg: dict, 缺省用 DEFAULTS.
-
-    Returns:
-        (score, in_frac, circle_mask_scale):
-        score = r × in_frac (掩码尺度); in_frac = 圆在画面内占比 (0~1);
-        circle_mask_scale = (cx, cy, r) 掩码坐标, 无有效圆时为 None.
+    score = r × in_frac (圆在画面内占比), 抗反光; 无有效圆时返回 (0, 0, None).
     """
     if mask is None or mask.size == 0:
         return 0.0, 0.0, None
@@ -325,11 +250,7 @@ def in_frame_fraction(circle, h, w):
 
 
 def crop_box(circle, h, w, margin_ratio):
-    """以圆心为中心计算正方形裁剪框 (四周留黑边), 返回 (x0, y0, side).
-
-    api.Consumer._smart_crop 与 routes._disc_frame_overlay 共用, 避免两处重复
-    计算裁剪框; side 越界钳制到帧内, 圆心越界时窗口贴边.
-    """
+    """以圆心为中心计算正方形裁剪框 (四周留黑边), 越界钳制到帧内."""
     cx, cy, r = circle
     margin = int(r * margin_ratio)
     side = min(int(2 * (r + margin)), w, h)

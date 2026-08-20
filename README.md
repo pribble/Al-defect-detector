@@ -14,7 +14,7 @@ Hikvision Camera ──frame_queue──> main (:8080, 树莓派)
                                        │
                                        ├── POST /predict ──> DE10-Nano FPGA (172.16.68.110:8080)
                                        │                         └── ssd_detection（Paddle Lite + CNN 加速器）
-                                       ├── 本地入队 enqueue_grab ──> /dev/XIPAN（5-DOF 机械臂）
+                                       ├── 本地触发 enqueue_grab ──> /dev/XIPAN（5-DOF 机械臂）
                                        ├── SQLite (defect.db)
                                        └── MJPEG /img_disc + 静态前端 SPA ──> 浏览器 (同源 :8080)
 ```

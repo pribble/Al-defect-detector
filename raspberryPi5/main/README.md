@@ -4,11 +4,11 @@
 
 树莓派上的**唯一后端服务**（单进程单端口 :8080）：Hikvision 工业相机实时采集
 （MVS SDK）→ 前景触发判定（背景差分）→ FPGA 推理（172.16.68.110:8080）→ 按结果
-**本地入队**机械臂分拣任务与蜂鸣器报警（/dev/BAOJING）→ 结果与图片写入 SQLite；
+**本地触发**机械臂分拣任务与蜂鸣器报警（/dev/BAOJING）→ 结果与图片写入 SQLite；
 前端 SPA（`../frontend/`）由本服务同端口静态托管。
 
 > 说明：检测结果触发机械臂不再走 HTTP 自调用，而是 `api.py` 直接调
-> `arm_control.enqueue_grab(flags, delay)` 入队；前端 `config.json` 的 `ip`/`url`
+> `arm_control.enqueue_grab(flags, delay)` 直接触发；前端 `config.json` 的 `ip`/`url`
 > 为空字符串（同源相对路径）；配置不再用 config.ini，全部内联到 Python 源码。
 
 ## 目录结构
@@ -16,7 +16,7 @@
 | 文件 | 说明 |
 |------|------|
 | `api.py` | Flask 入口 + Consumer 检测线程 + 报警/抓取触发 + cleanup 清理 |
-| `arm_control.py` | 机械臂控制（Blueprint 'arm'）：动作序列、串行队列、/grab /use_arm /get_arm |
+| `arm_control.py` | 机械臂控制（Blueprint 'arm'）：动作序列、互斥锁串行、/use_arm /get_arm |
 | `camera.py` | MVS SDK 相机封装：Producer 采集线程、FrameBuffer 单槽帧缓冲 |
 | `disc_detect.py` | 圆形铝片识别：推理前定位圆心/半径（mask/hough 两方法），供智能裁剪 |
 | `routes.py` | 检测类 HTTP API（Blueprint）：配置、历史、统计、标定、视频流、主页 |
@@ -78,14 +78,13 @@ GRIP_OFF = bytes.fromhex('A0 01 00 A1')   # 继电器断开 → 释放
 
 `_write_pump` 对串口写入异常自动重连（重新实例化 `serial.Serial`）。
 
-### 任务队列：单槽缓存 + 串行消费者
+### 分拣触发（互斥锁串行，不缓存）
 
-- `enqueue_grab(flags, delay)`（api.py 检测结果直接调用）或 `POST /grab`（外部/
-  调试用）只把请求文本存入**单槽缓存** `_grab_pending`（新任务覆写旧缓存，最多
-  缓存 1 个待执行任务），并 set `_grab_ready` Event —— 立即返回，不阻塞调用方。
-- `GrabTaskConsumer`（daemon 线程）串行执行：等 Event → 取走缓存 → `clear()` →
-  **竞态恢复**（clear 前若有新任务写入则重新 set）→ `grab_task(json)` → 循环。
-- 效果：即使连续来多个请求，机械臂也**一次只动一个**，动作不交叠。
+- `enqueue_grab(flags, delay)`（api.py 检测结果直接调用）直接执行 `grab_task()`，
+  用 `_grab_lock`（`threading.Lock`）保证同一时刻只有一次分拣动作。
+- 忙时（锁已被占用）新信号直接**丢弃并记 warning**——不缓存、不排队：铝片已越过
+  吸取点时再补抓没有意义。
+- 效果：机械臂**一次只动一个**，动作不交叠，且不会积压过期的抓取信号。
 
 ## 线程模型
 
@@ -93,8 +92,7 @@ GRIP_OFF = bytes.fromhex('A0 01 00 A1')   # 继电器断开 → 释放
 |------|------|
 | **Producer**（camera.py） | 采集相机帧 → 裁 4:3 → 缩小 → 写 `frame_queue`（**FrameBuffer 单槽缓冲**，丢旧帧不阻塞）并更新 `stream_image_ref[0]`；遇 `CAMERA_NEED_RESTART`(2147483655) 自动重开相机 |
 | **Consumer**（api.py） | 读帧 → 前景触发状态机 → 命中后跑推理管线；异常记日志继续 |
-| **GrabTaskConsumer**（arm_control.py） | 串行执行机械臂分拣任务（单槽缓存，防并发冲突） |
-| **ThreadPoolExecutor**（shared.py） | fire-and-forget 异步执行 `trigger_grab` / `trigger_alarm`（不等待结果） |
+| **ThreadPoolExecutor**（shared.py） | fire-and-forget 异步执行 `trigger_grab`（直接跑机械臂分拣动作序列）/ `trigger_alarm`（不等待结果） |
 | **cleanup** | 保留最新 `SAVE_IMAGE_NUM=10` 张缺陷图，删除其余 |
 
 相机初始化要点（camera.py）：手动固定曝光（`ExposureAuto=0`、`GainAuto=0`、
@@ -131,7 +129,7 @@ IDLE:     fg_ratio > 基线mean + trigger_k×std 连续 3 帧 → TRACKING
 TRACKING: 每帧对 64×48 前景掩码拟合圆, 打分维护【最佳帧】
           前景回落（< 基线）连续 3 帧 → 取最佳帧跑推理 → COOLDOWN
           [超时保护] 超过 tracking_timeout_frames 帧仍不回落 → 取最佳帧强制推理 (防卡死)
-COOLDOWN: 5 帧冷却，防止同一铝片重复触发
+COOLDOWN: 0.5 秒冷却，防止同一铝片重复触发
 ```
 
 > 说明：推理帧的选帧依据为**两阶段排序键**——每帧对 64×48 前景掩码拟合圆：
@@ -197,7 +195,7 @@ COOLDOWN: 5 帧冷却，防止同一铝片重复触发
 | 触发 | 实现 |
 |------|------|
 | `trigger_alarm` | 打开 `/dev/BAOJING`（`serial.Serial` 9600 8N1），写命令 `7E FF 06 03 00 00 01 EF`；异常时置 None 下次重连 |
-| `trigger_grab(flags)` | **本地入队**：`arm_control.enqueue_grab(flags, float(shared.GRAB_DELAY))` |
+| `trigger_grab(flags)` | **本地触发**：`arm_control.enqueue_grab(flags, float(shared.GRAB_DELAY))`（互斥锁串行，忙时丢弃） |
 
 两者均经 `shared.thread_pool.submit()` 异步执行（NG 时先报警后 0.1s 再抓取）。
 
@@ -234,7 +232,6 @@ datetime('now','localtime'), UNIQUE(uuid, path, name))`。
 
 | 路由 | 说明 |
 |------|------|
-| `POST /grab` | 入队抓取任务，body `{"flags": "OK"/"NG", "time": <传送延迟秒>}`（检测服务改用本地 `enqueue_grab`，此路由保留供外部/调试） |
 | `POST /use_arm` | 单步手动控制：`{"id": <1-5>, "angle": <度>}` 或 `{"switch": "true"/"false"}` 气泵 |
 | `GET /get_arm?id=<1-5>` | 读取指定舵机当前角度 |
 

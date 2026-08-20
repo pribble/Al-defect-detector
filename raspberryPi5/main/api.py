@@ -2,7 +2,7 @@
 主服务 (Flask :8080) — 缺陷检测 + 机械臂分拣
 
 通过 Hikvision 工业相机实时采集图像, 调用 FPGA 推理服务进行缺陷检测,
-根据检测结果直接入队机械臂分拣任务 (本地调用) 和蜂鸣器报警。
+根据检测结果直接触发机械臂分拣任务 (本地调用) 和蜂鸣器报警。
 机械臂控制逻辑见 arm_control.py (Blueprint 'arm' 挂载到同一 app)。
 前端监控 SPA (frontend/) 由本服务静态托管, 与 API/视频流同端口同源。
 
@@ -63,17 +63,14 @@ FPGA_URL = 'http://172.16.68.110:8080/predict'
 INFERENCE_TIMEOUT = 30
 
 ALARM_PORT = "/dev/BAOJING"
-ALARM_BAUD = 9600
-ALARM_DATA_BITS = 8
-ALARM_STOP_BITS = 1
 ALARM_CMD = bytes.fromhex('7E FF 06 03 00 00 01 EF')
 
-SAVE_IMAGE_NUM = 10
-CLEANUP_INTERVAL = 60  # 周期清理间隔 (秒): 防止运行期间 files/ 被缺陷图占满磁盘
+SAVE_IMAGE_NUM = 100
+CLEANUP_INTERVAL = 600  # 周期清理间隔 (秒): 防止运行期间 files/ 被缺陷图占满磁盘
 SSIM_WIDTH = 64   # 处理用低分辨率 (宽)
 SSIM_HEIGHT = 48  # 处理用低分辨率 (高)
 
-TRIGGER_COOLDOWN = 5  # 触发后冷却帧数, 防同一铝片重复触
+TRIGGER_COOLDOWN_SECONDS = 0.5  # 触发后冷却时间 (秒), 防同一铝片重复触发
 
 LABEL_NORMAL = 'zheng_chang'
 
@@ -95,17 +92,11 @@ BASELINE_WINDOW = 60
 TRIGGER_K = 3.0
 TRIGGER_CONFIRM = 3
 CAL_RATIO_THRESHOLD = 0.01
-# TRACKING 超时帧数: 进入跟踪后超过该帧数仍不回落, 强制取中间帧推理 (防铝片停
-# 留在视野内导致状态机永久卡死、后续铝片不再触发)
+# TRACKING 超时帧数: 超过后强制取最佳帧推理, 防铝片停留导致状态机卡死
 TRACKING_TIMEOUT_FRAMES = 180
-# 灯光/环境突变保护阈值: 帧均值相对背景均值偏差超过此值 且 fg_ratio 超过
-# LIGHT_CHANGE_FG_RATIO 时判定环境变化(关灯/换灯)——背景重置为当前帧并清空基线
-# 重新暖机, 状态机强制回 IDLE; THRESHOLD=0 关闭
+# 灯光/环境突变保护: 帧均值偏离背景超过此值且 fg_ratio 超过上限门时重置背景
 LIGHT_CHANGE_THRESHOLD = 40.0
-# fg_ratio 上限门 (区分"局部变亮"与"全局变亮"): 铝片圆面积最多约占画面 ~45%
-# (fg_ratio ≤ ~0.5, 实测完整时 ~0.42), 关灯/大幅换灯时 diff 覆盖全画面
-# (fg_ratio ≥ ~0.7) —— fg_ratio 必须超过此值才判定灯光突变, 防铝片经过被误判
-LIGHT_CHANGE_FG_RATIO = 0.6
+LIGHT_CHANGE_FG_RATIO = 0.6  # fg_ratio 上限门: 区分铝片局部变亮与灯光全局变亮
 
 # ---- 圆形铝片识别 + 智能裁剪参数 (原 config.ini [disc], 现改为 Python 直写; 改动后需重启服务) ----
 
@@ -113,17 +104,9 @@ DISC_ENABLED = 1
 DISC_METHOD = "mask"
 DISC_MARGIN_RATIO = 0.10
 DISC_DRAW_OVERLAY = 1
-# 裁剪最低完整度: 检出的圆在画面内占比低于此值时回退整帧 (低于该值说明铝片
-# 未完整进入视野, 硬裁会切掉铝片)
-DISC_MIN_COMPLETENESS = 0.7
-# 横向居中优先级: 圆完整度 ≥ 此值的帧进入"完整帧"档, 档内选圆心最接近画面
-# 水平中心的帧 (原长方形图中铝片横向最中间); 低于此值按完整度打分选帧
-DISC_CENTER_COMPLETE = 0.9
-# 圆半径相对帧短边占比下限 (选帧软降级用): 检出圆 r/帧短边 低于此值的帧在
-# 选帧时降为档 0 —— 排在所有达标帧之后, 档内仍按完整度互相比较 (不淘汰,
-# 保证 TRACKING 超时强制推理时仍有相对最好的候选, 不额外回退整帧); 用于过滤
-# "铝片刚进入/偏远"导致的过小圆帧, 正常完整铝片 (r/帧短边≈0.24) 不受影响
-DISC_MIN_RADIUS_RATIO_FRAME = 0.18
+DISC_MIN_COMPLETENESS = 0.7         # 圆在画面内占比低于此值回退整帧
+DISC_CENTER_COMPLETE = 0.9          # ≥此值进入"完整帧"档, 档内比横向居中
+DISC_MIN_RADIUS_RATIO_FRAME = 0.18  # 圆半径/帧短边低于此值的帧选帧软降级(档0)
 DISC_CFG = {
     "min_radius_ratio": 0.15,
     "max_radius_ratio": 0.50,
@@ -151,11 +134,7 @@ CORS(app, supports_credentials=True)
 
 
 def _submit_pool(fn, *args):
-    """有界提交到线程池: 任务积压超过阈值时丢弃本次任务并告警.
-
-    机械臂/报警请求在目标服务无响应时会挂起 30s, 若铝片持续触发, 无界队列的
-    任务只进不出会吃内存. 丢弃的是"补救性"动作 (抓取/报警), 不丢也不致命.
-    """
+    """提交到线程池; 积压超阈值时丢弃本次任务 (抓取/报警属补救动作, 丢弃无碍)."""
     try:
         qsize = shared.thread_pool._work_queue.qsize()
     except Exception:
@@ -174,7 +153,7 @@ def trigger_alarm():
     """触发蜂鸣器报警 (异步调用, 异常时重连串口)"""
     global alarm_serial
     if alarm_serial is None:
-        alarm_serial = serial.Serial(ALARM_PORT, ALARM_BAUD, ALARM_DATA_BITS, stopbits=ALARM_STOP_BITS)
+        alarm_serial = serial.Serial(ALARM_PORT, 9600, 8, stopbits=1)
     try:
         alarm_serial.write(ALARM_CMD)
     except Exception as e:
@@ -187,7 +166,7 @@ def trigger_alarm():
 # ============================================================
 
 def trigger_grab(flags: str):
-    """触发机械臂分拣 — 本地入队 (合并后不再 HTTP 自调用 arm_control)"""
+    """触发机械臂分拣 — 直接执行 (互斥锁串行, 忙时丢弃)"""
     arm_control.enqueue_grab(flags, float(shared.GRAB_DELAY))
 
 
@@ -254,7 +233,7 @@ class Consumer(threading.Thread):
     def __init__(self):
         super().__init__()
         self._state = 0  # 0=IDLE, 1=TRACKING, 2=COOLDOWN
-        self._cooldown = 0  # 冷却倒计帧数
+        self._cooldown_until = 0.0  # 冷却截止时间戳 (time.time(), 秒)
         self._tracking_count = 0  # 跟踪周期帧总数
         self._best_key = None  # 跟踪周期内"选帧排序键"最优值 (两阶段: 完整帧内比居中, 否则比完整度)
         self._best_frame = None  # 排序键最优帧, 推理时取它 (铝片最完整且横向居中的一帧)
@@ -296,27 +275,16 @@ class Consumer(threading.Thread):
         enter, exit_cond, ratio = self._soft_detect(gray)
         self._calibration_update(ratio, CAL_RATIO_THRESHOLD)
 
-        # 供 /img_disc 视频流定圆使用: EMA 背景模型
-        shared.debug_background = getattr(self, '_background', None)
-
-        # 圆完整度打分 + 选帧排序键:
-        #   完整帧 (in_frac ≥ DISC_CENTER_COMPLETE): 键 = (2, -|圆心x-画面宽/2|)
-        #      —— 完整帧档内选"原长方形图中铝片横向最中间"的帧
-        #   不完整帧: 键 = (1, r × 圆在画面内占比)  —— 按完整度兜底
-        frame_score, in_frac, circ = score_mask(getattr(shared, 'debug_mask', None), DISC_CFG)
+        shared.debug_background = self._background  # 供 /img_disc 视频流定圆
+        frame_score, in_frac, circ = score_mask(shared.debug_mask, DISC_CFG)
         frame_key = self._selection_key(frame_score, in_frac, circ, image)
 
         self._run_state_machine(enter, exit_cond, ratio, image, frame_key)
 
     def _selection_key(self, score, in_frac, circ, image):
-        """两阶段选帧排序键: 完整帧优先, 完整帧内比横向居中; 否则按完整度.
-
-        软降级门槛: 检出圆半径相对帧短边占比 < DISC_MIN_RADIUS_RATIO_FRAME 的
-        帧降为档 0 (排在任何达标帧之后, 档内仍按完整度互相比较)——不淘汰该帧,
-        保证 TRACKING 超时强制推理时仍有相对最好的候选, 不额外回退整帧.
-        """
+        """两阶段选帧排序键: 完整帧内比横向居中(2), 否则按完整度(1); 过小圆降档(0)."""
         h, w = image.shape[:2]
-        mask = getattr(shared, 'debug_mask', None)
+        mask = shared.debug_mask
         mask_h = mask.shape[0] if mask is not None else SSIM_HEIGHT
         mask_w = mask.shape[1] if mask is not None else SSIM_WIDTH
         if circ is not None:
@@ -324,7 +292,7 @@ class Consumer(threading.Thread):
             if r_full / min(h, w) < DISC_MIN_RADIUS_RATIO_FRAME:
                 return (0, score)
         if in_frac >= DISC_CENTER_COMPLETE and circ is not None:
-            cx_full = circ[0] * (w / mask_w)  # 掩码坐标 → 全分辨率
+            cx_full = circ[0] * (w / mask_w)
             return (2, -abs(cx_full - w / 2.0))
         return (1, score)
 
@@ -349,12 +317,7 @@ class Consumer(threading.Thread):
         return fg_ratio > self._baseline_mean + TRIGGER_K * self._baseline_std
 
     def _update_background(self, gray, fg_ratio):
-        """暖机期无条件更新; 稳定期只在无目标时更新, 避免吸收铝片/高光.
-
-        灯光/环境突变保护 (LIGHT_CHANGE_THRESHOLD): 帧均值相对背景均值偏差超过
-        阈值时判定环境变化——背景重置为当前帧、清空 fg_ratio 基线重新暖机, 并
-        强制状态机回 IDLE 丢弃进行中的跟踪 (防旧背景永久"有目标"导致一直触发)。
-        """
+        """暖机期无条件更新; 稳定期仅在无目标时更新 (避免把铝片/高光吸收进背景)."""
         if self._background is not None and LIGHT_CHANGE_THRESHOLD > 0:
             delta = abs(float(gray.mean()) - float(self._background.mean()))
             # fg_ratio 上限门: 铝片经过只让局部变亮 (fg_ratio ≤ ~0.5), 关灯/大幅
@@ -417,11 +380,7 @@ class Consumer(threading.Thread):
         self._cal_last_ratio = ratio
 
     def _run_state_machine(self, enter, exit_cond, ratio, image, frame_key):
-        """统一触发状态机: 0=IDLE → 1=TRACKING → 2=COOLDOWN.
-
-        frame_key: 当前帧的"选帧排序键" (见 _selection_key) — 完整帧内比横向居中,
-        否则比完整度; 维护排序键最大的帧作为推理帧.
-        """
+        """触发状态机: IDLE → TRACKING → COOLDOWN, 维护排序键最优帧作为推理帧."""
         if self._state == 0:  # IDLE — 等待铝片进入
             if enter:
                 self._buf += 1
@@ -449,7 +408,7 @@ class Consumer(threading.Thread):
                     )
                     self._run_inference_pipeline()
                     self._state = 2
-                    self._cooldown = TRIGGER_COOLDOWN
+                    self._cooldown_until = time.time() + TRIGGER_COOLDOWN_SECONDS
             else:
                 self._buf = 0
                 self._tracking_count += 1
@@ -463,29 +422,18 @@ class Consumer(threading.Thread):
                     logger.warning('TRACKING 超时(%d帧), 取最佳帧推理', self._tracking_count)
                     self._run_inference_pipeline()
                     self._state = 2
-                    self._cooldown = TRIGGER_COOLDOWN
+                    self._cooldown_until = time.time() + TRIGGER_COOLDOWN_SECONDS
 
-        elif self._state == 2:  # COOLDOWN — 冷却
-            self._cooldown -= 1
-            if self._cooldown <= 0:
+        elif self._state == 2:  # COOLDOWN — 按时间冷却
+            if time.time() >= self._cooldown_until:
                 self._state = 0
 
     # ---- 圆形铝片识别 + 智能裁剪 ----
 
     def _smart_crop(self, image):
-        """
-        定位铝片圆心, 以其为中心裁正方形(四周留黑边), 返回 (裁剪图, (x0, y0, side)).
-        未启用 / 未检出圆 / 裁剪过小时返回 (None, None), 由调用方回退整帧缩放.
+        """定位铝片圆心并居中裁正方形(四周留黑边), 避免整帧 3:2 图被压成 300×300 变形.
 
-        定圆: find_disc_robust() 主方法(默认 mask) → 回退链(有背景时 hough;
-        无背景时 mask 原始阈值 → hough), 优先使用 Consumer 的 EMA 背景做背景
-        差分 (与触发链路同源, 光照鲁棒).
-
-        理由: 整帧 768×512 (3:2) 被各向异性压缩成 300×300 会挤压缺陷形状;
-        以铝片为中心裁方形再等比缩放, 内容不失真, 黑边也减少了背景干扰.
-
-        注意: 整个方法被 try/except 包裹——即使定圆代码出意外, 也绝不中断
-        推理/存图链路 (宁可靠后回退整帧, 不可让铝片经过时丢图).
+        未启用/未检出/裁剪过小时返回 (None, None), 调用方回退整帧缩放; 全程 try/except 保护.
         """
         shared.last_disc = None
         shared.last_crop_box = None
@@ -524,12 +472,7 @@ class Consumer(threading.Thread):
             return None, None
 
     def _draw_disc_overlay(self, image, force_crop_box=False):
-        """在标注图上叠加绿色圆与黄色裁剪框 (现场调参/验证用, draw_overlay 控制).
-
-        在【全帧】上绘制 (坐标是全帧坐标); force_crop_box=True 时强制画黄裁剪框
-        (供"未裁剪全帧"展示用), 否则裁剪成功 (_record_box 已设) 时不画 (黄框即
-        记录图边界, 无意义).
-        """
+        """在全帧标注图上叠加绿色圆与黄色裁剪框 (draw_overlay 控制)."""
         if not DISC_DRAW_OVERLAY:
             return image
         disc = shared.last_disc
@@ -562,23 +505,16 @@ class Consumer(threading.Thread):
         uid = str(uuid.uuid1())
         file_name = os.path.join(FILES_DIR, '{}.jpg'.format(uid))
 
-        # 圆形铝片识别 + 智能裁剪: 以铝片中心裁正方形(四周留黑边), 避免整帧
-        # 3:2 图被各向异性压缩成 300×300 导致缺陷变形
-        # 圆门: 未检出圆(无绿圆框)时跳过推理/抓取/存图——防背景更换/反光等误触发;
-        # 真实铝片定圆失败也会被跳过 (宁漏检不误抓), 由日志区分
+        # 圆门: 未检出铝片圆则跳过推理/抓取/存图 (防误触发; 宁漏检不误抓)
         inference_image, self._crop_box = self._smart_crop(annotated_image)
         if inference_image is None:
             logger.warning('圆门: 未检出铝片圆, 跳过推理/抓取/存图')
             return
-        # 裁剪成功: 保存的记录图(original.jpg / files/ / detect.jpg)同样用
-        # 以铝片为中心的方形图, 保证"提取的图片中铝片在中间"
         self._record_box = self._crop_box
 
-        # Resize to 300×300 for FPGA inference (SSD MobileNet input size)
-        # 裁剪图/整帧均为正方形缩放: 缩小用 INTER_AREA 防锯齿, 放大用 INTER_LINEAR
+        # 300×300 灰度 raw 送 FPGA (SSD MobileNet 输入)
         interp = cv2.INTER_AREA if inference_image.shape[0] > 300 else cv2.INTER_LINEAR
         inference_image = cv2.resize(inference_image, (300, 300), interpolation=interp)
-        # Send raw grayscale pixels — no JPEG encode/decode overhead
         image_bytes = inference_image.tobytes()
 
         inference_start_time = time.time()
@@ -591,17 +527,12 @@ class Consumer(threading.Thread):
 
         # action (FPGA 判定): NONE=无任何检测框; NG=检出缺陷类; OK=检出 zheng_chang
         action = inference_result.get('action')
-        if action == 'NONE':
-            # 推理无检测框 (模型漏检/无目标): 触发/选帧/定圆/推理链路均正常, 图本身
-            # 合格——按正常(OK)处理: OK 抓取 + 正常存图写库 + 前端历史展示 (不报警;
-            # 取舍: 若缺陷被模型漏检也会被放行, 宁丢缺陷不漏片)
-            logger.info('推理无检测框 (len=0), 按正常(OK)处理')
-            _submit_pool(trigger_grab, "OK")
-            self._save_normal_result(uid, file_name, annotated_image, original_image)
-            return
+
         if action == 'NG':
             self._handle_defect(inference_result, uid, file_name, annotated_image, original_image)
         else:
+            if action == 'NONE':
+                logger.info('推理无检测框 (len=0), 按正常(OK)处理')
             _submit_pool(trigger_grab, "OK")
             self._save_normal_result(uid, file_name, annotated_image, original_image)
 
@@ -692,7 +623,7 @@ def cleanup():
         'distinct path', 'defect_list',
         "where path is not null and path != 'detect.jpg' order by id DESC limit {}".format(SAVE_IMAGE_NUM)
     )
-    keep_files = [row[0] for row in recent_rows]
+    keep_files = {row[0] for row in recent_rows}
     for f in os.listdir(FILES_DIR):
         full_path = os.path.join(FILES_DIR, f)
         if full_path not in keep_files:

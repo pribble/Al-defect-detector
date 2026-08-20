@@ -22,6 +22,9 @@ bp = Blueprint('main', __name__)
 
 _FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'frontend')
 
+# 历史/统计查询公共条件: 只统计有实体图片的记录 (排除 detect.jpg 标记行)
+_BASE_COND = "where path is not null and path != 'detect.jpg'"
+
 
 # ============================================================
 # 路由 — 配置
@@ -40,16 +43,12 @@ def get_conf():
 
 @bp.route('/change_conf', methods=['POST'])
 def change_conf():
-    """更新运行时可调配置 (内存直改, 不再写 config.ini)"""
+    """更新运行时可调配置 (内存直改)"""
     data = json.loads(request.get_data(as_text=True))
-
-    value = data.get('time', '')
-    if len(value) > 0:
-        shared.GRAB_DELAY = value
-    value = data.get('camera_distance', '')
-    if len(value) > 0:
-        shared.CAMERA_DISTANCE = value
-
+    if data.get('time'):
+        shared.GRAB_DELAY = data['time']
+    if data.get('camera_distance'):
+        shared.CAMERA_DISTANCE = data['camera_distance']
     return data
 
 
@@ -71,16 +70,12 @@ def get_history():
     page = max(page, 1)
     page_size = min(max(page_size, 1), 100)
 
-    total = database.query_value(
-        'count(distinct path)', 'defect_list',
-        "where path is not null and path != 'detect.jpg'"
-    ) or 0
+    total = database.query_value('count(distinct path)', 'defect_list', _BASE_COND) or 0
     total_pages = (total + page_size - 1) // page_size if total else 0
 
     recent_paths = database.query(
         'path', 'defect_list',
-        "where path is not null and path != 'detect.jpg'"
-        " group by path order by max(id) DESC limit ? offset ?",
+        _BASE_COND + " group by path order by max(id) DESC limit ? offset ?",
         params=(page_size, (page - 1) * page_size)
     )
     image_files = []
@@ -133,50 +128,35 @@ def get_detect_pic():
 # 路由 — 统计
 # ============================================================
 
+def _counts_by_name(condition):
+    """按缺陷类型统计数量, 返回前端饼图/柱图需要的 JSON"""
+    rows = database.query('name, count(1) AS counts', 'defect_list', condition + " group by name")
+    return json.dumps([[{r[0]: r[1]} for r in rows]])
+
+
 @bp.route('/get_this_month_num', methods=['GET'])
 def get_this_month_num():
     """按缺陷类型统计当月总数"""
-    defect_counts = database.query(
-        'name, count(1) AS counts', 'defect_list',
-        "where path is not null and path != 'detect.jpg'"
-        " and DATE(CreatedTime) >= DATE('now', 'start of month', '+1 seconds')"
-        " group by name"
-    )
-    return json.dumps([[{row[0]: row[1]} for row in defect_counts]])
+    return _counts_by_name(_BASE_COND + " and DATE(CreatedTime) >= DATE('now', 'start of month', '+1 seconds')")
 
 
 @bp.route('/get_today_num', methods=['GET'])
 def get_today_num():
     """按缺陷类型统计当日总数"""
-    defect_counts = database.query(
-        'name, count(1) AS counts', 'defect_list',
-        "where path is not null and path != 'detect.jpg'"
-        " and CreatedTime >= datetime('now', 'start of day')"
-        " group by name"
-    )
-    return json.dumps([[{row[0]: row[1]} for row in defect_counts]])
+    return _counts_by_name(_BASE_COND + " and CreatedTime >= datetime('now', 'start of day')")
 
 
 @bp.route('/get_num_by_range', methods=['GET'])
 def get_num_by_range():
-    """按时间范围统计各缺陷类型数量: range=day|week|month|quarter (默认 month).
-
-    day=当日; week=近7天; month=当月; quarter=近3个月 (近似一个季度).
-    """
-    rng = request.args.get('range', 'month')
-    if rng == 'day':
-        cond = " and CreatedTime >= datetime('now', 'start of day')"
-    elif rng == 'week':
-        cond = " and CreatedTime >= datetime('now', '-7 days')"
-    elif rng == 'quarter':
-        cond = " and CreatedTime >= datetime('now', '-3 months')"
-    else:  # month
-        cond = " and CreatedTime >= datetime('now', 'start of month', '+1 seconds')"
-    defect_counts = database.query(
-        'name, count(1) AS counts', 'defect_list',
-        "where path is not null and path != 'detect.jpg'" + cond + " group by name"
-    )
-    return json.dumps([[{row[0]: row[1]} for row in defect_counts]])
+    """按时间范围统计各缺陷类型数量: range=day|week|month|quarter"""
+    ranges = {
+        'day': "datetime('now', 'start of day')",
+        'week': "datetime('now', '-7 days')",
+        'month': "datetime('now', 'start of month', '+1 seconds')",
+        'quarter': "datetime('now', '-3 months')",
+    }
+    start = ranges.get(request.args.get('range'), ranges['month'])
+    return _counts_by_name(_BASE_COND + " and CreatedTime >= " + start)
 
 
 def _get_week_labels() -> list:
@@ -187,27 +167,21 @@ def _get_week_labels() -> list:
 
 @bp.route('/get_seven_days_by_type', methods=['GET'])
 def get_seven_days_by_type():
-    """返回最近 7 天每种类型的每日数量, 用于多线趋势图"""
+    """返回最近 7 天每种类型的每日数量 (多线趋势图)"""
     defect_types = ['ca_shang', 'zhen_kong', 'zang_wu', 'zhe_zhou', 'zheng_chang']
-    offsets = ["+0", "-1", "-2", "-3", "-4", "-5", "-6"]
-    week_labels = _get_week_labels()
-
     result = {}
-    for i, offset in enumerate(offsets):
-        label = week_labels[6 - i]
+    for days_ago, label in zip(range(6, -1, -1), _get_week_labels()):
         day_data = {}
         for dtype in defect_types:
             count = database.query_value(
                 'count(1)', 'defect_list',
-                "where path is not null and path != 'detect.jpg'"
-                " and name=?"
+                _BASE_COND + " and name=?"
                 " and CreatedTime >= datetime('now', 'start of day', ? || ' day')"
                 " and CreatedTime <  datetime('now', 'start of day', ? || ' day')",
-                params=(dtype, offset, str(int(offset) + 1))
+                params=(dtype, str(-days_ago), str(-days_ago + 1))
             ) or 0
             day_data[dtype] = count
         result[label] = day_data
-
     return json.dumps(result)
 
 
@@ -288,52 +262,37 @@ def _image_to_base64(path: str) -> str:
 
 
 def _disc_frame_overlay(display, frame):
-    """对实时帧定圆, 在 display (640×480) 上叠加绿圆与黄裁剪框.
-
-    Returns: (found, detail). detail: 检出时为圆信息/方法, 否则为 reject 原因.
-    """
-    method = getattr(shared, 'disc_method', 'mask')
-    cfg = getattr(shared, 'disc_cfg', None)
-    circle, info = find_disc_robust(
-        frame, method=method, cfg=cfg,
-        background=getattr(shared, 'debug_background', None),
+    """对实时帧定圆, 在 display (640×480) 上叠加绿圆与黄裁剪框."""
+    circle, _info = find_disc_robust(
+        frame, method=shared.disc_method, cfg=shared.disc_cfg,
+        background=shared.debug_background,
     )
+    if circle is None:
+        return
+    cx, cy, r = circle
     h, w = frame.shape[:2]
     sx, sy = 640.0 / w, 480.0 / h
-    if circle is not None:
-        cx, cy, r = (int(v) for v in circle)
-        cv2.circle(display, (int(cx * sx), int(cy * sy)), max(int(r * sx), 1), (0, 255, 0), 2)
-        cv2.circle(display, (int(cx * sx), int(cy * sy)), 2, (0, 255, 0), -1)
-        # 实时预览裁剪框 (与 api.Consumer._smart_crop 相同逻辑, 共用 crop_box)
-        margin_ratio = getattr(shared, 'disc_margin_ratio', 0.10)
-        x0, y0, side = crop_box((cx, cy, r), h, w, margin_ratio)
-        cv2.rectangle(
-            display,
-            (int(x0 * sx), int(y0 * sy)),
-            (int((x0 + side) * sx), int((y0 + side) * sy)),
-            (0, 255, 255), 2,
-        )
-        detail = 'circle=({:.0f},{:.0f}) r={:.0f} [{}]'.format(
-            cx, cy, r, (info or {}).get('used_method', '?'))
-        return True, detail
-    detail = 'reject: {}'.format((info or {}).get('reject') or '未知')
-    return False, detail
+    cv2.circle(display, (int(cx * sx), int(cy * sy)), max(int(r * sx), 1), (0, 255, 0), 2)
+    cv2.circle(display, (int(cx * sx), int(cy * sy)), 2, (0, 255, 0), -1)
+    x0, y0, side = crop_box((cx, cy, r), h, w, shared.disc_margin_ratio)
+    cv2.rectangle(
+        display,
+        (int(x0 * sx), int(y0 * sy)),
+        (int((x0 + side) * sx), int((y0 + side) * sy)),
+        (0, 255, 255), 2,
+    )
 
 
 def _generate_disc_stream_frames():
-    """主监控页视频流: 实时帧 + 圆检测叠加 (绿圆 + 黄裁剪框, 无文字)"""
+    """主监控页视频流: 实时帧 + 圆检测叠加"""
     while True:
         time.sleep(0.1)
         frame = shared.stream_image_ref[0]
         if frame is None:
             continue
-        if frame.ndim == 2:
-            display = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-        else:
-            display = frame.copy()
+        display = frame.copy() if frame.ndim == 3 else cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
         display = cv2.resize(display, (640, 480), interpolation=cv2.INTER_AREA)
-
-        _found, _detail = _disc_frame_overlay(display, frame)
+        _disc_frame_overlay(display, frame)
         _ret, jpeg = cv2.imencode('.jpg', display)
         yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n\r\n')
 
