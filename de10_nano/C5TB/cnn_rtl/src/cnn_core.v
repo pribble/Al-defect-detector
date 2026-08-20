@@ -19,8 +19,9 @@
 //     寄存器堆 + 读端口 mux，A&S 内存爆掉）。
 //   - acc 声明为 256-bit 字数组 [o_row][o_col]（每字 = 8 lane × int32），
 //     窗口内只在首 tap 读回 acc_q、寄存器内累加、末 tap 一次性写回；
-//     requant 为 13 级 II=1 流水（每拍 issue/输出 1 字，o_ready 反压冻结）。
-//   - 功能 bit-exact（tb 仅按握手比对事件序列，不测周期数）。
+//     requant 拆 S_REQ_ADDR（采样 acc_q）/S_REQ_OUT（组合 requant）两拍。
+//   - 性能：S_MAC/S_REQUANT 每拍流变两拍（tap 率/事件率减半），功能
+//     bit-exact（tb 仅按握手比对事件序列，不测周期数）。
 //
 // 接口（供 cnn_top 的 DMA 层驱动）：
 //   cfg：sel=0 标量（addr 索引见下）、sel=1..4 requant 数组（addr=通道）
@@ -139,15 +140,15 @@ module cnn_core #(
     // （8×3 组 ≈78 块 M10K）。存储逻辑（数组 + 读写 always）在子模块内部，
     // 顶层 generate 只做实例化——Quartus 对 generate 块内数组的 M10K 推断
     // 不可靠（曾实测仅 RAM 恢复救回 16/32 个，其余展开成寄存器爆 ALM）。
-    // M10K 同步读 1 拍延迟：requant 首拍（S_REQ_ADDR 且 rq_v==0）锁存
-    // bias/mult/shift；o_group 在 requant 段内恒定，参数供整段复用。
+    // M10K 同步读 1 拍延迟：bias 于 S_REQ_ADDR 发起、mult 于 S_REQ_MUL 发起、
+    // shift 于 S_REQ_MUL2 发起——正好插入现有 requant 流水，事件序列不变。
     //-----------------------------------------------------------------------
     wire signed [31:0] rq_bias_q  [0:7];
     wire [31:0]        rq_mult_q  [0:7];
     wire [7:0]         rq_shift_q [0:7];
     // 每 lane 读地址 = o_group*8 + lane（10-bit，o_group ≤ 127，和 ≤1023 不溢出；
     // 写地址 cfg_addr[9:0] 截断，值域 ≤1023 与 1024 深匹配）。rq_raddr_q 每拍
-    // 采样：o_group 在 requant 结束后才更新，进入 requant 前早已稳定为新组。
+    // 采样：o_group 在 S_REQ_OUT3 末更新，到 requant 前隔多拍早已稳定为新组。
     reg [9:0] rq_raddr_q;   // rq_raddr 打拍（断 o_group→32 个 requant RAM 地址布线段）
     wire [9:0] rq_raddr = {o_group[6:0], 3'd0};   // 组合地址，直接驱动读端口（链短）
     genvar rq_i;
@@ -280,8 +281,18 @@ module cnn_core #(
     localparam S_MAC_MUL2   = 5'd7;    // 窗口 tap 乘拍（乘法器 → mac_p_r）
     localparam S_MAC_MUL3   = 5'd8;    // 窗口 tap 加法树拍（mac_p_r → v_sum_r）
     localparam S_MAC_ACC    = 5'd9;    // 窗口 tap 累加拍（v_sum_r → acc_local）
-    localparam S_REQ_ADDR   = 5'd10;   // requant II=1 流水运行态（13 级，每拍 issue/输出 1 字）
-    // 5'd11..5'd21 为原 12 拍串行 requant 状态编码，现已不再进入，保留空洞。
+    localparam S_REQ_ADDR   = 5'd10;   // requant 请求拍（采样 acc_q）
+    localparam S_REQ_MUL    = 5'd11;   // requant 拍级 1（bias/mult RAM 读打拍）
+    localparam S_REQ_MULB   = 5'd12;   // requant 拍级 2（acc_q → v_act_l）
+    localparam S_REQ_MUL2   = 5'd13;   // requant 拍级 3（4×16×16 部分积 → v_p_*）
+    localparam S_REQ_MUL3   = 5'd14;   // requant 拍级 4（两组中间和 → v_sum_lo/hi）
+    localparam S_REQ_MUL4   = 5'd15;   // requant 拍级 5（中间和相加 → v_rq64_l）
+    localparam S_REQ_MULC   = 5'd16;   // requant 拍级 6（乘后 bias 加法）
+    localparam S_REQ_ACT    = 5'd17;   // requant 拍级 7（relu mux → v_rq64_l）
+    localparam S_REQ_OUT    = 5'd18;   // requant 拍级 8（round 桶形移位 → v_rnd_delta）
+    localparam S_REQ_ROUND2 = 5'd19;   // requant 拍级 9（v_rq64_l + v_rnd_delta → v_round_l）
+    localparam S_REQ_OUT2   = 5'd20;   // requant 拍级 10（v_round_l >>> shift → v_shifted）
+    localparam S_REQ_OUT3   = 5'd21;   // requant 拍级 11（wrap → o_data，o_valid 拉高）
     localparam S_DONE       = 5'd22;
     localparam S_PF_WAIT    = 5'd23;   // 等预取完成（下一 cb 已装入 ~mac_buf_sel）
     localparam S_LOAD_FLUSH = 5'd24;   // S_LOAD 末字补写拍（首 cb 后）
@@ -298,10 +309,6 @@ module cnn_core #(
     reg        mac_first_q, mac_last_q;   // S_MAC_MUL2 拍寄存首/末 tap 标志（拆 mac_t 32-bit 比较链）
     reg [15:0] rq_row, rq_col;      // ≤ out_row_tile×out_w（≤19×150），16-bit 足够
     reg        acc_clr_done_q;      // 首 cb 装载期间 acc 清零已完成标志（S_LOAD 并行清 acc 用）
-    // requant II=1 流水控制：
-    reg        rq_issue_done;       // 本 o_group 最后一个字已 issue
-    reg [0:12] rq_v;                // 13 级流水有效位（bit0=issue，bit12=输出拍）
-    reg [0:12] rq_last;             // 对应级是否为 o_group 最后一个字
 
     // lb 乒乓缓冲控制：mac_buf_sel = 当前 MAC 正在读的缓冲；预取写 ~mac_buf_sel
     reg        mac_buf_sel;
@@ -319,11 +326,6 @@ module cnn_core #(
     wire load_row_valid = (load_in_row >= 0) && (load_in_row < in_h_reg);
     // 当前 rq 指针是否指向 acc 最后一个字（S_LOAD 并行清 acc 的完成判断）
     wire acc_clr_last_w = (rq_row == out_row_tile_reg - 1) && (rq_col == out_w_reg - 1);
-    // requant II=1 流水控制信号（12 级，每拍 issue 1 字、输出 1 字）
-    wire rq_last_word = acc_clr_last_w;                     // 当前 issue 的字是否为 o_group 末字
-    wire rq_stall = (state == S_REQ_ADDR) && rq_v[12] && !o_ready;   // 输出反压：整条流水冻结
-    wire rq_adv   = (state == S_REQ_ADDR) && !rq_stall;              // 本拍流水可推进
-    wire rq_issue = rq_adv && !rq_issue_done;                        // 本拍 issue 一个新字
     // 预取行有效判断（与 load_row_valid 同源，仅行计数不同）
     wire signed [12:0] pf_in_row = base_row_reg + pf_row;
     wire pf_row_valid = (pf_in_row >= 0) && (pf_in_row < in_h_reg);
@@ -343,9 +345,6 @@ module cnn_core #(
             mac_row <= 0; mac_col <= 0; mac_t <= 0;
             rq_row <= 0; rq_col <= 0;
             acc_clr_done_q <= 0;
-            rq_issue_done <= 0;
-            rq_v <= 13'd0;
-            rq_last <= 13'd0;
             mac_buf_sel <= 0;
             pf_start <= 0;
             mac_c_valid_r <= 0;
@@ -372,17 +371,15 @@ module cnn_core #(
                         o_group <= 0; i_group <= 0;
                         acc_clr_done_q <= 0;
                         mac_buf_sel <= 0;
-                        rq_issue_done <= 0;
-                        rq_v <= 13'd0;
-                        rq_last <= 13'd0;
                         state <= S_LOAD;
                     end
                 end
 
                 //---- 装载输入行块（流式：每轮 1 个通道块，cb 选择由顶层 DMA 轮控制）----
                 S_LOAD: begin
-                    // 多 o_group 时从 S_REQ_ADDR 流水尾直接进入：必须拉低 o_valid，
+                    // 多 o_group 时从 S_REQ_OUT3 直接进入：必须拉低 o_valid，
                     // 否则残留 1 → 输出持续被收集（o_ready=1 恒等）→ 失控
+                    // （单组层走 S_DONE 拉低故未暴露）
                     o_valid <= 0;
                     // 末 tap 写回（延后 1 拍搭车，case 内写点保 M10K 推断；写拍沿清脉冲）
                     if (acc_wr_we_q) begin
@@ -582,9 +579,6 @@ module cnn_core #(
                                 if (type_reg == 4 || i_group == in_cb_reg - 1) begin
                                     rq_row <= 0; rq_col <= 0;
                                     acc_clr_wa <= 16'd0;   // requant 从 (0,0) 起，清零地址同步归零
-                                    rq_issue_done <= 0;    // 启动 requant II=1 流水
-                                    rq_v <= 13'd0;
-                                    rq_last <= 13'd0;
                                     state <= S_REQ_ADDR;
                                 end else begin
                                     i_group <= i_group + 1;
@@ -619,49 +613,96 @@ module cnn_core #(
                     end
                 end
 
-                //---- requant II=1 流水运行态：每拍 issue 1 个输出字（rq_v[0]），
-                //     13 级流水逐字重叠；输出握手由 rq_v[12] 与 o_ready 控制。
-                //     末字输出且被收走后转 S_DONE / 重装下一 o_group ----
+                //---- requant 请求拍：采样 acc[rq_row][rq_col] ----
                 S_REQ_ADDR: begin
                     // 末 tap 写回（延后 1 拍搭车，case 内写点保 M10K 推断；写拍沿清脉冲）
                     if (acc_wr_we_q) begin
                         acc[acc_wa_q] <= acc_wr_q;
                         acc_wr_we_q <= 0;
                     end
-                    if (rq_stall) begin
-                        // 输出反压：整条流水冻结，o_valid/o_data/rq 指针全部保持
-                        ;
-                    end else begin
-                        // 推进 13 级流水（bit0 接收新 issue，bit12 移出）
-                        rq_v    <= {rq_issue, rq_v[0:11]};
-                        rq_last <= {rq_last_word, rq_last[0:11]};
-                        // 输出有效位：o_data 在同拍由 requant 数据路径寄存
-                        o_valid <= rq_v[11];
-                        if (rq_issue) begin
-                            if (rq_col == out_w_reg - 1) begin
-                                rq_col <= 0;
-                                if (rq_row == out_row_tile_reg - 1) begin
-                                    rq_row <= 0;
-                                    rq_issue_done <= 1;
-                                end else
-                                    rq_row <= rq_row + 1;
-                            end else
-                                rq_col <= rq_col + 1;
-                        end
-                        // 最后一字输出且已被收走（rq_last 随流水传播）
-                        if (rq_v[12] && rq_last[12] && o_ready) begin
-                            if (o_group == out_cb_reg - 1) begin
-                                acc_clr_wa <= 16'd0;
-                                state <= S_DONE;
+                    o_valid <= 0;
+                    state <= S_REQ_MUL;
+                end
+
+                //---- requant 乘加拍级 1：acc_q + bias（32-bit 加法单独一拍）----
+                S_REQ_MUL: begin
+                    state <= S_REQ_MULB;
+                end
+
+                //---- requant 乘加拍级 2：relu/rcl6 比较 → v_act_l（比较+mux 单独一拍）----
+                S_REQ_MULB: begin
+                    state <= S_REQ_MUL2;   // 乘后域：acc 打拍后直接乘法（bias 移到乘后）
+                end
+                S_REQ_MUL4: begin
+                    state <= S_REQ_MULC;   // 乘后 bias 加法拍
+                end
+                S_REQ_MULC: begin
+                    state <= S_REQ_ACT;    // relu mux 拍
+                end
+                S_REQ_ACT: begin
+                    state <= S_REQ_OUT;
+                end
+
+                //---- requant 乘法拍级 1：16×16 部分积（4 个 DSP 乘法，见独立 always）----
+                S_REQ_MUL2: begin
+                    state <= S_REQ_MUL3;
+                end
+
+                //---- requant 乘法拍级 2：两组中间和（lolo+lohi、hilo+hihi 并行 64-bit 加法）----
+                S_REQ_MUL3: begin
+                    state <= S_REQ_MUL4;
+                end
+
+                //---- requant 乘法拍级 3：中间和相加 → v_rq64_l（见独立 always）----
+                // 注意：S_REQ_MUL4 的转移在上面（MUL4 → MULC 乘后 bias）
+
+                //---- requant round 拍级 1：round 桶形移位（1<<(shift-1)，单独一拍）----
+                S_REQ_OUT: begin
+                    state <= S_REQ_ROUND2;
+                end
+
+                //---- requant round 拍级 2：v_rq64_l + v_rnd_delta（64-bit 加法单独一拍）----
+                S_REQ_ROUND2: begin
+                    state <= S_REQ_OUT2;
+                end
+
+                //---- requant 输出移位拍：v_round_l >>> shift（桶形移位单独一拍）----
+                S_REQ_OUT2: begin
+                    state <= S_REQ_OUT3;
+                end
+
+                //---- requant 输出拍（饱和 → o_data；行→列→8 通道，块序）----
+                S_REQ_OUT3: begin
+                    o_valid <= 1;
+                    if (o_ready) begin
+                        if (rq_col == out_w_reg - 1) begin
+                            rq_col <= 0;
+                            if (rq_row == out_row_tile_reg - 1) begin
+                                rq_row <= 0;
+                                // o_valid 由下一状态（S_ACC_CLR/S_DONE）拉低，
+                                // 保证最后一事件 o_data 已被输出握手收走
+                                if (o_group == out_cb_reg - 1) begin
+                                    acc_clr_wa <= 16'd0;
+                                    state <= S_DONE;
+                                end else begin
+                                    o_group <= o_group + 1;
+                                    rq_row <= 0; rq_col <= 0;
+                                    acc_clr_wa <= 16'd0;
+                                    acc_clr_done_q <= 0;
+                                    mac_buf_sel <= 0;
+                                    load_first <= 1;
+                                    state <= S_LOAD;   // 流式：重装新 o_group 的输入 cb
+                                end
                             end else begin
-                                o_group <= o_group + 1;
-                                rq_row <= 0; rq_col <= 0;
-                                acc_clr_wa <= 16'd0;
-                                acc_clr_done_q <= 0;
-                                mac_buf_sel <= 0;
-                                load_first <= 1;
-                                state <= S_LOAD;   // 流式：重装新 o_group 的输入 cb
+                                rq_row <= rq_row + 1;
+                                // 递推清零地址（跟随 rq，替代乘加树）
+                                acc_clr_wa <= acc_clr_wa + G_MAX_OW - out_w_reg + 1;
+                                state <= S_REQ_ADDR;
                             end
+                        end else begin
+                            rq_col <= rq_col + 1;
+                            acc_clr_wa <= acc_clr_wa + 1;
+                            state <= S_REQ_ADDR;
                         end
                     end
                 end
@@ -807,39 +848,42 @@ module cnn_core #(
             // 用沿前值；其他拍取清零地址（rq_row 稳定）——写口永不直接连组合
             if (state == S_MAC_MUL3)
                 acc_wa_q <= acc_waddr_mac[15:0];
-            // acc_q 采样：S_REQ_ADDR 每拍从 acc_raddr_r（rq 指针的打拍地址）
-            // 读 acc；acc_q 相对 issue 有两拍读延迟，故 v_act_l 在 rq_v[1]
-            // 拍采样（见 requant 数据路径）。
+            // acc_q 采样：requant 首拍（S_REQ_ADDR）时 acc_raddr_r 尚是旧地址
+            //（S_REQ_OUT3 末拍才推进 rq_row/rq_col，acc_raddr_r 同步采样的是沿前
+            // 旧值），S_REQ_MUL 拍才采到新地址——两拍连续采样取后者（S_REQ_MULB
+            // 用）；S_REQ_MUL2 起地址不变，重复读无意义，保持即可。
             // 单读端口：两个互斥地址在 RAM 口前 mux。原 if/else 全覆盖写法
             // Quartus 可合并成 1 端口，改 if/else if（带保持）后被推断成 2 个读
             // 端口 = 2 份 acc RAM（≈75 个 M10K），超 5CSEMA5F31 容量报 276003；
             // 显式单表达式强制 1 端口，功能/时序不变。
-            if (state == S_MAC_RD || state == S_REQ_ADDR)
+            if (state == S_MAC_RD || state == S_REQ_ADDR || state == S_REQ_MUL)
                 acc_q <= acc[(state == S_MAC_RD) ? acc_addr_mac_r : acc_raddr_r];
         end
     end
 
     //-----------------------------------------------------------------------
-    // requant II=1 数据路径（13 级流水，每拍 1 字）：
-    //   bit0 issue → bit1 acc_q/参数锁存 → bit2 v_act_l → bit3 v_p（4×16×16 DSP）
-    //   → bit4 v_sum → bit5 乘积 → bit6 乘后 bias → bit7 relu → bit8 保持
-    //   → bit9 round 加法 → bit10 桶形移位 → bit11 输出 wrap
-    // bias/mult/shift 在 o_group 内恒定，S_REQ_ADDR 首拍锁存一次；
-    // 64-bit 结果每级独立寄存器，避免 II=1 多字共用单 reg 串扰。
+    // requant 流水（拆流水，避免单拍组合链过深）：
+    //   S_REQ_MUL  拍：寄存 rq_bias_m/rq_mult_m（RAM 读打拍，断 pass-through 读路径）
+    //   S_REQ_MULB 拍：acc_q → v_act_l（乘法输入打拍；bias 移到乘后 MULC 拍）
+    //   S_REQ_MULC 拍：relu/rcl6 比较 → v_act_l（比较+mux 单独一拍，~3ns）
+    //   S_REQ_MUL2 拍：4×16×16 部分积（DSP）→ 寄存 v_p_*/v_shift_l
+    //   S_REQ_MUL3 拍：部分积移位相加 → v_rq64_l（64-bit 加法树）
+    //   S_REQ_OUT  拍：round 加法 → v_round_l（用上拍寄存的积）
+    // 拆流水后功能/事件序列不变（tb 按事件对拍，不测周期数）。
     //-----------------------------------------------------------------------
     integer ln;
-    reg signed [31:0] v_act_l [0:7];   // 每 lane 的乘法输入打拍（流水级 2）
+    reg signed [63:0] v_rq64;
+    reg signed [31:0] v_act_l [0:7];   // 每 lane 的 act 后值（流水级 2）
     // 乘法拆三级（150MHz 单级 32×33 组合乘法 slack -10.1ns；64-bit 加法树 2 级仍紧）：
-    //   级 1 = 4 个 16×16 DSP 乘法（v_act_l = a_hi<<16 + a_lo，rq_mult_m = m_hi<<16 + m_lo）
+    //   级 1 = 4 个 16×16 DSP 乘法（v_act_l = a_hi<<16 + a_lo，rq_mult_q = m_hi<<16 + m_lo）
     //   级 2 = 两组 64-bit 并行加法（v_sum_lo/v_sum_hi），每级仅 1 个加法器
-    //   级 3 = 中间和相加 → v_rq64_s5
+    //   级 3 = 中间和相加 → v_rq64_l
     (* multstyle = "dsp" *) reg [31:0] v_p_lolo [0:7];   // a_lo × m_lo（无符号 16×16，DSP 18×18）
     (* multstyle = "dsp" *) reg [31:0] v_p_lohi [0:7];   // a_lo × m_hi（无符号 16×16）
     (* multstyle = "dsp" *) reg signed [31:0] v_p_hilo [0:7];  // a_hi × m_lo（signed 16 × unsigned 16）
     (* multstyle = "dsp" *) reg signed [31:0] v_p_hihi [0:7];  // a_hi × m_hi（signed 16 × unsigned 16）
-    reg [31:0] rq_mult_m [0:7];   // S_REQ_ADDR 首拍锁存的乘法器 b 输入（拆 RAM 读与 DSP 乘法组合链）
-    reg signed [31:0] rq_bias_m [0:7];  // S_REQ_ADDR 首拍锁存的 bias RAM 读（拆 RAM 读与 32-bit 加法组合链）
-    reg [7:0]  rq_lane_en;         // 每 lane 有效位（o_group*8+ln < out_c_reg，首拍锁存）
+    reg [31:0] rq_mult_m [0:7];   // S_REQ_MUL 拍寄存的乘法器 b 输入（拆 RAM 读与 DSP 乘法组合链）
+    reg signed [31:0] rq_bias_m [0:7];  // S_REQ_MUL 拍寄存的 bias RAM 读（拆 RAM 读与 32-bit 加法组合链）
 
     // 16×16 乘法用显式 DSP 例化（模块级 multstyle 最可靠；数组属性曾被 Quartus 忽略）
     wire [31:0] mul_lolo [0:7], mul_lohi [0:7], mul_hilo [0:7], mul_hihi [0:7];
@@ -856,35 +900,38 @@ module cnn_core #(
     reg signed [63:0] v_sum_hi [0:7];  // hilo<<16 + hihi<<32（符号扩展两项）
     reg signed [63:0] v_rnd_delta [0:7];  // round 桶形移位结果（1<<(shift-1)）
     reg signed [63:0] v_shifted [0:7];    // 算术右移结果（>>> shift）
-    // 64-bit 结果链：每级独立寄存器（II=1 多字同时在不同级）
-    (* multstyle = "dsp" *) reg signed [63:0] v_rq64_s5 [0:7];  // 乘积（流水级 5）
-    reg signed [63:0] v_rq64_s6 [0:7];  // 乘后 bias（流水级 6）
-    reg signed [63:0] v_rq64_s7 [0:7];  // relu 后（流水级 7）
-    reg signed [63:0] v_rq64_s8 [0:7];  // 保持一拍，与 round delta 对齐（流水级 8）
-    reg [7:0] v_shift_l [0:7];         // 每 lane 的 shift 值（o_group 内恒定，首拍锁存）
-    reg signed [63:0] v_round_l [0:7]; // 每 lane 的 round 后值（流水级 9）
+    (* multstyle = "dsp" *) reg signed [63:0] v_rq64_l [0:7];  // 每 lane 的 64-bit 积（流水级 2，保 DSP）
+    reg [7:0] v_shift_l [0:7];         // 每 lane 的 shift 值（S_REQ_MUL2 拍寄存 RAM 读，断 M10K q 路径）
+    reg signed [63:0] v_round_l [0:7]; // 每 lane 的 round 后值（流水级 3）
+    reg [11:0] v_out_ch;
     reg [7:0] v_q [0:7];
-    reg [63:0] o_data_s10;             // 流水级 10 输出数据（与 o_valid 位对齐）
 
-    // 参数锁存：S_REQ_ADDR 首拍（rq_v 全 0）锁存 bias/mult/shift 与 lane 有效位。
-    // o_group 在 requant 期间恒定，参数供整段所有字复用（无逐字传播）。
+    // 乘加拍级 1（S_REQ_MUL）：bias/mult RAM 读打拍 → rq_bias_m/rq_mult_m
+    // （bias 加法与 DSP 乘法各拆独立一拍，断 M10K pass-through 读路径组合穿透）
     always @(posedge clk) begin
-        if (state == S_REQ_ADDR && rq_v == 13'd0) begin
+        if (state == S_REQ_MUL) begin
             for (ln = 0; ln < 8; ln = ln + 1) begin
                 rq_bias_m[ln] <= rq_bias_q[ln];
-                rq_mult_m[ln] <= rq_mult_q[ln];
-                v_shift_l[ln] <= rq_shift_q[ln];
-                rq_lane_en[ln] <= (o_group * 8 + ln < out_c_reg);
             end
         end
     end
 
-    // 流水级 2（bit1→bit2）：acc_q → v_act_l（乘法输入打拍；bias 移到乘后域，
+    // 乘法器 b 输入打拍（S_REQ_MUL 拍寄存 rq_mult_q）：拆开 RAM 读路径
+    // （含 read-during-write pass-through mux）与 DSP 乘法，避免组合穿透直达 v_p_*
+    always @(posedge clk) begin
+        if (state == S_REQ_MUL) begin
+            for (ln = 0; ln < 8; ln = ln + 1)
+                rq_mult_m[ln] <= rq_mult_q[ln];
+        end
+    end
+
+    // 乘加拍级 2（S_REQ_MULB）：acc_q → v_act_l（乘法输入打拍；bias 已移到乘后域，
     // 与 CPU cvt_kernel 语义 round(acc·ws·is/os + bias/os) 对齐）
     always @(posedge clk) begin
-        if (rq_adv && rq_v[1]) begin
+        if (state == S_REQ_MULB) begin
             for (ln = 0; ln < 8; ln = ln + 1) begin
-                if (!rq_lane_en[ln])
+                v_out_ch = o_group * 8 + ln;
+                if (v_out_ch >= out_c_reg)
                     v_act_l[ln] <= 32'sd0;
                 else
                     v_act_l[ln] <= acc_q[32*ln +: 32];
@@ -892,11 +939,55 @@ module cnn_core #(
         end
     end
 
-    // 乘法级 1（bit2→bit3）：v_act_l × rq_mult_m 拆 4 个 16×16 部分积（DSP 18×18，~4ns）
+    // 乘法级 3（S_REQ_MUL4）→ 乘后 bias（S_REQ_MULC）→ act mux（S_REQ_ACT）：
+    // v_rq64_l 单一 always 驱动（Quartus 10028 多驱动——verilator 容忍多块赋值、
+    // Quartus 报 constant driver 冲突；合并后每 state 分支仍只含单拍操作）
     always @(posedge clk) begin
-        if (rq_adv && rq_v[2]) begin
+        if (state == S_REQ_MUL4) begin
             for (ln = 0; ln < 8; ln = ln + 1) begin
-                if (!rq_lane_en[ln]) begin
+                v_out_ch = o_group * 8 + ln;
+                if (v_out_ch >= out_c_reg)
+                    v_rq64_l[ln] <= 64'sd0;
+                else
+                    v_rq64_l[ln] <= v_sum_lo[ln] + v_sum_hi[ln];
+            end
+        end else if (state == S_REQ_MULC) begin
+            // 乘后 bias 加法：v_rq64_l += bias_mul<<8（q22 左移 8 对齐 q30 域）
+            for (ln = 0; ln < 8; ln = ln + 1) begin
+                v_out_ch = o_group * 8 + ln;
+                if (v_out_ch >= out_c_reg)
+                    v_rq64_l[ln] <= 64'sd0;
+                else
+                    v_rq64_l[ln] <= v_rq64_l[ln] +
+                                    {{32{rq_bias_m[ln][31]}}, rq_bias_m[ln], 8'd0};
+            end
+        end else if (state == S_REQ_ACT) begin
+            // relu/rcl6 mux（乘后域，64-bit）
+            // 2026-08-10：relu6 去掉 rcl6 钳位（黑盒实测无 min6，见
+            // BLACKBOX_NUMERICS.md；CPU 语义的 min(6/os) 与黑盒不符，且
+            // box 头输入直接来自 relu6_1/relu6_3 输出，钳位改变检测头
+            // 输入 → 上板几百框误检）。act==1 与 act==2 现行为相同。
+            for (ln = 0; ln < 8; ln = ln + 1) begin
+                v_out_ch = o_group * 8 + ln;
+                if (v_out_ch >= out_c_reg) begin
+                    v_rq64_l[ln] <= 64'sd0;
+                end else if (act_reg == 2'd1 || act_reg == 2'd2) begin
+                    v_rq64_l[ln] <= v_rq64_l[ln][63] ? 64'sd0 : v_rq64_l[ln];
+                end
+            end
+        end
+    end
+
+    // 乘加拍级 3c（S_REQ_ACT）的 relu mux 已并入乘法级 3 的单一 always
+    //（v_rq64_l 单驱动，Quartus 10028）
+
+    // 乘法级 1（S_REQ_MUL2）：v_act_l × rq_mult_q 拆 4 个 16×16 部分积（DSP 18×18，~4ns）；
+    // 同时把 RAM 读出的 shift 值寄存为 v_shift_l——断开 M10K q 输出到输出拍组合链的长路径
+    always @(posedge clk) begin
+        if (state == S_REQ_MUL2) begin
+            for (ln = 0; ln < 8; ln = ln + 1) begin
+                v_out_ch = o_group * 8 + ln;
+                if (v_out_ch >= out_c_reg) begin
                     v_p_lolo[ln] <= 32'd0;
                     v_p_lohi[ln] <= 32'd0;
                     v_p_hilo[ln] <= 32'sd0;
@@ -907,15 +998,17 @@ module cnn_core #(
                     v_p_hilo[ln] <= mul_hilo[ln];
                     v_p_hihi[ln] <= mul_hihi[ln];
                 end
+                v_shift_l[ln] <= rq_shift_q[ln];
             end
         end
     end
 
-    // 乘法级 2（bit3→bit4）：4 项部分积分为两组中间和（并行 64-bit 加法，各 ~3ns）
+    // 乘法级 2（S_REQ_MUL3）：4 项部分积分为两组中间和（并行 64-bit 加法，各 ~3ns）
     always @(posedge clk) begin
-        if (rq_adv && rq_v[3]) begin
+        if (state == S_REQ_MUL3) begin
             for (ln = 0; ln < 8; ln = ln + 1) begin
-                if (!rq_lane_en[ln]) begin
+                v_out_ch = o_group * 8 + ln;
+                if (v_out_ch >= out_c_reg) begin
                     v_sum_lo[ln] <= 64'sd0;
                     v_sum_hi[ln] <= 64'sd0;
                 end else begin
@@ -928,55 +1021,16 @@ module cnn_core #(
         end
     end
 
-    // 64-bit 结果链（bit4→bit8）：乘积 → 乘后 bias → relu → 保持一拍。
-    // II=1 下多字同时处于不同级，各级用独立寄存器（v_rq64_s5..s8）。
-    always @(posedge clk) begin
-        if (rq_adv) begin
-            if (rq_v[4]) begin
-                for (ln = 0; ln < 8; ln = ln + 1) begin
-                    if (!rq_lane_en[ln])
-                        v_rq64_s5[ln] <= 64'sd0;
-                    else
-                        v_rq64_s5[ln] <= v_sum_lo[ln] + v_sum_hi[ln];
-                end
-            end
-            if (rq_v[5]) begin
-                // 乘后 bias 加法：bias<<8（q22 左移 8 对齐 q30 域）
-                for (ln = 0; ln < 8; ln = ln + 1) begin
-                    if (!rq_lane_en[ln])
-                        v_rq64_s6[ln] <= 64'sd0;
-                    else
-                        v_rq64_s6[ln] <= v_rq64_s5[ln] +
-                                        {{32{rq_bias_m[ln][31]}}, rq_bias_m[ln], 8'd0};
-                end
-            end
-            if (rq_v[6]) begin
-                // relu/rcl6 mux（乘后域，64-bit）
-                // 2026-08-10：relu6 去掉 rcl6 钳位（黑盒实测无 min6，见
-                // BLACKBOX_NUMERICS.md；CPU 语义的 min(6/os) 与黑盒不符，且
-                // box 头输入直接来自 relu6_1/relu6_3 输出，钳位改变检测头
-                // 输入 → 上板几百框误检）。act==1 与 act==2 现行为相同。
-                for (ln = 0; ln < 8; ln = ln + 1) begin
-                    if (!rq_lane_en[ln])
-                        v_rq64_s7[ln] <= 64'sd0;
-                    else if (act_reg == 2'd1 || act_reg == 2'd2)
-                        v_rq64_s7[ln] <= v_rq64_s6[ln][63] ? 64'sd0 : v_rq64_s6[ln];
-                    else
-                        v_rq64_s7[ln] <= v_rq64_s6[ln];
-                end
-            end
-            if (rq_v[7]) begin
-                for (ln = 0; ln < 8; ln = ln + 1)
-                    v_rq64_s8[ln] <= v_rq64_s7[ln];
-            end
-        end
-    end
+    //（v_rq64_l 的赋值已并入乘法级 3 的单一 always——见上）
+    // 乘加拍级 3（S_REQ_MUL4 分支）：两组中间和相加 → v_rq64_l（单个 64-bit 加法，~3ns）
+    // 注意：MUL4/MULC/ACT 三个 state 分支共用此 always（v_rq64_l 单驱动）
 
-    // round 拍级 1（bit7→bit8）：round 桶形移位单独一拍（1<<(shift-1)，~5ns）
+    // round 拍级 1（S_REQ_OUT）：round 桶形移位单独一拍（1<<(shift-1)，~5ns）
     always @(posedge clk) begin
-        if (rq_adv && rq_v[7]) begin
+        if (state == S_REQ_OUT) begin
             for (ln = 0; ln < 8; ln = ln + 1) begin
-                if (!rq_lane_en[ln])
+                v_out_ch = o_group * 8 + ln;
+                if (v_out_ch >= out_c_reg)
                     v_rnd_delta[ln] <= 64'sd0;
                 else if (v_shift_l[ln] > 8'd0)
                     v_rnd_delta[ln] <= 64'sd1 << (v_shift_l[ln] - 8'd1);
@@ -986,23 +1040,25 @@ module cnn_core #(
         end
     end
 
-    // round 拍级 2（bit8→bit9）：v_rq64_s8 + v_rnd_delta → v_round_l（64-bit 加法单独一拍，~3ns）
+    // round 拍级 2（S_REQ_ROUND2）：v_rq64_l + v_rnd_delta → v_round_l（64-bit 加法单独一拍，~3ns）
     always @(posedge clk) begin
-        if (rq_adv && rq_v[8]) begin
+        if (state == S_REQ_ROUND2) begin
             for (ln = 0; ln < 8; ln = ln + 1) begin
-                if (!rq_lane_en[ln])
+                v_out_ch = o_group * 8 + ln;
+                if (v_out_ch >= out_c_reg)
                     v_round_l[ln] <= 64'sd0;
                 else
-                    v_round_l[ln] <= v_rq64_s8[ln] + v_rnd_delta[ln];
+                    v_round_l[ln] <= v_rq64_l[ln] + v_rnd_delta[ln];
             end
         end
     end
 
-    // 输出移位拍（bit9→bit10）：v_round_l >>> shift（64-bit 桶形移位单独一拍，~5ns）
+    // 输出移位拍（S_REQ_OUT2）：v_round_l >>> shift（64-bit 桶形移位单独一拍，~5ns）
     always @(posedge clk) begin
-        if (rq_adv && rq_v[9]) begin
+        if (state == S_REQ_OUT2) begin
             for (ln = 0; ln < 8; ln = ln + 1) begin
-                if (!rq_lane_en[ln])
+                v_out_ch = o_group * 8 + ln;
+                if (v_out_ch >= out_c_reg)
                     v_shifted[ln] <= 64'sd0;
                 else
                     v_shifted[ln] <= v_round_l[ln] >>> v_shift_l[ln];
@@ -1010,30 +1066,25 @@ module cnn_core #(
         end
     end
 
-    // 输出 wrap（bit10→bit11）：移位值 8 位截断（wrap）→ o_data_s10
+    // 输出拍（S_REQ_OUT3）：移位值 8 位截断（wrap）→ o_data
     // 黑盒语义（BLACKBOX_NUMERICS.md 实测）：y = r & 0xFF，非饱和！
     // 饱和会把 box 头（act=0）超出 int8 范围的 logits 全部钳成 ±127，
     // 抹平 softmax 区分度 → 全图高 score 误检框（上板实测几百框）。
     // wrap 保留字节差异（超出部分翻转为对端符号，与黑盒位模式一致）。
     always @(posedge clk) begin
-        if (rq_adv && rq_v[10]) begin
+        if (state == S_REQ_OUT3) begin
             for (ln = 0; ln < 8; ln = ln + 1) begin
-                if (!rq_lane_en[ln])
+                v_out_ch = o_group * 8 + ln;
+                if (v_out_ch >= out_c_reg)
                     v_q[ln] = 8'd0;
                 else
                     // 黑盒实测（BLACKBOX_NUMERICS.md）：round 后负值 -1（floor 除法特性）。
                     // box 头（act=0）负 logits 无此修正会偏大 1-2 LSB（2026-08-10）
                     v_q[ln] = (v_shifted[ln] - {63'd0, v_shifted[ln][63]}) & 64'hFF;
             end
-            o_data_s10 <= {v_q[7], v_q[6], v_q[5], v_q[4],
-                           v_q[3], v_q[2], v_q[1], v_q[0]};
+            o_data <= {v_q[7], v_q[6], v_q[5], v_q[4],
+                       v_q[3], v_q[2], v_q[1], v_q[0]};
         end
-    end
-
-    // 输出拍（bit11→bit12）：o_data 与 o_valid（FSM 由 rq_v[11] 产生）同拍对齐
-    always @(posedge clk) begin
-        if (rq_adv && rq_v[11])
-            o_data <= o_data_s10;
     end
 
 endmodule

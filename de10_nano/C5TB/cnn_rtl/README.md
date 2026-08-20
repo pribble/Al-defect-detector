@@ -129,7 +129,7 @@ cnn_rtl/
 | 1 ✅ | pr/sr 参数读单笔在途 → **多笔在途（≤4）流水读**：`cnn_top_core` 命令计数/返回计数分离，read 连续拉高直至发完或在途满；`tb_cnn_top` pr/sr 读模型改 4 深队列 | `run_cnn_top.sh` 6/6 PASS、`run_cnn_core_v2.sh` 16/16 PASS |
 | 2 ✅ | `cnn_core` **S_ACC_CLR 与 S_LOAD 并行**：首 cb 装载期间同拍清 acc（lb/acc 独立 RAM，写口互斥），清完直接进 S_WEIGHT，未清完保留 S_ACC_CLR 兜底续清 | `run_cnn_core_v2.sh` 16/16 PASS、`run_cnn_top.sh` 6/6 PASS |
 | 3 ✅ | `cnn_core` **lb 双缓冲 + 输入预取**：MAC 期间预取下一 cb 到 ~mac_buf_sel（新增 `i_pf_ready`、预取控制器、`S_PF_WAIT`/`S_LOAD_FLUSH`）；`cnn_top_core` `lr_read` 支持预取就绪与中间段解锁；**M10K 超量修复：`G_MAX_W` 512→304**（软件实际 ≤302）；**时序修复：`S_MAC_ACC` 预计算 `mac_r`/`mac_c_cl`**，拆 stride mux→lb_raddr 长路径 | `run_cnn_core_v2.sh` 16/16 PASS、`run_cnn_top.sh` 6/6 PASS（Quartus 待复验） |
-| 4 ✅ | `cnn_core` **requant II=1 流水**：原 12 拍串行状态机改为 13 级流水（`rq_v[0:12]` 有效位链），每拍 issue/输出 1 字；`S_REQ_ADDR` 为流水运行态，`o_ready` 反压冻结整条流水；bias/mult/shift 在 o_group 内恒定，首拍锁存一次；64-bit 结果链每级独立寄存器（`v_rq64_s5..s8`），`o_data_s10`/`o_data` 两级对齐握手 | `run_cnn_core_v2.sh` 16/16 PASS、`run_cnn_top.sh` 6/6 PASS（Quartus 待复验） |
+| 4 ⏳ | 下一步待定（候选：wbuf 双缓冲 / requant II=1 / MAC tap II=1） | — |
 
 ## 时序收敛（2026-08-05，150MHz 目标）
 
@@ -142,10 +142,9 @@ PLL outclk_1 恢复 150MHz（`e49c95c`）后，综合报告逐条拆流水直至
 | 3 | round/输出路径（同批） | 64-bit 桶形移位 + 加法/比较串行 | `a94f74a`：移位各占一拍（S_REQ_OUT→v_rnd_delta、S_REQ_ROUND2(5'd17) 加法、S_REQ_OUT2→v_shifted、S_REQ_OUT3(5'd18) 饱和） |
 | 4 | `bias_store_3 → v_act_l`（-8.6ns） | acc_q+bias 加法 + relu/rcl6 比较单级 | `7cce245`：S_REQ_MUL 加法→v_biased_l、S_REQ_MULB(5'd19) 比较→v_act_l |
 
-requant 现为 13 级 II=1 流水（`S_REQ_ADDR` 单态运行 + `rq_v[0:12]` 有效位链；原 12 拍
-S_REQ_ADDR → MUL → MULB → MUL2 → MUL3 → MUL4 → MULC → ACT → OUT → ROUND2 → OUT2 → OUT3
-已由流水替代，S_REQ_MUL..S_REQ_OUT3 编码保留空洞），**乘后域**（bias 在乘后加、relu/rcl6 在乘后施加）；
-每级仍仅加法/移位/比较之一（≤~5ns）；事件级对拍不受拍数影响（core 16/16、top 6/6 随机层 PASS）。
+requant 现为 12 拍单操作流水（S_REQ_ADDR → MUL → MULB → MUL2 → MUL3 → MUL4 → MULC → ACT → OUT → ROUND2 → OUT2 → OUT3；S_REQ_MULC2 已随 2026-08-10 rcl6 钳位移除），
+**乘后域**（bias 在乘后加、relu/rcl6 在乘后施加，新增 S_REQ_ACT 拍）；
+每拍仅加法/移位/比较之一（≤~5ns）；state 扩 5-bit；事件级对拍不受拍数影响（v2 24/24 随机层 PASS）。
 
 **部署注意**：Quartus 综合读的是 QSys 生成物 `soc_system/synthesis/submodules/` 里的 RTL 拷贝
 （.gitignore 忽略、git pull 不更新）——更新 `cnn_rtl/src/` 后需重新 Generate QSys，或手动拷 5 个 .v 到 submodules/。
