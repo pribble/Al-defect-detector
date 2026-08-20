@@ -634,11 +634,12 @@ class Consumer(threading.Thread):
             logger.error('智能裁剪异常, 回退整帧缩放: %s', e, exc_info=True)
             return None, None
 
-    def _draw_disc_overlay(self, image):
+    def _draw_disc_overlay(self, image, force_crop_box=False):
         """在标注图上叠加绿色圆与黄色裁剪框 (现场调参/验证用, draw_overlay 控制).
 
-        在【全帧】上绘制 (坐标是全帧坐标); 若本次裁剪成功 (_record_box 已设),
-        黄框就是记录图的边界, 不再重复画.
+        在【全帧】上绘制 (坐标是全帧坐标); force_crop_box=True 时强制画黄裁剪框
+        (供"未裁剪全帧"展示用), 否则裁剪成功 (_record_box 已设) 时不画 (黄框即
+        记录图边界, 无意义).
         """
         if not DISC_DRAW_OVERLAY:
             return image
@@ -647,12 +648,22 @@ class Consumer(threading.Thread):
             cx, cy, r = (int(v) for v in disc)
             cv2.circle(image, (cx, cy), r, (0, 255, 0), 1)
             cv2.circle(image, (cx, cy), 2, (0, 255, 0), -1)
-        if self._record_box is None:
+        if force_crop_box or self._record_box is None:
             box = shared.last_crop_box
             if box is not None:
                 x0, y0, side = box
                 cv2.rectangle(image, (x0, y0), (x0 + side, y0 + side), (0, 255, 255), 1)
         return image
+
+    def _original_overlay(self, original_image):
+        """原始图片(全帧)叠加绿圆+黄裁剪框: 不画缺陷框、不裁剪, 保持"原始"语义."""
+        if not DISC_DRAW_OVERLAY:
+            return original_image
+        try:
+            img = cv2.cvtColor(original_image, cv2.COLOR_GRAY2RGB)
+        except Exception:
+            img = original_image
+        return self._draw_disc_overlay(img, force_crop_box=True)
 
     def _make_record(self, image):
         """生成记录图: 裁剪成功时把(已标注/原)图裁成以铝片为中心的方形记录; 否则原样返回."""
@@ -721,11 +732,10 @@ class Consumer(threading.Thread):
             annotated_image = cv2.cvtColor(annotated_image, cv2.COLOR_GRAY2RGB)
         except Exception:
             pass
-        self._draw_disc_overlay(annotated_image)  # 全帧坐标叠加 (3 通道), 再裁记录图
-        record = self._make_record(annotated_image)
-        cv2.imwrite(file_name, record)
+        self._draw_disc_overlay(annotated_image, force_crop_box=True)  # 全帧叠加绿圆+黄框
+        cv2.imwrite(file_name, annotated_image)  # 历史图: 未裁剪全帧标注图
         database.insert_data(uid, file_name, 'zheng_chang', None, None)
-        cv2.imwrite(original_image_path, self._make_record(original_image))
+        cv2.imwrite(original_image_path, self._original_overlay(original_image))
         if os.path.exists(detect_image_path):
             os.remove(detect_image_path)
 
@@ -749,15 +759,15 @@ class Consumer(threading.Thread):
             database.insert_data(uid, 'detect.jpg', class_name, None, None)
             logger.info("数据库写入完成")
 
-        # 记录图: 全帧叠加圆/框后, 裁成以铝片为中心的方形 (提取的图片铝片居中)
+        # 记录图: 全帧叠加圆/框 (files=全帧标注图, original=全帧+绿圆黄框, detect=裁剪标注图)
         try:
             annotated_image = cv2.cvtColor(annotated_image, cv2.COLOR_GRAY2RGB)
         except Exception:
             pass
-        self._draw_disc_overlay(annotated_image)
-        record = self._make_record(annotated_image)
-        cv2.imwrite(file_name, record)
-        cv2.imwrite(original_image_path, self._make_record(original_image))
+        self._draw_disc_overlay(annotated_image, force_crop_box=True)
+        cv2.imwrite(file_name, annotated_image)  # 历史图: 未裁剪全帧标注图
+        cv2.imwrite(original_image_path, self._original_overlay(original_image))
+        record = self._make_record(annotated_image)  # detect.jpg 保持裁剪标注图
         cv2.imwrite(detect_image_path, record)
 
     def _draw_defect_box(self, image, loc, class_name_cn: str, score: float):
