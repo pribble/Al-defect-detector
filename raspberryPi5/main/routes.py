@@ -145,6 +145,28 @@ def get_today_num():
     return json.dumps([[{row[0]: row[1]} for row in defect_counts]])
 
 
+@bp.route('/get_num_by_range', methods=['GET'])
+def get_num_by_range():
+    """按时间范围统计各缺陷类型数量: range=day|week|month|quarter (默认 month).
+
+    day=当日; week=近7天; month=当月; quarter=近3个月 (近似一个季度).
+    """
+    rng = request.args.get('range', 'month')
+    if rng == 'day':
+        cond = " and CreatedTime >= datetime('now', 'start of day')"
+    elif rng == 'week':
+        cond = " and CreatedTime >= datetime('now', '-7 days')"
+    elif rng == 'quarter':
+        cond = " and CreatedTime >= datetime('now', '-3 months')"
+    else:  # month
+        cond = " and CreatedTime >= datetime('now', 'start of month', '+1 seconds')"
+    defect_counts = database.query(
+        'name, count(1) AS counts', 'defect_list',
+        "where path is not null and path != 'detect.jpg'" + cond + " group by name"
+    )
+    return json.dumps([[{row[0]: row[1]} for row in defect_counts]])
+
+
 def _get_week_labels() -> list:
     """返回最近 7 天的标签列表 (今日 → 6 天前)"""
     d = datetime.datetime.now()

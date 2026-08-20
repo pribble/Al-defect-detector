@@ -87,6 +87,7 @@ body{width:100%;height:100vh;overflow:hidden}
 .echarts-wrap{width:100%;height:100%;display:flex;flex-flow:column}
 .echarts-item{flex:1;display:flex;flex-flow:column}
 .echarts-item-title{font-size:14px;flex:0 0 24px;line-height:24px;padding:0 15px;font-weight:600}
+.border .title .stat-range{margin-left:auto;white-space:nowrap}
 .echarts-item-content{flex:1;padding:0 10px 10px}
 .echarts-item-content.perf-row{padding:0 30px;display:flex}
 .echarts-item-content.perf-row .perf-half{flex:1;text-align:center}
@@ -239,7 +240,15 @@ body{width:100%;height:100vh;overflow:hidden}
 
         <!-- Center-right: statistics panel -->
         <div class="border main-center-top-right">
-          <h5 class="title"><span class="icon"></span>检测统计</h5>
+          <h5 class="title">
+            <span class="icon"></span>检测统计
+            <el-radio-group v-model="pieRange" size="mini" class="stat-range" @change="fetchDefectNum">
+              <el-radio-button label="day">一日内</el-radio-button>
+              <el-radio-button label="week">一周内</el-radio-button>
+              <el-radio-button label="month">一个月内</el-radio-button>
+              <el-radio-button label="quarter">一个季度内</el-radio-button>
+            </el-radio-group>
+          </h5>
           <div class="centent">
             <div class="echarts-wrap">
 
@@ -325,6 +334,7 @@ function apiGetStatistics(conf){ return http.get(conf.url+'/get_statistics') }
 function apiGetMonthNum(conf){ return http.get(conf.url+'/get_this_month_num') }
 function apiGetTodayNum(conf){ return http.get(conf.url+'/get_today_num') }
 function apiGetNum(conf){ return http.get(conf.url+'/get_num') }
+function apiGetNumByRange(conf, range){ return http.get(conf.url+'/get_num_by_range', {params:{range:range}}) }
 function apiGetSevenDaysByType(conf){ return http.get(conf.url+'/get_seven_days_by_type') }
 function apiCalibration(conf, mode){ return http.post(conf.url+'/calibration', {mode:mode}) }
 function apiCalStatus(conf){ return http.get(conf.url+'/calibration_status') }
@@ -364,6 +374,7 @@ var app = new Vue({
     // Images
     originalImg: '', testingImg: '', testingText: '',
     imgHistory: [],
+    pieRange: 'month',
 
     // Dialog
     dialog: { visible: false, img: '' },
@@ -522,7 +533,7 @@ var app = new Vue({
     },
     fetchDefectNum: function(){
       var self = this;
-      apiGetNum(CONFIG).then(function(r){
+      apiGetNumByRange(CONFIG, this.pieRange).then(function(r){
         if (!r || !r.length || !r[0].length) return;
         var pieData = [];
         var total = 0;
