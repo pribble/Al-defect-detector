@@ -37,7 +37,10 @@ module tb_cnn_core_v2;
     reg [63:0] iw_data = 0;
     // 输出流
     wire o_valid;
-    reg o_ready = 1;
+    // 顶层握手：o_ready = o_valid（本拍即接受，无 store 反压），与
+    // cnn_top_core 的 o_ready = o_valid && !store_waitrequest 同构。
+    // 核心在新握手下：接受拍撤销 o_valid，tb 在 o_valid=1 拍收集。
+    wire o_ready = o_valid;
     wire [63:0] o_data;
     wire o_done;
 

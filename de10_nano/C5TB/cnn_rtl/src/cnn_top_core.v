@@ -420,7 +420,10 @@ module cnn_top_core (
     wire lr_cmd_complete = cmd_last_beat && !cmd_is_wr;
     wire wr_cmd_complete = cmd_last_beat &&  cmd_is_wr;
 
-    assign core_o_ready  = 1;   // core 输出不阻塞（与 v2 tb 的 o_ready=1 一致）
+    // core 输出反压：store master 写接受（ow_write && !ow_waitrequest）才推进
+    // requant 输出。core 的 o_valid 是寄存器，顶层写模型在下一拍采样；
+    // 只用 !ow_waitrequest 会在"core 已推进但写未接受"时丢字（上板输出段丢字）。
+    assign core_o_ready  = core_o_valid && !ow_waitrequest;
     assign ow_writedata  = core_o_data;
     assign ow_write      = core_o_valid;
 

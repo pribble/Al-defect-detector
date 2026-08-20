@@ -55,6 +55,10 @@ module tb_cnn_top;
     wire        ow_write;
     wire [63:0] ow_writedata;
     reg         ow_waitrequest = 0;
+    // 输出反压注入（暴露 core_o_ready 恒 1 时的写丢失；修复后应仍 bit-exact）
+    always @(posedge clk) begin
+        ow_waitrequest <= (sim_cycles[3:0] == 4'd5) || (sim_cycles[3:0] == 4'd6);
+    end
     wire [4:0]  load_burstcount;
 
     cnn_top_core dut (

@@ -728,8 +728,12 @@ module cnn_core #(
                 end
 
                 //---- requant 输出拍（饱和 → o_data；行→列→8 通道，块序）----
+                // 握手：顶层 o_ready = o_valid && !store_waitrequest，即本拍被
+                // 接受才拉高；接受拍撤销 o_valid，下一字 13 拍流水后再拉高。
+                //（旧写法 o_valid<=1 恒置：反压时 o_valid 会多保持一拍，顶层
+                //   按电平连续接受两次 → 同字写两个地址，输出段错位）
                 S_REQ_OUT3: begin
-                    o_valid <= 1;
+                    o_valid <= o_ready ? 1'b0 : 1'b1;
                     if (o_ready) begin
                         if (rq_col == out_w_reg - 1) begin
                             rq_col <= 0;
