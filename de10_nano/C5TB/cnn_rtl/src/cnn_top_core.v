@@ -260,11 +260,73 @@ module cnn_top_core (
     wire wr_got = (lr_readdatavalid || wr_readdatavalid) && (cmd_cnt != 3'd0) &&  cmd_is_wr;
     wire ow_got = ow_write && !ow_waitrequest;
 
-    // core 流映射
-    assign core_i_valid  = lr_got;
-    assign core_i_data   = lr_readdata;
-    assign core_iw_valid = wr_got;
-    assign core_iw_data  = wr_readdata;
+    //-----------------------------------------------------------------------
+    // lr/wr 输入 FIFO（step A：解耦 readdatavalid 返回与 core 消费）
+    //   FWFT：core_i_valid = !empty，数据 = 队头；pop = core 握手成功。
+    //   step A 仍按 core 就绪才发读命令（FIFO 深度在途 ≤4），行为与直连等价；
+    //   step B 改为按 FIFO 空间发命令后，这里就是真正的解耦缓冲。
+    //-----------------------------------------------------------------------
+    localparam LR_FIFO_DEPTH = 32;
+    localparam LR_FIFO_AW    = 5;
+    localparam [LR_FIFO_AW:0] LR_FIFO_DEPTH_C = LR_FIFO_DEPTH;   // 定宽常量（full 比较用）
+    reg [63:0] lr_fifo [0:LR_FIFO_DEPTH-1];
+    reg [63:0] wr_fifo [0:LR_FIFO_DEPTH-1];
+    reg [LR_FIFO_AW-1:0] lr_wptr, lr_rptr, wr_wptr, wr_rptr;
+    reg [LR_FIFO_AW:0]   lr_fifo_cnt, wr_fifo_cnt;   // 0..32
+
+    wire lr_fifo_empty = (lr_fifo_cnt == 0);
+    wire lr_fifo_full  = (lr_fifo_cnt == LR_FIFO_DEPTH_C);
+    wire wr_fifo_empty = (wr_fifo_cnt == 0);
+    wire wr_fifo_full  = (wr_fifo_cnt == LR_FIFO_DEPTH_C);
+
+    // 队头（FWFT 组合读；空时数据无效，core 由 valid 门控不采样）
+    wire [63:0] lr_fifo_head = lr_fifo[lr_rptr];
+    wire [63:0] wr_fifo_head = wr_fifo[wr_rptr];
+
+    // 入队：返回拍按 cmd FIFO 队首类型路由；满保护（step A 不应发生，防御）
+    wire lr_fifo_push = lr_got && !lr_fifo_full;
+    wire wr_fifo_push = wr_got && !wr_fifo_full;
+    // 出队：core 侧握手（i_ready 或 i_pf_ready / ow_ready）
+    wire lr_fifo_pop  = !lr_fifo_empty && (core_i_ready || core_i_pf_ready);
+    wire wr_fifo_pop  = !wr_fifo_empty && core_ow_ready;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            lr_wptr <= 0; lr_rptr <= 0; lr_fifo_cnt <= 0;
+        end else if (core_done) begin
+            // 行块结束：丢弃 FIFO 残留（在途返回由 cmd FIFO 清空拦截，不会写入）
+            lr_wptr <= 0; lr_rptr <= 0; lr_fifo_cnt <= 0;
+        end else begin
+            if (lr_fifo_push)
+                lr_fifo[lr_wptr] <= lr_readdata;
+            // 单语句净 0：同拍 push+pop 计数不变（与 pending 历史 bug 同类防护）
+            lr_fifo_cnt <= lr_fifo_cnt + (lr_fifo_push ? 1'b1 : 1'b0)
+                                      - (lr_fifo_pop  ? 1'b1 : 1'b0);
+            if (lr_fifo_push) lr_wptr <= lr_wptr + 1'b1;
+            if (lr_fifo_pop)  lr_rptr <= lr_rptr + 1'b1;
+        end
+    end
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            wr_wptr <= 0; wr_rptr <= 0; wr_fifo_cnt <= 0;
+        end else if (core_done) begin
+            wr_wptr <= 0; wr_rptr <= 0; wr_fifo_cnt <= 0;
+        end else begin
+            if (wr_fifo_push)
+                wr_fifo[wr_wptr] <= wr_readdata;
+            wr_fifo_cnt <= wr_fifo_cnt + (wr_fifo_push ? 1'b1 : 1'b0)
+                                        - (wr_fifo_pop  ? 1'b1 : 1'b0);
+            if (wr_fifo_push) wr_wptr <= wr_wptr + 1'b1;
+            if (wr_fifo_pop)  wr_rptr <= wr_rptr + 1'b1;
+        end
+    end
+
+    // core 流映射（FIFO 队头）
+    assign core_i_valid  = !lr_fifo_empty;
+    assign core_i_data   = lr_fifo_head;
+    assign core_iw_valid = !wr_fifo_empty;
+    assign core_iw_data  = wr_fifo_head;
     // lr 段边界（每 (o_group, cb) 段 = in_seg_words 字）：段尾命令发出后停止，
     // 等返回清空 + core 离开 S_LOAD 再解锁——否则在途命令跨段提前发出，
     // 返回在 core 非 S_LOAD 时到达被丢弃（多 cb 层 i_group 错位）。
