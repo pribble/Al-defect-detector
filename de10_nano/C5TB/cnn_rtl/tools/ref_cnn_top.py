@@ -225,12 +225,13 @@ def post_np_float(p, acc, co0, scale_f, bias_f, relu6_f):
     acc = acc[:, :, :out_c].astype(np.float64)
     sf = np.array(scale_f[co0:co0 + out_c], dtype=np.float64)
     bf = np.array(bias_f[co0:co0 + out_c], dtype=np.float64)
+    rf = np.array(relu6_f[co0:co0 + out_c], dtype=np.float64)
     v = acc * sf[None, None, :] + bf[None, None, :]
     if p.act == 1:
         v = np.maximum(v, 0)
     elif p.act == 2:
         v = np.maximum(v, 0)
-        v = np.minimum(v, relu6_f)  # 6/os（int8 域）
+        v = np.minimum(v, rf[None, None, :])  # 6/os（int8 域）
     v = np.sign(v) * np.floor(np.abs(v) + 0.5)  # round-half-away
     v = np.clip(v, -127, 127)  # saturate_cast<int8_t> + -128→-127
     return v.astype(np.int8)

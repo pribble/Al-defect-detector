@@ -16,33 +16,47 @@ import os, sys, random, struct
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ref_cnn_top import (LayerParam, CmaMem, nhwc8_bytes, in_addr, out_addr,
-                         w_addr, run_layer_tiled)
+                         w_addr, run_layer_tiled, post_np_float)
 
 
 def f32_bits(x):
     return struct.unpack('<I', struct.pack('<f', float(x)))[0]
 
 
-def gen_layer(idx, rng, out_dir):
-    typ = rng.choice([1, 4])
-    in_c = rng.choice([3, 8, 16])
-    out_c = rng.choice([8, 16, 20, 24])
-    if typ == 4:
-        out_c = in_c
-    k, s, p = 3, rng.choice([1, 2]), 1
-    act = rng.choice([0, 1, 2])
-    while True:
-        in_h = rng.choice([8, 10, 12, 16, 38, 45, 55, 75])   # 含非 tile 整数倍（覆盖 S_WR_TILE 最后行块裁剪）
-        in_w = in_h
-        out_h = (in_h + 2 * p - k) // s + 1
-        out_w = out_h
-        if out_h < 1:
-            in_h += 2
-            continue
+def gen_layer(idx, rng, out_dir, float_expect=False, boxhead=False):
+    if boxhead:
+        # 模拟 box 头/大 in_c 1×1 conv（score 偏差高发层型）：
+        # in_c 256/512，1×1，act=0 或 relu6；in_h=in_w 限制在 tb DDR 段内
+        typ = 1
+        in_c = rng.choice([256, 512])
+        out_c = rng.choice([16, 20, 24, 30])
+        k, s, p = 1, 1, 0
+        act = rng.choice([0, 2])
+        in_h = in_w = 19 if in_c <= 256 else 10
+        out_h, out_w = in_h, in_w
         tile = min(750 // out_w, out_h)
         in_tile = (tile - 1) * s + k
-        if tile <= 20 and in_tile <= 41:
-            break
+        assert tile <= 20 and in_tile <= 41
+    else:
+        typ = rng.choice([1, 4])
+        in_c = rng.choice([3, 8, 16])
+        out_c = rng.choice([8, 16, 20, 24])
+        if typ == 4:
+            out_c = in_c
+        k, s, p = 3, rng.choice([1, 2]), 1
+        act = rng.choice([0, 1, 2])
+        while True:
+            in_h = rng.choice([8, 10, 12, 16, 38, 45, 55, 75])   # 含非 tile 整数倍（覆盖 S_WR_TILE 最后行块裁剪）
+            in_w = in_h
+            out_h = (in_h + 2 * p - k) // s + 1
+            out_w = out_h
+            if out_h < 1:
+                in_h += 2
+                continue
+            tile = min(750 // out_w, out_h)
+            in_tile = (tile - 1) * s + k
+            if tile <= 20 and in_tile <= 41:
+                break
 
     in_bytes = nhwc8_bytes(in_c, in_h, in_w)
     w_bytes_ = nhwc8_bytes(out_c, 8, 9) * ((in_c + 7) // 8)
@@ -77,6 +91,21 @@ def gen_layer(idx, rng, out_dir):
                         dm.buf[in_addr(lp, cb, h, w, m)] = 0
 
     run_layer_tiled(lp, dm, wm)
+
+    if float_expect:
+        # cpu_ref float 参考期望：scale=mult/2^shift、bias=bias_mul/2^22、
+        # relu6=rcl6/2^22（q30 定点参数的精确 float 语义）。RTL 仍用定点
+        # scale.hex，此模式用于在 tb 中量化"RTL 定点 vs CPU float"的偏差。
+        scale_f = [lp.mult[i] / (1 << lp.shift) for i in range(out_c)]
+        bias_f = [lp.bias_mul[i] / (1 << 22) for i in range(out_c)]
+        relu6_f = [lp.rcl6[i] / (1 << 22) for i in range(out_c)]
+        dmf = CmaMem(len(dm.buf))
+        dmf.buf[:] = dm.buf
+        dmf.buf[lp.out_off * 8:] = bytearray(len(dmf.buf) - lp.out_off * 8)
+        run_layer_tiled(lp, dmf, wm,
+                        post=lambda p, a, c: post_np_float(
+                            p, a, c, scale_f, bias_f, relu6_f))
+        dm = dmf
 
     # ---- param 块（27 个 32-bit，struct parameter 字段序）----
     w_off_words = 0                       # 权重偏移（word=8B）
@@ -160,15 +189,21 @@ def gen_layer(idx, rng, out_dir):
 
 
 def main():
-    n = int(sys.argv[1]) if len(sys.argv) > 1 else 8
-    seed = int(sys.argv[2]) if len(sys.argv) > 2 else 7
-    out_dir = sys.argv[3] if len(sys.argv) > 3 else \
+    args = [a for a in sys.argv[1:] if not a.startswith('--')]
+    float_expect = '--float-expect' in sys.argv
+    boxhead = '--boxhead' in sys.argv
+    n = int(args[0]) if len(args) > 0 else 8
+    seed = int(args[1]) if len(args) > 1 else 7
+    out_dir = args[2] if len(args) > 2 else \
         os.path.join(os.path.dirname(os.path.abspath(__file__)),
                      "..", "verification", "vct")
     rng = random.Random(seed)
     for i in range(n):
-        gen_layer(i, rng, out_dir)
-    print(f"OK: {n} layers -> {out_dir}")
+        gen_layer(i, rng, out_dir, float_expect, boxhead)
+    mode = []
+    mode.append("boxhead" if boxhead else "rand")
+    mode.append("float-expect(cpu_ref)" if float_expect else "fixed-expect(RTL)")
+    print(f"OK: {n} layers -> {out_dir} ({','.join(mode)})")
 
 
 if __name__ == "__main__":

@@ -290,18 +290,7 @@ module tb_cnn_top;
     endtask
 
     // 填内存：把 32-bit 序列按半字摆进 64-bit mem
-    task fill32(input [31:0] base, input integer n, input reg [31:0] arr [0:511]);
-        integer j;
-        begin
-            for (j = 0; j < n; j = j + 1) begin
-                if (j[0])
-                    mem[(base + j*4) >> 3][63:32] = arr[j];
-                else
-                    mem[(base + j*4) >> 3][31:0] = arr[j];
-            end
-        end
-    endtask
-
+    //（iverilog 不支持 unpacked array task ports，故在 initial 内联展开）
     initial begin
         $readmemh("vec_cnn_top/param.hex", param_mem);
         $readmemh("vec_cnn_top/scale.hex", scale_mem);
@@ -327,9 +316,25 @@ module tb_cnn_top;
         #10 rst_n = 1;
         @(posedge clk);
 
-        // 填内存
-        fill32(PARAM_BASE, 27, param_mem);
-        fill32(SCALE_BASE, nscale, scale_mem);
+        // 填内存（原 fill32 任务内联：param/scale 32-bit → 64-bit mem 半字）
+        begin : fill_param
+            integer j;
+            for (j = 0; j < 27; j = j + 1) begin
+                if (j[0])
+                    mem[(PARAM_BASE + j*4) >> 3][63:32] = param_mem[j];
+                else
+                    mem[(PARAM_BASE + j*4) >> 3][31:0] = param_mem[j];
+            end
+        end
+        begin : fill_scale
+            integer j;
+            for (j = 0; j < nscale; j = j + 1) begin
+                if (j[0])
+                    mem[(SCALE_BASE + j*4) >> 3][63:32] = scale_mem[j];
+                else
+                    mem[(SCALE_BASE + j*4) >> 3][31:0] = scale_mem[j];
+            end
+        end
         for (i = 0; i < nin; i = i + 1)
             mem[(DDRIN_BASE + i*8) >> 3] = in_mem[i];
         for (i = 0; i < nw; i = i + 1)
@@ -376,17 +381,18 @@ module tb_cnn_top;
             integer cnt;
             cnt = 0;
             for (i = 0; i < nexp; i = i + 1) begin
-                if (exp_mem[i] == 64'hFFFFFFFFFFFFFFFF) continue;  // 哨兵
-                if (mem[(DDROUT_BASE + i*8) >> 3] !== exp_mem[i]) begin
-                    $display("  out event %0d: got=%016x exp=%016x", i,
-                             mem[(DDROUT_BASE + i*8) >> 3], exp_mem[i]);
-                    errors = errors + 1;
-                    if (errors > 10) begin
-                        $display("  ... more mismatches suppressed");
-                        disable cmp;
+                if (exp_mem[i] !== 64'hFFFFFFFFFFFFFFFF) begin  // 哨兵
+                    if (mem[(DDROUT_BASE + i*8) >> 3] !== exp_mem[i]) begin
+                        $display("  out event %0d: got=%016x exp=%016x", i,
+                                 mem[(DDROUT_BASE + i*8) >> 3], exp_mem[i]);
+                        errors = errors + 1;
+                        if (errors > 10) begin
+                            $display("  ... more mismatches suppressed");
+                            disable cmp;
+                        end
                     end
+                    cnt = cnt + 1;
                 end
-                cnt = cnt + 1;
             end
             $display("  compared %0d events", cnt);
         end
