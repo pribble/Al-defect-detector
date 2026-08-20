@@ -118,14 +118,20 @@ int ConvConverter(void *ctx, OpLite *op, KernelBase *kernel) {
         break;
     }
     // init scale：每输出通道 4 个 int32 定点 requant 参数（FPGA 侧量化优先，无浮点）
-    //   乘后域（CPU cvt_kernel 语义，与黑盒 float 公式 round(acc·ws·is/os + bias/os) 对齐）：
-    //   scale[0..out_c)          = mult      = round_half_away((ws*is/os)*2^30)
-    //   scale[out_c..2*out_c)    = bias_mul  = round_half_away(bias/os * 2^22)   ← q22（int32 安全）
-    //   scale[2*out_c..3*out_c)  = shift     = 30
-    //   scale[3*out_c..4*out_c)  = rcl6      = round_half_away(6/os * 2^22)      ← q22（relu6 上限，int8 域）
-    // 硬件侧（cnn_core_v2 requant S_REQ_MULC/S_REQ_MULC2）把 bias_mul/rcl6 左移 8 位
-    // 对齐 q30 乘后域（v = acc·mult + bias_mul<<8；relu6 钳 v ≤ rcl6<<8）。
-    // 公式与舍入（away-from-zero）对齐 tools/ref_int8.py quantize_params，已验证 500 轮一致
+    //   乘后域（CPU cvt_kernel 语义，与 float 公式 round(acc·ws·is/os + bias/os) 对齐）：
+    //   scale[0..out_c)          = mult      = round_half_away((ws*is/os)*2^shift)
+    //   scale[out_c..2*out_c)    = bias_mul  = round_half_away(bias/os * 2^(shift-8)) ← q(shift-8)（int32 安全）
+    //   scale[2*out_c..3*out_c)  = shift（每层自适应，见下）
+    //   scale[3*out_c..4*out_c)  = rcl6      = round_half_away(6/os * 2^(shift-8))    ← q(shift-8)（relu6 上限，int8 域）
+    // 硬件侧（cnn_core requant）把 bias_mul/rcl6 左移 8 位对齐 qshift 乘后域
+    //（v = acc·mult + bias_mul<<8；relu6 钳 v ≤ rcl6<<8）。
+    //
+    // shift 自适应（2026-08 box 头 score 修复）：旧实现硬编码 shift=30，
+    // box 头 output_scale 极小 → ws·is/os 大，mult=round(scale·2^30) 超 int32
+    // 回绕成负值 → 该通道 logits 系统性错误（score 全偏）。现按层内最大
+    // |ws·is/os| 选 shift：30 起逐次 -1，保证 |mult| < 2^31；下界 26
+    //（2^26 > 全模型最大 |acc| ≈ 3.7e7，仍可精确舍入）。bias/rcl6 同步用
+    // q(shift-8)，RTL 的 <<8 对齐不依赖具体 shift 值。
     device_param->scale = new int32_t[4*o_dims[1]];
     device_param->param.input_scale = param.input_scale;
     device_param->param.output_scale = param.output_scale;
@@ -138,7 +144,24 @@ int ConvConverter(void *ctx, OpLite *op, KernelBase *kernel) {
         };
         const double is_ = (double)param.input_scale;
         const double os_ = (double)param.output_scale;
-        for (int i = 0; i < o_dims[1]; i++) {
+        const int oc = o_dims[1];
+        // 选层 shift：使 max|ws·is/os|·2^shift < 2^31（mult 不超 int32）
+        int shift = 30;
+        double max_scale = 0.0;
+        for (int i = 0; i < oc; i++) {
+            const double ws = scale ? (double)scale[i] : 1.0;
+            const double f = std::fabs(ws * is_ / os_);
+            if (f > max_scale) max_scale = f;
+        }
+        while (shift > 26 && max_scale * (double)(1LL << shift) >= 2147483648.0)
+            shift--;
+        if (max_scale * (double)(1LL << shift) >= 2147483648.0) {
+            // scale ≥ 32 的极端层：mult 无法用 int32 表示，clamp 并告警
+            fprintf(stderr, "[SCALE] %s: |ws*is/os| max=%.6g 超出 int32 可表示"
+                    " 范围（shift=%d 仍溢出），mult 将被 clamp——score 不可信\n",
+                    node->name_.c_str(), max_scale, shift);
+        }
+        for (int i = 0; i < oc; i++) {
             const double ws = scale ? (double)scale[i] : 1.0;
             const double b  = ba    ? (double)ba[i]    : 0.0;
             const double f  = ws * is_ / os_;
@@ -147,19 +170,29 @@ int ConvConverter(void *ctx, OpLite *op, KernelBase *kernel) {
                 // ws 极小（量化权重≈0 的通道）：输出≈0（bias 主导后 relu 钳 0）。
                 // mult/bias_mul 保底 0、rcl6 保底 INT_MAX（硬件比较恒不成立=无上限）。
                 device_param->scale[i] = 0;
-                device_param->scale[o_dims[1] + i] = 0;
-                device_param->scale[3 * o_dims[1] + i] = INT_MAX;
+                device_param->scale[oc + i] = 0;
+                device_param->scale[3 * oc + i] = INT_MAX;
             } else {
-                device_param->scale[i] = rnd(f * (double)(1 << 30));
-                device_param->scale[o_dims[1] + i] = rnd(b / os_ * (double)(1 << 22));
-                // rcl6 溢出保底：6/os·2^22 在 os 很小时超 int32（回绕成负值会让
-                // 硬件 relu6 比较恒成立 → 该层输出全错）。超限给 INT_MAX =
-                // 硬件比较恒不成立（无上限），同时对齐黑盒实测 relu6 无 min(6)。
-                const double rcl6 = 6.0 / os_ * (double)(1 << 22);
-                device_param->scale[3 * o_dims[1] + i] =
+                double mv = f * (double)(1LL << shift);
+                device_param->scale[i] =
+                    (mv >= 2147483647.0) ? INT_MAX
+                    : (mv <= -2147483648.0) ? INT_MIN
+                    : rnd(mv);
+                // bias_mul q(shift-8)：rnd 前 clamp 防 int32 回绕
+                double bm = b / os_ * (double)(1LL << (shift - 8));
+                device_param->scale[oc + i] =
+                    (bm >= 2147483647.0) ? INT_MAX
+                    : (bm <= -2147483648.0) ? INT_MIN
+                    : rnd(bm);
+                // rcl6 溢出保底：6/os·2^(shift-8) 在 os 很小时超 int32
+                //（回绕成负值会让硬件 relu6 比较恒成立 → 该层输出全错）。
+                // 超限给 INT_MAX = 硬件比较恒不成立（无上限）；
+                // 此时 6/os > 127，饱和本身已充当上限，clamp 冗余。
+                const double rcl6 = 6.0 / os_ * (double)(1LL << (shift - 8));
+                device_param->scale[3 * oc + i] =
                     (rcl6 >= 2147483647.0) ? INT_MAX : rnd(rcl6);
             }
-            device_param->scale[2 * o_dims[1] + i] = 30;
+            device_param->scale[2 * oc + i] = shift;
         }
     }
 

@@ -632,13 +632,15 @@ int intelfpga_subgraph(struct DeviceGraphNode *node) {
       }
       start_fpga(foo, FPGAREG_CNN_START);
       // scale 溢出诊断（2026-08-10）：box 头 output_scale 极小，
-      // mult=round(ws·is/os·2^30)、bias_mul=round(bias/os·2^22) 可能超
-      // int32 回绕成负值 → 该通道 logits 系统性错误 → softmax 类别概率
-      // 全偏 → 上板几百框。黑盒时代 scale 是 float 无此问题（定点化新引入）。
+      // 旧实现 mult=round(ws·is/os·2^30) 硬编码 shift=30 会超 int32
+      // 回绕成负值 → 该通道 logits 系统性错误 → score 全偏。
+      // 现 conv_op.cc 按层自适应 shift（30→26），此处打印 mult/bias/rcl6
+      // 范围与 shift，确认不再回绕。
       if (fpga_debug && argp && argp->scale) {
         const int32_t *sc = argp->scale;
         const int oc = argp->param.output_c;
         long long min_m = 0, max_m = 0, min_b = 0, max_b = 0, min_r = 0, max_r = 0;
+        int shift = sc[2 * oc];
         for (int i = 0; i < oc; i++) {
           long long m = sc[i], b = sc[oc + i], r = sc[3 * oc + i];
           if (i == 0) {
@@ -657,9 +659,9 @@ int intelfpga_subgraph(struct DeviceGraphNode *node) {
         const bool ovf =
             (max_m > 2147483647LL || min_m < -2147483648LL ||
              max_b > 2147483647LL || min_b < -2147483648LL);
-        printf("[SCALE] %s out_c=%d mult[%lld,%lld] bias_mul[%lld,%lld]"
+        printf("[SCALE] %s out_c=%d shift=%d mult[%lld,%lld] bias_mul[%lld,%lld]"
                " rcl6[%lld,%lld]%s\n",
-               node->name_.c_str(), oc, min_m, max_m, min_b, max_b,
+               node->name_.c_str(), oc, shift, min_m, max_m, min_b, max_b,
                min_r, max_r, ovf ? "  *** int32 OVERFLOW ***" : "");
       }
       // DUMP_LAYER_OUT=1：dump 本层输出区（NHWC8 原始布局，未做
