@@ -150,7 +150,8 @@ COOLDOWN: 5 帧冷却，防止同一铝片重复触发
 最佳帧 → 圆识别+智能裁剪 → resize(300×300) → tobytes()（灰度 raw，无 JPEG）
   → POST FPGA /predict
   → 响应 {"len", "action", "result":[{class_name, loc[x1,y1,x2,y2], score, prediction_time}]}
-  → action=NONE（无任何检测框）：不做动作（不抓取/不报警/不写库），仅记日志
+  → action=NONE（无任何检测框）：按正常(OK)处理——OK 抓取 + 正常存图写库 + 前端
+    历史展示（不报警；取舍：模型漏检的缺陷也会被放行，宁丢缺陷不漏片）
   → action=NG（检出缺陷类）：报警 + NG 抓取 + 画框标注（_draw_defect_box）写库
   → action=OK（检出 zheng_chang）：OK 抓取 + 正常结果写库
   （正常类也会产生框，len>0 不再代表缺陷，一律以 action 为准分派）
@@ -291,7 +292,8 @@ min_radius_ratio_frame = 0.18  # 圆 r/帧短边 占比下限: 低于此值的�
 > 说明：`gaussian_kernel` 可从 config 读（默认 21）；`grab_position`/
 > `release_position` 旧键已移除。`[disc]` 段为启动时读取，改动需重启服务。
 > 软处理参数在 `[detection]` 段（`use_soft_processing`、`binarize_mode`、
-> `trigger_k`、`tracking_timeout_frames` 等），同样启动时读取。
+> `trigger_k`、`tracking_timeout_frames`、`light_change_threshold` 等），同样
+> 启动时读取。
 
 ## 运行
 

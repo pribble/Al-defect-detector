@@ -117,6 +117,10 @@ USE_SSIM_GATE = int(_det_cfg("use_ssim_gate", "0"))
 # TRACKING 超时帧数: 进入跟踪后超过该帧数仍不回落, 强制取中间帧推理 (防铝片停
 # 留在视野内导致状态机永久卡死、后续铝片不再触发)
 TRACKING_TIMEOUT_FRAMES = int(_det_cfg("tracking_timeout_frames", "90"))
+# 灯光/环境突变保护阈值: 当前帧亮度均值相对背景均值偏差超过此值时判定环境变化
+# (关灯/换灯/亮度跳变)——背景重置为当前帧并清空基线重新暖机, 状态机强制回 IDLE;
+# 0=关闭。正常铝片经过只改变局部亮度, 帧均值变化 (≈20-30) 远小于 40, 不误触发
+LIGHT_CHANGE_THRESHOLD = float(_det_cfg("light_change_threshold", "40"))
 
 # ---- 圆形铝片识别 + 智能裁剪参数 (config.ini [disc] 段, 改动后需重启服务) ----
 
@@ -435,7 +439,27 @@ class Consumer(threading.Thread):
         return fg_ratio > self._baseline_mean + TRIGGER_K * self._baseline_std
 
     def _update_background(self, gray, fg_ratio):
-        """暖机期无条件更新; 稳定期只在无目标时更新, 避免吸收铝片/高光."""
+        """暖机期无条件更新; 稳定期只在无目标时更新, 避免吸收铝片/高光.
+
+        灯光/环境突变保护 (LIGHT_CHANGE_THRESHOLD): 帧均值相对背景均值偏差超过
+        阈值时判定环境变化——背景重置为当前帧、清空 fg_ratio 基线重新暖机, 并
+        强制状态机回 IDLE 丢弃进行中的跟踪 (防旧背景永久"有目标"导致一直触发)。
+        """
+        if self._background is not None and LIGHT_CHANGE_THRESHOLD > 0:
+            delta = abs(float(gray.mean()) - float(self._background.mean()))
+            if delta > LIGHT_CHANGE_THRESHOLD:
+                logger.warning('灯光/环境突变: 帧均值偏差 %.1f > %.0f, 重置背景并回 IDLE',
+                               delta, LIGHT_CHANGE_THRESHOLD)
+                self._background = gray.astype(np.float32)
+                self._baseline = []
+                self._baseline_mean = 0.0
+                self._baseline_std = 0.0
+                self._state = 0
+                self._buf = 0
+                self._tracking_count = 0
+                self._best_key = None
+                self._best_frame = None
+                return
         warmup = len(self._baseline) < BASELINE_INIT_FRAMES
         if not warmup and self._triggered(fg_ratio):
             return
@@ -705,11 +729,15 @@ class Consumer(threading.Thread):
         inference_result = json.loads(response.text)
         logger.info(inference_result)
 
-        # action (FPGA 判定): NONE=无任何检测框 → 不做动作; NG=检出缺陷类; OK=检出 zheng_chang
+        # action (FPGA 判定): NONE=无任何检测框; NG=检出缺陷类; OK=检出 zheng_chang
         action = inference_result.get('action')
         if action == 'NONE':
-            # 无检测框 (漏检/无目标): 不抓取/不报警/不写库, 仅记日志
-            logger.info('推理无检测框 (len=0), 跳过动作')
+            # 推理无检测框 (模型漏检/无目标): 触发/选帧/定圆/推理链路均正常, 图本身
+            # 合格——按正常(OK)处理: OK 抓取 + 正常存图写库 + 前端历史展示 (不报警;
+            # 取舍: 若缺陷被模型漏检也会被放行, 宁丢缺陷不漏片)
+            logger.info('推理无检测框 (len=0), 按正常(OK)处理')
+            _submit_pool(trigger_grab, "OK")
+            self._save_normal_result(uid, file_name, annotated_image, original_image)
             return
         if action == 'NG':
             self._handle_inference_result(inference_result, uid, file_name, annotated_image, original_image)
