@@ -74,7 +74,7 @@ static void dbg_dump_layer_ref(const char *name,
   }
   const struct parameter &pm = argp->param;
   const int in_cb = (pm.in_c + 7) / 8;
-  const int out_cb = (pm.out_c + 7) / 8;
+  const int out_cb = (pm.output_c + 7) / 8;
   const int in_bytes = in_cb * pm.in_h * pm.in_w * 8;
   // DW（type=4）权重区只分配对角块（dw_conv2d_weight_reorganize：
   // out_cb × 1 × 8 × k² × 8），不是 conv 的 in_cb 倍
