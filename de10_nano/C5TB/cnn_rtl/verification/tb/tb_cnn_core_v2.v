@@ -29,6 +29,7 @@ module tb_cnn_core_v2;
     // 输入流
     reg i_valid = 0;
     wire i_ready;
+    wire i_pf_ready;
     reg [63:0] i_data = 0;
     // 权重流
     reg iw_valid = 0;
@@ -45,7 +46,7 @@ module tb_cnn_core_v2;
         .cfg_we(cfg_we), .cfg_sel(cfg_sel), .cfg_addr(cfg_addr),
         .cfg_wdata(cfg_wdata),
         .start(start),
-        .i_valid(i_valid), .i_ready(i_ready), .i_data(i_data),
+        .i_valid(i_valid), .i_ready(i_ready), .i_pf_ready(i_pf_ready), .i_data(i_data),
         .iw_valid(iw_valid), .ow_ready(ow_ready), .iw_data(iw_data),
         .o_valid(o_valid), .o_ready(o_ready), .o_data(o_data),
         .o_done(o_done)
@@ -87,7 +88,7 @@ module tb_cnn_core_v2;
     // 输入驱动（行块段）
     //-----------------------------------------------------------------------
     always @(posedge clk) begin
-        if (rb_active && i_ready) begin
+        if (rb_active && (i_ready || i_pf_ready)) begin
             if (in_rb_cnt < in_seg) begin
                 i_valid <= 1'b1;
                 i_data  <= mem_in[in_ptr + in_rb_cnt];

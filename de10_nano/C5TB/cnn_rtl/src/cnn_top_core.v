@@ -111,7 +111,7 @@ module cnn_top_core (
     reg  [2:0]  core_cfg_sel;
     reg  [19:0] core_cfg_addr;
     reg  [31:0] core_cfg_wdata;
-    wire        core_i_valid, core_i_ready;
+    wire        core_i_valid, core_i_ready, core_i_pf_ready;
     wire [63:0] core_i_data;
     wire        core_iw_valid, core_ow_ready;
     wire [63:0] core_iw_data;
@@ -123,7 +123,7 @@ module cnn_top_core (
         .cfg_we(core_cfg_we), .cfg_sel(core_cfg_sel),
         .cfg_addr(core_cfg_addr), .cfg_wdata(core_cfg_wdata),
         .start(core_start), .o_done(core_done),
-        .i_valid(core_i_valid), .i_ready(core_i_ready), .i_data(core_i_data),
+        .i_valid(core_i_valid), .i_ready(core_i_ready), .i_pf_ready(core_i_pf_ready), .i_data(core_i_data),
         .iw_valid(core_iw_valid), .ow_ready(core_ow_ready), .iw_data(core_iw_data),
         .o_valid(core_o_valid), .o_ready(core_o_ready), .o_data(core_o_data)
     );
@@ -282,15 +282,15 @@ module cnn_top_core (
             lr_last_seg_q  <= 0;
         end else if (lr_round_reset) begin
             lr_round_end_q <= 0;
-        end else if (lr_round_end_q && lr_pending == 8'd0 && !core_i_ready && !lr_last_seg_q) begin
-            lr_round_end_q <= 0;   // 中间段：返回清空 + core 离开 S_LOAD → 解锁
+        end else if (lr_round_end_q && lr_pending == 8'd0 && core_i_pf_ready && !lr_last_seg_q) begin
+            lr_round_end_q <= 0;   // 中间段：返回清空 + core 开始下一 cb 预取 → 解锁
         end else if (lr_last_cmd && lr_read && !lr_waitrequest) begin
             lr_round_end_q <= 1;
             lr_last_seg_q  <= (dma_icb == lr_last_cb_r);
         end
     end
     wire lr_round_reset = (lr_pending == 8'd0) && lr_round_end_q && core_i_ready && lr_last_seg_q;
-    assign lr_read = core_i_ready && (lr_pending < 8'd4) && !lr_round_end_q && !lr_round_reset;
+    assign lr_read = (core_i_ready || core_i_pf_ready) && (lr_pending < 8'd4) && !lr_round_end_q && !lr_round_reset;
     // wr 轮末（每 o_group 一轮 = p_k==1 ? 8 : 72 个字）：轮内计数到末值且
     // 命令发出后停止——否则 wbeat 卡在末值而 (dma_wbeat < w_rb_beats_r)
     // 恒真，重复命令无限发出；也避免轮间在途返回在 core 非 S_WEIGHT 时

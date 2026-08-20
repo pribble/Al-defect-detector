@@ -76,6 +76,7 @@ module cnn_core #(
     // ---- 输入流（64-bit NHWC8 块序，signed int8×8）----
     input  wire                i_valid,
     output wire                i_ready,
+    output wire                i_pf_ready,   // 预取就绪：MAC 期间为下一 cb 的 lb 乒乓缓冲收数
     input  wire [63:0]         i_data,
 
     // ---- 权重流（64-bit，slice 序 [cb_out][cb_in][8][9][8] 连续）----
@@ -171,7 +172,8 @@ module cnn_core #(
     // 寄存器堆 + 读端口 mux，A&S 内存爆到 40GB+；单维数组 + 常量乘法拼接
     // 地址是官方推荐的可靠推断写法，功能/时序完全不变）。
     //-----------------------------------------------------------------------
-    (* ramstyle = "M10K, no_rw_check" *) reg [63:0] lb [0:G_MAX_IN_ROWS*G_MAX_W-1];
+    (* ramstyle = "M10K, no_rw_check" *) reg [63:0] lb0 [0:G_MAX_IN_ROWS*G_MAX_W-1];
+    (* ramstyle = "M10K, no_rw_check" *) reg [63:0] lb1 [0:G_MAX_IN_ROWS*G_MAX_W-1];
     (* ramstyle = "M10K, no_rw_check" *) reg signed [255:0] acc [0:G_MAX_OROWS*G_MAX_OW-1];
 
     // 单维索引拼接（常量乘法综合时折叠成移位/加法，不产生逻辑）
@@ -233,13 +235,24 @@ module cnn_core #(
     (* preserve *) reg [15:0]       acc_wa_q;         // acc 写口统一地址（每拍采样：S_MAC_ACC 拍取写回地址、其他拍取清零地址，写口单一寄存器源）
     (* preserve *) reg [15:0]       acc_clr_wa;       // acc 清零地址（S_ACC_CLR 沿前 = 上拍寄存的推进后地址，断 rq_row→porta 组合链 P1）
 
-    // lb 写（流水打拍）：S_LOAD 收拍寄存地址/数据、下一拍写入；退出 S_LOAD 后
-    // 由下一状态补写最后位置（S_ACC_CLR：首轮；S_WEIGHT：多 i_group 重装轮
-    // load_first=0 直接进 S_WEIGHT 无 S_ACC_CLR，最后 1 字必须在此补写；
-    // 后续拍重复写同位置，数据相同无害）
+    // lb 写（流水打拍 + 乒乓双缓冲）：
+    //   - S_LOAD/S_ACC_CLR/S_LOAD_FLUSH：写当前段缓冲 mac_buf_sel
+    //     （S_LOAD 收拍寄存地址/数据、下一拍写入；退出 S_LOAD 后由
+    //     S_ACC_CLR 或 S_LOAD_FLUSH 补写最后位置）
+    //   - pf_active/pf_flush_q：预取写 ~mac_buf_sel（下一 cb 缓冲）
+    // 两路互斥：预取只在 MAC 状态期间活动，S_LOAD 系只在装载期活动。
     always @(posedge clk) begin
-        if (state == S_LOAD || state == S_ACC_CLR || state == S_WEIGHT)
-            lb[lb_wa_q] <= lb_wd_q;
+        if (state == S_LOAD || state == S_ACC_CLR || state == S_LOAD_FLUSH) begin
+            if (mac_buf_sel == 0)
+                lb0[lb_wa_q] <= lb_wd_q;
+            else
+                lb1[lb_wa_q] <= lb_wd_q;
+        end else if (pf_active || pf_flush_q) begin
+            if (mac_buf_sel == 0)
+                lb1[pf_wa_q] <= pf_wd_q;
+            else
+                lb0[pf_wa_q] <= pf_wd_q;
+        end
     end
 
     integer lane, m;
@@ -279,6 +292,8 @@ module cnn_core #(
     localparam S_REQ_OUT2   = 5'd20;   // requant 拍级 10（v_round_l >>> shift → v_shifted）
     localparam S_REQ_OUT3   = 5'd21;   // requant 拍级 11（wrap → o_data，o_valid 拉高）
     localparam S_DONE       = 5'd22;
+    localparam S_PF_WAIT    = 5'd23;   // 等预取完成（下一 cb 已装入 ~mac_buf_sel）
+    localparam S_LOAD_FLUSH = 5'd24;   // S_LOAD 末字补写拍（首 cb 后）
 
     reg [4:0] state;
     reg [11:0] load_row, load_col;
@@ -293,11 +308,26 @@ module cnn_core #(
     reg [15:0] rq_row, rq_col;      // ≤ out_row_tile×out_w（≤19×150），16-bit 足够
     reg        acc_clr_done_q;      // 首 cb 装载期间 acc 清零已完成标志（S_LOAD 并行清 acc 用）
 
+    // lb 乒乓缓冲控制：mac_buf_sel = 当前 MAC 正在读的缓冲；预取写 ~mac_buf_sel
+    reg        mac_buf_sel;
+    reg        pf_start;            // S_WEIGHT 完成拍发出的预取启动脉冲（主状态机驱动）
+    // 预取控制器（独立 always 驱动，避免与主状态机多驱动）：
+    reg        pf_active;           // 预取进行中
+    reg        pf_done_q;           // 下一 cb 已完整装入 ~mac_buf_sel
+    reg [11:0] pf_row, pf_col;      // 预取写位置（行/列）
+    reg [15:0] pf_wa_q;             // 预取写地址打拍
+    reg [63:0] pf_wd_q;             // 预取写数据打拍
+    reg        pf_flush_q;          // 预取末字写回脉冲
+
     // 行缓冲行 r 对应输入行 base_row_reg + r；有效 = 输入行 ∈ [0, in_h)
     wire signed [12:0] load_in_row = base_row_reg + load_row;
     wire load_row_valid = (load_in_row >= 0) && (load_in_row < in_h_reg);
     // 当前 rq 指针是否指向 acc 最后一个字（S_LOAD 并行清 acc 的完成判断）
     wire acc_clr_last_w = (rq_row == out_row_tile_reg - 1) && (rq_col == out_w_reg - 1);
+    // 预取行有效判断（与 load_row_valid 同源，仅行计数不同）
+    wire signed [12:0] pf_in_row = base_row_reg + pf_row;
+    wire pf_row_valid = (pf_in_row >= 0) && (pf_in_row < in_h_reg);
+    wire [20:0] pf_waddr = pf_row*G_MAX_W + pf_col;
 
     //-----------------------------------------------------------------------
     // 主状态机
@@ -313,6 +343,8 @@ module cnn_core #(
             mac_row <= 0; mac_col <= 0; mac_t <= 0;
             rq_row <= 0; rq_col <= 0;
             acc_clr_done_q <= 0;
+            mac_buf_sel <= 0;
+            pf_start <= 0;
             mac_c_valid_r <= 0;
             acc_local <= 256'sd0;   // 复位归并到主状态机（单一驱动，避免 Quartus 10028）
             acc_wr_q <= 256'sd0;
@@ -325,6 +357,7 @@ module cnn_core #(
             acc_addr_mac_r <= 16'd0;
             acc_clr_wa <= 16'd0;
         end else begin
+            pf_start <= 0;   // 单拍脉冲，默认清零；S_WEIGHT 完成拍置 1
             case (state)
                 S_IDLE: begin
                     o_done <= 0;
@@ -333,6 +366,7 @@ module cnn_core #(
                         load_first <= 1;
                         o_group <= 0; i_group <= 0;
                         acc_clr_done_q <= 0;
+                        mac_buf_sel <= 0;
                         state <= S_LOAD;
                     end
                 end
@@ -382,7 +416,7 @@ module cnn_core #(
                                     load_first <= 0;
                                     if (acc_clr_done_q || acc_clr_last_w) begin
                                         i_group <= 0;
-                                        state <= S_WEIGHT;
+                                        state <= S_LOAD_FLUSH;   // 补写 S_LOAD 末字后进 S_WEIGHT
                                     end else
                                         state <= S_ACC_CLR;
                                 end else
@@ -392,6 +426,12 @@ module cnn_core #(
                         end else
                             load_col <= load_col + 1;
                     end
+                end
+
+                //---- S_LOAD 末字补写拍（首 cb 后，lb 写块在本状态写 lb_wa_q）----
+                S_LOAD_FLUSH: begin
+                    o_valid <= 0;
+                    state <= S_WEIGHT;
                 end
 
                 //---- acc 清零（每输出组开始，逐 256-bit 字）----
@@ -440,6 +480,8 @@ module cnn_core #(
                             wf_t <= 4'd0;
                             mac_row <= 0; mac_col <= 0; mac_t <= 0;
                             mac_kh_q <= 4'd0; mac_kw_q <= 4'd0;
+                            // 启动下一 cb 预取（CONV 且还有后续输入 cb）
+                            pf_start <= (type_reg != 4 && i_group + 1 < in_cb_reg);
                             state <= S_MAC_ADDR;
                         end else
                             wf_cnt <= wf_cnt + 1;
@@ -531,7 +573,11 @@ module cnn_core #(
                                     state <= S_REQ_ADDR;
                                 end else begin
                                     i_group <= i_group + 1;
-                                    state <= S_LOAD;   // 流式：重装下一输入 cb（lb 单块驻留）
+                                    if (pf_done_q) begin
+                                        mac_buf_sel <= ~mac_buf_sel;
+                                        state <= S_WEIGHT;   // 下一 cb 已预取进 ~mac_buf_sel
+                                    end else
+                                        state <= S_PF_WAIT;  // 等预取完成
                                 end
                             end else begin
                                 mac_row <= mac_row + 1;
@@ -546,6 +592,15 @@ module cnn_core #(
                         mac_kh_q <= (k_reg == 3) ? mac_kh_next : 4'd0;
                         mac_kw_q <= (k_reg == 3) ? mac_kw_next : 4'd0;
                         state <= S_MAC_ADDR;
+                    end
+                end
+
+                //---- 等预取完成（下一 cb 完整装入 ~mac_buf_sel 后切缓冲进 S_WEIGHT）----
+                S_PF_WAIT: begin
+                    o_valid <= 0;
+                    if (pf_done_q) begin
+                        mac_buf_sel <= ~mac_buf_sel;
+                        state <= S_WEIGHT;
                     end
                 end
 
@@ -625,6 +680,7 @@ module cnn_core #(
                                     rq_row <= 0; rq_col <= 0;
                                     acc_clr_wa <= 16'd0;
                                     acc_clr_done_q <= 0;
+                                    mac_buf_sel <= 0;
                                     load_first <= 1;
                                     state <= S_LOAD;   // 流式：重装新 o_group 的输入 cb
                                 end
@@ -653,9 +709,60 @@ module cnn_core #(
     end
 
     //-----------------------------------------------------------------------
+    // 预取控制器（独立 always）：MAC 期间把下一 cb 装入 ~mac_buf_sel。
+    // 与 S_LOAD 系写口互斥（预取只在 MAC/S_PF_WAIT 期间活动），lb 写块
+    // 按 pf_active/pf_flush_q 写 ~mac_buf_sel；pad 行写 0 不消费 i_valid。
+    //-----------------------------------------------------------------------
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            pf_active <= 0;
+            pf_done_q <= 0;
+            pf_row <= 0; pf_col <= 0;
+            pf_wa_q <= 16'd0;
+            pf_wd_q <= 64'h0;
+            pf_flush_q <= 0;
+        end else if (state == S_LOAD && load_first) begin
+            // 新 o_group 首 cb 装载期间：清预取状态，防跨组串扰
+            pf_active <= 0;
+            pf_done_q <= 0;
+            pf_row <= 0; pf_col <= 0;
+            pf_wa_q <= 16'd0;
+            pf_wd_q <= 64'h0;
+            pf_flush_q <= 0;
+        end else if (pf_start) begin
+            // S_WEIGHT 完成拍启动下一 cb 预取
+            pf_active <= 1;
+            pf_done_q <= 0;
+            pf_row <= 0; pf_col <= 0;
+            pf_wa_q <= 16'd0;
+            pf_wd_q <= 64'h0;
+            pf_flush_q <= 0;
+        end else if (pf_active) begin
+            if (!pf_row_valid || i_valid) begin
+                pf_wa_q <= pf_waddr[15:0];
+                pf_wd_q <= pf_row_valid ? i_data : 64'h0;
+                if (pf_col == in_w_reg - 1) begin
+                    pf_col <= 0;
+                    if (pf_row == in_row_tile_reg - 1) begin
+                        pf_row <= 0;
+                        pf_active <= 0;
+                        pf_done_q <= 1;
+                        pf_flush_q <= 1;   // 末字下一拍由 lb 写块写回
+                    end else
+                        pf_row <= pf_row + 1;
+                end else
+                    pf_col <= pf_col + 1;
+            end
+        end else if (pf_flush_q) begin
+            pf_flush_q <= 0;
+        end
+    end
+
+    //-----------------------------------------------------------------------
     // 握手
     //-----------------------------------------------------------------------
     assign i_ready = (state == S_LOAD) && load_row_valid;
+    assign i_pf_ready = pf_active && pf_row_valid;
     assign ow_ready = (state == S_WEIGHT);
 
     //-----------------------------------------------------------------------
@@ -705,7 +812,7 @@ module cnn_core #(
             lb_q <= 64'h0;
             acc_q <= 256'sd0;
         end else begin
-            lb_q <= lb[lb_addr_r];
+            lb_q <= mac_buf_sel ? lb1[lb_addr_r] : lb0[lb_addr_r];
             // 权重采样（S_MAC_RD 拍）：mac_t 在 S_MAC_ACC 末更新，隔 S_MAC_ADDR 拍到
             // S_MAC_RD 沿共 2 拍窗口，拆 mac_t→wbuf 72:1 mux 组合链（原每拍采样
             // 窗口仅 1 拍，w_q 路径 slack -5.189；S_MAC_ADDR/RD 拍不用 w_q，
