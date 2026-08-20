@@ -144,7 +144,7 @@ def _hough_circle(gray, cfg):
 
 
 def _sanity_check(cx, cy, r, h, w, cfg):
-    """通用合理性过滤: 半径范围 + 圆心大致落在帧内.
+    """通用合理性过滤: 半径范围 (圆心是否出画面由 probe_disc 单独检查).
 
     注意: 不再要求圆完整落在画面内——圆完整度交由 score_mask() 选帧 + 调用方
     (api._smart_crop) 的 min_completeness 门槛决定, 出界圆不直接判废.
@@ -154,8 +154,6 @@ def _sanity_check(cx, cy, r, h, w, cfg):
     min_r = cfg["min_radius_ratio"] * min(h, w)
     max_r = cfg["max_radius_ratio"] * min(h, w)
     if not (min_r <= r <= max_r):
-        return False
-    if not (-EDGE_TOL <= cx <= w + EDGE_TOL and -EDGE_TOL <= cy <= h + EDGE_TOL):
         return False
     return True
 
@@ -256,24 +254,6 @@ def find_disc_robust(gray, method="mask", cfg=None, background=None):
     return None, last_info
 
 
-def find_disc(gray, method="mask", cfg=None, background=None):
-    """
-    定位铝片圆心与半径 (单方法, 不回退).
-
-    Args:
-        gray: 灰度帧 (BGR 会自动转灰度).
-        method: "mask" | "hough".
-        cfg: dict, 缺省用 DEFAULTS.
-        background: 可选 EMA 背景 (mask 方法背景差分路径用).
-
-    Returns:
-        (cx, cy, r) 或 None (未检出 / 合理性过滤不通过).
-        需要回退链或失败原因时用 find_disc_robust() / probe_disc().
-    """
-    circle, _ = probe_disc(gray, method=method, cfg=cfg, background=background)
-    return circle
-
-
 def score_mask(mask, cfg=None):
     """
     在低分辨率前景掩码上拟合圆并计算"圆完整度"打分 (Consumer 逐帧选帧用).
@@ -331,3 +311,17 @@ def in_frame_fraction(circle, h, w):
     cm = np.zeros((h, w), np.uint8)
     cv2.circle(cm, (int(cx), int(cy)), max(int(r), 1), 255, -1)
     return float(np.count_nonzero(cm) / (np.pi * r * r))
+
+
+def crop_box(circle, h, w, margin_ratio):
+    """以圆心为中心计算正方形裁剪框 (四周留黑边), 返回 (x0, y0, side).
+
+    api.Consumer._smart_crop 与 routes._disc_frame_overlay 共用, 避免两处重复
+    计算裁剪框; side 越界钳制到帧内, 圆心越界时窗口贴边.
+    """
+    cx, cy, r = circle
+    margin = int(r * margin_ratio)
+    side = min(int(2 * (r + margin)), w, h)
+    x0 = min(max(int(cx) - side // 2, 0), w - side)
+    y0 = min(max(int(cy) - side // 2, 0), h - side)
+    return x0, y0, side

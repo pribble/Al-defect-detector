@@ -17,7 +17,7 @@ from flask import Blueprint, Response, render_template, request
 
 import database
 import shared
-from disc_detect import find_disc_robust
+from disc_detect import find_disc_robust, crop_box
 
 bp = Blueprint('main', __name__)
 
@@ -351,11 +351,9 @@ def _disc_frame_overlay(display, frame):
         cx, cy, r = (int(v) for v in circle)
         cv2.circle(display, (int(cx * sx), int(cy * sy)), max(int(r * sx), 1), (0, 255, 0), 2)
         cv2.circle(display, (int(cx * sx), int(cy * sy)), 2, (0, 255, 0), -1)
-        # 实时预览裁剪框 (与 api.Consumer._smart_crop 相同逻辑)
-        margin = int(r * getattr(shared, 'disc_margin_ratio', 0.10))
-        side = min(int(2 * (r + margin)), w, h)
-        x0 = min(max(int(cx) - side // 2, 0), w - side)
-        y0 = min(max(int(cy) - side // 2, 0), h - side)
+        # 实时预览裁剪框 (与 api.Consumer._smart_crop 相同逻辑, 共用 crop_box)
+        margin_ratio = getattr(shared, 'disc_margin_ratio', 0.10)
+        x0, y0, side = crop_box((cx, cy, r), h, w, margin_ratio)
         cv2.rectangle(
             display,
             (int(x0 * sx), int(y0 * sy)),

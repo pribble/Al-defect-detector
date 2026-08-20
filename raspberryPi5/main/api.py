@@ -26,7 +26,7 @@ from skimage.metrics import structural_similarity as compare_ssim
 from logger import setup_log
 
 from camera import frame_queue, Producer
-from disc_detect import find_disc_robust, score_mask, in_frame_fraction
+from disc_detect import find_disc_robust, score_mask, in_frame_fraction, crop_box
 import arm_control
 import database
 import shared
@@ -82,11 +82,9 @@ WHITE_RATIO_THRESHOLD = 0.1
 STABILITY_STD_THRESHOLD = 0.01
 STABILITY_MEAN_THRESHOLD = 0.8
 SSIM_HISTORY_SIZE = 9
-FRAME_SKIP_COUNT = 10
 TRIGGER_COOLDOWN = 5  # 触发后冷却帧数, 防同一铝片重复触
 
 LABEL_NORMAL = 'zheng_chang'
-DEFECT_LABELS = ['ca_shang', 'zang_wu', 'zhe_zhou', 'zhen_kong']
 
 GAUSSIAN_KERNEL = int(shared.config.get("Configuration", "gaussian_kernel", fallback="21"))
 BINARY_THRESHOLD_1 = 100
@@ -293,24 +291,12 @@ def _extract_fg_ratio(gray, background):
 
 
 # ============================================================
-# FPS 标注
-# ============================================================
-
-def _draw_fps_label(image, fps: float):
-    """在图片左上角绘制帧率标注"""
-    label = "(Capture) {:.1f} FPS".format(fps)
-    cv2.putText(image, label, (180, 30), cv2.FONT_HERSHEY_COMPLEX, 0.3, (38, 0, 255), 1)
-    return image
-
-
-# ============================================================
 # 图片消费者 (检测 + 推理 + 分拣)
 # ============================================================
 
 class Consumer(threading.Thread):
     """
     从 frame_queue 消费帧, 执行 SSIM 触发检测、FPGA 推理、结果处理.
-    每 FRAME_SKIP_COUNT 帧处理一次, 其余帧直接丢弃以平衡负载.
     """
 
     def __init__(self):
@@ -649,14 +635,10 @@ class Consumer(threading.Thread):
                 logger.warning('智能裁剪: 圆完整度 %.2f < %.2f, 回退整帧缩放',
                                in_frac, DISC_MIN_COMPLETENESS)
                 return None, None
-            margin = int(r * DISC_MARGIN_RATIO)
-            side = int(2 * (r + margin))
-            side = min(side, w, h)  # 窗口不得超出画面
+            x0, y0, side = crop_box(circle, h, w, DISC_MARGIN_RATIO)
             if side < 32:
                 logger.warning('智能裁剪: 裁剪边长过小(%d), 回退整帧缩放', side)
                 return None, None
-            x0 = min(max(int(cx) - side // 2, 0), w - side)
-            y0 = min(max(int(cy) - side // 2, 0), h - side)
             crop = image[y0:y0 + side, x0:x0 + side]
             if crop.shape[0] < 32 or crop.shape[1] < 32:
                 return None, None
@@ -746,15 +728,6 @@ class Consumer(threading.Thread):
             self._save_normal_result(uid, file_name, annotated_image, original_image)
             return
         if action == 'NG':
-            self._handle_inference_result(inference_result, uid, file_name, annotated_image, original_image)
-        else:
-            _submit_pool(trigger_grab, "OK")
-            self._save_normal_result(uid, file_name, annotated_image, original_image)
-
-    def _handle_inference_result(self, inference_result, uid, file_name, annotated_image, original_image):
-        action = inference_result.get('action', 'OK')
-
-        if action == "NG":
             self._handle_defect(inference_result, uid, file_name, annotated_image, original_image)
         else:
             _submit_pool(trigger_grab, "OK")
