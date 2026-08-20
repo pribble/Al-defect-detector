@@ -128,7 +128,7 @@ cnn_rtl/
 |---|---|---|
 | 1 ✅ | pr/sr 参数读单笔在途 → **多笔在途（≤4）流水读**：`cnn_top_core` 命令计数/返回计数分离，read 连续拉高直至发完或在途满；`tb_cnn_top` pr/sr 读模型改 4 深队列 | `run_cnn_top.sh` 6/6 PASS、`run_cnn_core_v2.sh` 16/16 PASS |
 | 2 ✅ | `cnn_core` **S_ACC_CLR 与 S_LOAD 并行**：首 cb 装载期间同拍清 acc（lb/acc 独立 RAM，写口互斥），清完直接进 S_WEIGHT，未清完保留 S_ACC_CLR 兜底续清 | `run_cnn_core_v2.sh` 16/16 PASS、`run_cnn_top.sh` 6/6 PASS |
-| 3 ✅ | `cnn_core` **lb 双缓冲 + 输入预取**：MAC 期间预取下一 cb 到 ~mac_buf_sel（新增 `i_pf_ready`、预取控制器、`S_PF_WAIT`/`S_LOAD_FLUSH`）；`cnn_top_core` `lr_read` 支持预取就绪与中间段解锁；**M10K 超量修复：`G_MAX_W` 512→304**（软件实际 ≤302） | `run_cnn_core_v2.sh` 16/16 PASS、`run_cnn_top.sh` 6/6 PASS（Quartus 待复验） |
+| 3 ✅ | `cnn_core` **lb 双缓冲 + 输入预取**：MAC 期间预取下一 cb 到 ~mac_buf_sel（新增 `i_pf_ready`、预取控制器、`S_PF_WAIT`/`S_LOAD_FLUSH`）；`cnn_top_core` `lr_read` 支持预取就绪与中间段解锁；**M10K 超量修复：`G_MAX_W` 512→304**（软件实际 ≤302）；**时序修复：`S_MAC_ACC` 预计算 `mac_r`/`mac_c_cl`**，拆 stride mux→lb_raddr 长路径 | `run_cnn_core_v2.sh` 16/16 PASS、`run_cnn_top.sh` 6/6 PASS（Quartus 待复验） |
 | 4 ⏳ | 下一步待定（候选：wbuf 双缓冲 / requant II=1 / MAC tap II=1） | — |
 
 ## 时序收敛（2026-08-05，150MHz 目标）

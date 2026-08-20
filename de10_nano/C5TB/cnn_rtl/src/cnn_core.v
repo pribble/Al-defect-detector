@@ -178,7 +178,7 @@ module cnn_core #(
 
     // 单维索引拼接（常量乘法综合时折叠成移位/加法，不产生逻辑）
     wire [20:0] lb_waddr = load_row*G_MAX_W + load_col;
-    wire [20:0] lb_raddr = mac_r*G_MAX_W + mac_c_cl;
+    wire [20:0] lb_raddr = mac_r_q*G_MAX_W + mac_c_cl_q;
     wire [15:0] acc_waddr_mac = mac_row*G_MAX_OW + mac_col;
     wire [15:0] acc_raddr_clr = rq_row*G_MAX_OW + rq_col;
     wire [15:0] acc_raddr_mac = mac_row*G_MAX_OW + mac_col;
@@ -228,6 +228,8 @@ module cnn_core #(
     // -0.839ns 主因）；打一拍后组合链终点变为普通寄存器，M10K 地址由寄存器驱动。
     // 最大地址 = 4*41*302-1 = 49527（lb）、19*150+149 = 2999（acc），16-bit 够。
     reg [15:0]          lb_addr_r;
+    reg [11:0]          mac_r_q;      // 下一 tap 的行索引（S_MAC_ACC 预计算，拆 stride mux→lb_raddr 长路径）
+    reg [11:0]          mac_c_cl_q;   // 下一 tap 的列索引（S_MAC_ACC 预计算）
     (* preserve *) reg [15:0] lb_wa_q;    // lb 写地址打拍（S_LOAD 收拍寄存、下一拍写；断 load_row→lb 写口组合链 P2-2）
     reg [63:0]          lb_wd_q;          // lb 写数据打拍（与地址对齐）
     (* preserve *) reg [15:0]       acc_addr_mac_r;   // preserve：阻止吸收进 M10K 地址寄存器（mac_row→porta_address_reg 组合链 -4.223）
@@ -352,6 +354,8 @@ module cnn_core #(
             // 地址寄存器复位同样归并到主状态机（S_MAC_ADDR 分支在同一块）：
             // lb_q/acc_q 每拍无条件采样，无复位时 x 地址越界读会污染 acc_q
             lb_addr_r <= 16'd0;
+            mac_r_q <= 12'd0;
+            mac_c_cl_q <= 12'd0;
             lb_wa_q <= 16'd0;
             lb_wd_q <= 64'h0;
             acc_addr_mac_r <= 16'd0;
@@ -480,6 +484,8 @@ module cnn_core #(
                             wf_t <= 4'd0;
                             mac_row <= 0; mac_col <= 0; mac_t <= 0;
                             mac_kh_q <= 4'd0; mac_kw_q <= 4'd0;
+                            mac_r_q <= 12'd0;          // 首 tap 行 = 0
+                            mac_c_cl_q <= first_mac_c_cl;  // 首 tap 列 = -pad
                             // 启动下一 cb 预取（CONV 且还有后续输入 cb）
                             pf_start <= (type_reg != 4 && i_group + 1 < in_cb_reg);
                             state <= S_MAC_ADDR;
@@ -551,6 +557,9 @@ module cnn_core #(
                             acc_next[32*lane +: 32] = acc_local[32*lane +: 32] + v_sum_r[lane];
                     end
                     acc_local <= acc_next;
+                    // 预计算下一 tap 的 lb 读地址分量（拆 stride mux→lb_raddr 长路径）
+                    mac_r_q <= nxt_mac_r;
+                    mac_c_cl_q <= nxt_mac_c_cl;
                     if (mac_last_q) begin
                         // 末 tap：写回最终值（acc_local 尚缺本 tap 部分和；
                         // k=1 单 tap 时直接用 acc_q 累加，避免旧 acc_local 串扰）
@@ -793,14 +802,25 @@ module cnn_core #(
             mac_kh_next = 4'd0; mac_kw_next = 4'd0;
         end
     end
-    // 行（lb 索引）：窗口第 kh 行 = o_row*stride + kh + pad（装载时行 0 = base 行）；
-    // stride_reg ∈ {1,2}，移位替代乘法器（mac_row*stride_reg 会被综合成 32-bit 乘法）
-    wire [11:0] mac_r = ((stride_reg == 2) ? {mac_row[10:0], 1'b0} : mac_row) + mac_kh_q;
-    // 列（输入列）：w*stride + kw - pad，越界补 0
+    // 列（输入列）：w*stride + kw - pad，越界补 0（用于 tap 列有效判定）
     wire signed [12:0] mac_c = $signed((stride_reg == 2) ? {mac_col[10:0], 1'b0} : mac_col)
                             + $signed(mac_kw_q) - $signed(pad_reg);
     wire mac_c_valid = (mac_c >= 0) && (mac_c < in_w_reg);
-    wire [11:0] mac_c_cl = mac_c[11:0];
+
+    // 下一 tap 的地址（S_MAC_ACC 预计算，拆 stride mux→lb_raddr 的长路径）：
+    // 末 tap 后下一 tap = 下一像素首 tap（mac_last_q 已寄存），否则同像素下一窗口位。
+    wire [11:0] nxt_mac_row = mac_last_q ? ((mac_col == out_w_reg - 1) ?
+                              ((mac_row == out_row_tile_reg - 1) ? 12'd0 : mac_row + 12'd1) : mac_row) : mac_row;
+    wire [11:0] nxt_mac_col = mac_last_q ? ((mac_col == out_w_reg - 1) ? 12'd0 : mac_col + 12'd1) : mac_col;
+    wire [3:0]  nxt_mac_kh  = mac_last_q ? 4'd0 : mac_kh_next;
+    wire [3:0]  nxt_mac_kw  = mac_last_q ? 4'd0 : mac_kw_next;
+    wire [11:0] nxt_mac_r   = ((stride_reg == 2) ? {nxt_mac_row[10:0], 1'b0} : nxt_mac_row) + nxt_mac_kh;
+    wire signed [12:0] nxt_mac_c = $signed((stride_reg == 2) ? {nxt_mac_col[10:0], 1'b0} : nxt_mac_col)
+                                + $signed(nxt_mac_kw) - $signed(pad_reg);
+    wire [11:0] nxt_mac_c_cl = nxt_mac_c[11:0];
+    // 首个 tap（mac_row/mac_col/kh/kw 均为 0）：列 = -pad（与 mac_c 公式一致）
+    wire signed [12:0] first_mac_c = 13'sd0 - $signed(pad_reg);
+    wire [11:0] first_mac_c_cl = first_mac_c[11:0];
 
     // S_MAC_RD 拍寄存 tap 列有效位（拆 k_reg→乘加树组合链，setup 违例 -6.18ns 主因）
 
