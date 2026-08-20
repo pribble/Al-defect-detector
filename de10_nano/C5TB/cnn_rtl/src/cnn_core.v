@@ -291,10 +291,13 @@ module cnn_core #(
     reg [3:0]  mac_t;
     reg        mac_first_q, mac_last_q;   // S_MAC_MUL2 拍寄存首/末 tap 标志（拆 mac_t 32-bit 比较链）
     reg [15:0] rq_row, rq_col;      // ≤ out_row_tile×out_w（≤19×150），16-bit 足够
+    reg        acc_clr_done_q;      // 首 cb 装载期间 acc 清零已完成标志（S_LOAD 并行清 acc 用）
 
     // 行缓冲行 r 对应输入行 base_row_reg + r；有效 = 输入行 ∈ [0, in_h)
     wire signed [12:0] load_in_row = base_row_reg + load_row;
     wire load_row_valid = (load_in_row >= 0) && (load_in_row < in_h_reg);
+    // 当前 rq 指针是否指向 acc 最后一个字（S_LOAD 并行清 acc 的完成判断）
+    wire acc_clr_last_w = (rq_row == out_row_tile_reg - 1) && (rq_col == out_w_reg - 1);
 
     //-----------------------------------------------------------------------
     // 主状态机
@@ -309,6 +312,7 @@ module cnn_core #(
             wf_cnt <= 0; wf_lane <= 0; wf_t <= 0; o_group <= 0; i_group <= 0;
             mac_row <= 0; mac_col <= 0; mac_t <= 0;
             rq_row <= 0; rq_col <= 0;
+            acc_clr_done_q <= 0;
             mac_c_valid_r <= 0;
             acc_local <= 256'sd0;   // 复位归并到主状态机（单一驱动，避免 Quartus 10028）
             acc_wr_q <= 256'sd0;
@@ -328,6 +332,7 @@ module cnn_core #(
                         load_row <= 0; load_col <= 0;
                         load_first <= 1;
                         o_group <= 0; i_group <= 0;
+                        acc_clr_done_q <= 0;
                         state <= S_LOAD;
                     end
                 end
@@ -342,6 +347,25 @@ module cnn_core #(
                     if (acc_wr_we_q) begin
                         acc[acc_wa_q] <= acc_wr_q;
                         acc_wr_we_q <= 0;
+                    end else if (load_first && !acc_clr_done_q) begin
+                        // 首 cb 装载期间并行清 acc：lb 与 acc 是独立 RAM，可同拍写。
+                        // 与 acc_wr_we_q 分支互斥，保证 acc 单写口一周期只写一次
+                        // （两写会破坏 M10K 推断）。
+                        acc[acc_clr_wa] <= 256'sd0;
+                        if (rq_row == out_row_tile_reg - 1 && rq_col == out_w_reg - 1) begin
+                            // 本拍清掉最后一个 acc 字，指针回绕并置完成
+                            rq_row <= 0; rq_col <= 0;
+                            acc_clr_wa <= 16'd0;
+                            acc_clr_done_q <= 1;
+                        end else if (rq_col == out_w_reg - 1) begin
+                            rq_col <= 0;
+                            rq_row <= rq_row + 1;
+                            // 递推推进后地址（替代 rq_row*G_MAX_OW 乘加树）
+                            acc_clr_wa <= acc_clr_wa + G_MAX_OW - out_w_reg + 1;
+                        end else begin
+                            rq_col <= rq_col + 1;
+                            acc_clr_wa <= acc_clr_wa + 1;
+                        end
                     end
                     // 有效行等输入；pad 行（load_row_valid=0）不消费输入，写 0 跳过
                     //（BRAM 上电不定须清零）
@@ -352,13 +376,15 @@ module cnn_core #(
                             load_col <= 0;
                             if (load_row == in_row_tile_reg - 1) begin
                                 load_row <= 0;
-                                // 1 cb 完成：o_group 首 cb（load_first）→ 清 acc 开新组；
-                                // i_group 循环 → 直接装权重 slice（acc 保留部分和）
+                                // 1 cb 完成：o_group 首 cb（load_first）若并行清 acc
+                                // 已完成则直接装权重 slice；否则进 S_ACC_CLR 续清。
                                 if (load_first) begin
                                     load_first <= 0;
-                                    rq_row <= 0; rq_col <= 0;
-                                    acc_clr_wa <= 16'd0;
-                                    state <= S_ACC_CLR;
+                                    if (acc_clr_done_q || acc_clr_last_w) begin
+                                        i_group <= 0;
+                                        state <= S_WEIGHT;
+                                    end else
+                                        state <= S_ACC_CLR;
                                 end else
                                     state <= S_WEIGHT;
                             end else
@@ -377,6 +403,7 @@ module cnn_core #(
                     if (rq_row == out_row_tile_reg - 1 && rq_col == out_w_reg - 1) begin
                         rq_row <= 0; rq_col <= 0;
                         acc_clr_wa <= 16'd0;
+                        acc_clr_done_q <= 1;
                         i_group <= 0;
                         state <= S_WEIGHT;
                     end else if (rq_col == out_w_reg - 1) begin
@@ -597,6 +624,7 @@ module cnn_core #(
                                     o_group <= o_group + 1;
                                     rq_row <= 0; rq_col <= 0;
                                     acc_clr_wa <= 16'd0;
+                                    acc_clr_done_q <= 0;
                                     load_first <= 1;
                                     state <= S_LOAD;   // 流式：重装新 o_group 的输入 cb
                                 end

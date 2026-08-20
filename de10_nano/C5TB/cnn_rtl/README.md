@@ -127,7 +127,8 @@ cnn_rtl/
 | 步骤 | 内容 | 验证 |
 |---|---|---|
 | 1 ✅ | pr/sr 参数读单笔在途 → **多笔在途（≤4）流水读**：`cnn_top_core` 命令计数/返回计数分离，read 连续拉高直至发完或在途满；`tb_cnn_top` pr/sr 读模型改 4 深队列 | `run_cnn_top.sh` 6/6 PASS、`run_cnn_core_v2.sh` 16/16 PASS |
-| 2 ⏳ | 下一步待定（候选：S_ACC_CLR 与 S_LOAD 并行 / lb 双缓冲 / requant II=1） | — |
+| 2 ✅ | `cnn_core` **S_ACC_CLR 与 S_LOAD 并行**：首 cb 装载期间同拍清 acc（lb/acc 独立 RAM，写口互斥），清完直接进 S_WEIGHT，未清完保留 S_ACC_CLR 兜底续清 | `run_cnn_core_v2.sh` 16/16 PASS、`run_cnn_top.sh` 6/6 PASS |
+| 3 ⏳ | 下一步待定（候选：lb 双缓冲 / requant II=1 / MAC tap II=1） | — |
 
 ## 时序收敛（2026-08-05，150MHz 目标）
 
