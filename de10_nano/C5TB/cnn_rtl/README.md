@@ -88,6 +88,7 @@ cnn_rtl/
 
 **阶段 5 关键设计**：
 - requant 定点参数**软件侧预转**（量化优先、RTL 无浮点）：`conv_op.cc` 把 float scale（ws/bias/os）转成每通道 4 个 int32（mult/bias_mul/shift/rcl6）写入 scale 区，**乘后域**（`v = acc·mult + bias_mul<<8`，与 float 公式 `round(acc·ws·is/os + bias/os)` 对齐；bias/rcl6 用 q22 缩放避免 int32 溢出），公式与舍入（away-from-zero）对齐 `ref_int8.quantize_params`（随机回归 bit-exact 一致）；`intelfpga.cc` memcpy 4×out_c 字
+- **requant 输出语义 = cpu_ref cvt_kernel（2026-08 起，弃用黑盒 wrap）**：`round-half-away`（v≥0 `(v+half)>>s`；v<0 `(v+half-1)>>s`，对应 `fcvtas`/`round()`）→ 饱和 `[-127,127]`（`saturate_cast<int8_t>` + `-128→-127`）；act：relu = `max(v,0)`、relu6 = `min(max(v,0), rcl6<<8)`（上限 6/os，q22→q30）。旧 wrap（`& 0xFF`）与 relu6 无上限已删除——越界 logits 翻转符号、relu6 特征超 6 会让 box 头 score 偏差（`cpu_ref/` 为权威参考）
 - `cnn_top.v` 端到端：寄存器（START=0x00/DDRIN=0x10/DDRW=0x1C/DDROUT=0x28/PARAM=0x34/SCALE=0x40）→ param 块 20 字（0..19）边读边解析 → scale 读取 → cfg 配 cnn_core_v2 → 行块循环（base_row 重定位 + DMA 跟随 core 流握手）
 - **DMA 关键修复**（对拍暴露）：地址预取（避免组合读重复）、`lr_read/wr_read/ow_write` 组合直连 core 握手（避免 1 拍残留导致段边界偏移）、cfg 最后一项写入时序（cfg_we 提前拉低丢 rcl6 末通道）
 - **阶段 5 收尾（缺口已关闭）**：长层 1 LSB 差异根因 = **tb DDR 基址重叠**（DDRIN_BASE=0x2000 需 11552B 到 0x4D20，与 DDRW_BASE=0x4000 冲突；rb1 输入段拍 340 起读到 w.hex 数据）——tb 布局问题，非 RTL bug。基址拉开（DDRW=0x10000/DDROUT=0x20000）后 6/6 层 bit-exact；core 24 层回归仍全绿。真实软件内存由 CmaMem 连续分配不重叠，无此问题
@@ -131,7 +132,9 @@ cnn_rtl/
 | 3 ✅ | `cnn_core` **lb 双缓冲 + 输入预取**：MAC 期间预取下一 cb 到 ~mac_buf_sel（新增 `i_pf_ready`、预取控制器、`S_PF_WAIT`/`S_LOAD_FLUSH`）；`cnn_top_core` `lr_read` 支持预取就绪与中间段解锁；**M10K 超量修复：`G_MAX_W` 512→304**（软件实际 ≤302）；**时序修复：`S_MAC_ACC` 预计算 `mac_r`/`mac_c_cl`**，拆 stride mux→lb_raddr 长路径 | `run_cnn_core_v2.sh` 16/16 PASS、`run_cnn_top.sh` 6/6 PASS（Quartus 待复验） |
 | 4 ✅ | `cnn_top_core` **load master 改 burst 读**：lr/wr 各加 32×64b FWFT FIFO 解耦返回与消费；cmd FIFO 扩展为 `{type,beats_left}`；load master 发 ≤4 拍突发（wr 优先、busy 锁存保 waitrequest 稳定）；删除 `lr_round_end_q`/`wr_round_end_q` 旧轮停等状态机；容量预算按 `fifo_cnt + inflight` 防 FIFO 溢出；**时序修复：段尾判断改预计算阈值比较 + 满突发恒 4/尾拍恒 1，拆 `dma_ibeat→lr_address` 长组合链** | `run_cnn_top.sh` 6/6 PASS、`run_cnn_core_v2.sh` 16/16 PASS（Quartus 待复验） |
 | 5 ✅ | `cnn_core` **MAC tap II=1 流水化**：旧 6 状态串行 tap 循环改为单态 `S_MAC_RUN` + `mv[0:4]` 有效位链，每拍 issue 1 个 tap，6 级数据通路（issue/RD/MUL/MUL2/MUL3/ACC）重叠执行；`acc_q`/`w_q`/首末 tap 标志随 tap 打拍走，末 tap 写回地址在 stage5 锁存防覆盖；**不合并任何流水级**（`mac_p_r`/`v_sum_r` 均保留，避开 6→4 合并的 -18ns 路径） | `run_cnn_core_v2.sh` 16/16 PASS、`run_cnn_top.sh` 6/6 PASS、verilator `--x-initial` 16/16 PASS、iverilog 16/16 PASS（Quartus 待复验） |
-| 6 ⏳ | 下一步待定（候选：requant II=1 重做 / requant 拍数压缩 / 150MHz） | — |
+| 6 ✅ | `cnn_top_core` **store 反压握手修复**：`core_o_ready` 恒 1 时 `ow_waitrequest` 期间 core 继续换数据 → 输出写被静默丢弃、DDR 残留旧数据逐图累积（上板随图片数差异放大且两次运行不一致）；改为 `core_o_ready = core_o_valid && !ow_waitrequest` + `S_REQ_OUT3` 接受拍撤销 `o_valid`；tb 注入周期性反压复现并回归 | `run_cnn_top.sh` 8/8、6/6 PASS（含反压注入）、`run_cnn_core_v2.sh` 24/24 PASS |
+| 7 ✅ | **requant 数值语义对齐 cpu_ref**（`cpu_ref/` = Paddle Lite ARM 权威公式）：① round-half-away 修正（旧 `(v+half)>>s` 后对负值 -1 只在半整点正确，非半整点偏 1）；② 输出 `wrap → 饱和 [-127,127]`（`saturate_cast<int8_t>` + `-128→-127`）；③ relu6 恢复上限 `rcl6<<8`（`requant_store` 新增 cfg_sel 4 存储）。同步更新 `ref_int8.py`/`ref_cnn_top.py` 与 tb 期望 | `run_cnn_core_v2.sh` 24/24 PASS、`run_cnn_top.sh` 10/10、6/6 PASS、`ref_int8.self_test` max\|err\|=1、lint 0（Quartus 待复验） |
+| 8 ⏳ | 下一步待定（候选：requant II=1 重做 / requant 拍数压缩 / 150MHz） | — |
 
 ## 时序收敛（2026-08-05，150MHz 目标）
 

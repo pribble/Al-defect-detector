@@ -146,6 +146,7 @@ module cnn_core #(
     wire signed [31:0] rq_bias_q  [0:7];
     wire [31:0]        rq_mult_q  [0:7];
     wire [7:0]         rq_shift_q [0:7];
+    wire [31:0]        rq_rcl6_q  [0:7];
     // 每 lane 读地址 = o_group*8 + lane（10-bit，o_group ≤ 127，和 ≤1023 不溢出；
     // 写地址 cfg_addr[9:0] 截断，值域 ≤1023 与 1024 深匹配）。rq_raddr_q 每拍
     // 采样：o_group 在 S_REQ_OUT3 末更新，到 requant 前隔多拍早已稳定为新组。
@@ -159,7 +160,8 @@ module cnn_core #(
                 .clk(clk),
                 .cfg_we(cfg_we), .cfg_sel(cfg_sel), .cfg_addr(cfg_addr), .cfg_wdata(cfg_wdata),
                 .raddr(rq_raddr_q + RQ_OFF),
-                .q_bias(rq_bias_q[rq_i]), .q_mult(rq_mult_q[rq_i]), .q_shift(rq_shift_q[rq_i])
+                .q_bias(rq_bias_q[rq_i]), .q_mult(rq_mult_q[rq_i]), .q_shift(rq_shift_q[rq_i]),
+                .q_rcl6(rq_rcl6_q[rq_i])
             );
         end
     endgenerate
@@ -947,6 +949,7 @@ module cnn_core #(
     (* multstyle = "dsp" *) reg signed [31:0] v_p_hihi [0:7];  // a_hi × m_hi（signed 16 × unsigned 16）
     reg [31:0] rq_mult_m [0:7];   // S_REQ_MUL 拍寄存的乘法器 b 输入（拆 RAM 读与 DSP 乘法组合链）
     reg signed [31:0] rq_bias_m [0:7];  // S_REQ_MUL 拍寄存的 bias RAM 读（拆 RAM 读与 32-bit 加法组合链）
+    reg [31:0] rq_rcl6_m [0:7];   // S_REQ_MUL 拍寄存的 rcl6 RAM 读（relu6 上限，q22）
 
     // 16×16 乘法用显式 DSP 例化（模块级 multstyle 最可靠；数组属性曾被 Quartus 忽略）
     wire [31:0] mul_lolo [0:7], mul_lohi [0:7], mul_hilo [0:7], mul_hihi [0:7];
@@ -963,18 +966,20 @@ module cnn_core #(
     reg signed [63:0] v_sum_hi [0:7];  // hilo<<16 + hihi<<32（符号扩展两项）
     reg signed [63:0] v_rnd_delta [0:7];  // round 桶形移位结果（1<<(shift-1)）
     reg signed [63:0] v_shifted [0:7];    // 算术右移结果（>>> shift）
+    reg signed [63:0] v_rcl6_l [0:7];     // relu6 上限 rcl6<<8（q30，S_REQ_MULC 拍预计算）
     (* multstyle = "dsp" *) reg signed [63:0] v_rq64_l [0:7];  // 每 lane 的 64-bit 积（流水级 2，保 DSP）
     reg [7:0] v_shift_l [0:7];         // 每 lane 的 shift 值（S_REQ_MUL2 拍寄存 RAM 读，断 M10K q 路径）
     reg signed [63:0] v_round_l [0:7]; // 每 lane 的 round 后值（流水级 3）
     reg [11:0] v_out_ch;
     reg [7:0] v_q [0:7];
 
-    // 乘加拍级 1（S_REQ_MUL）：bias/mult RAM 读打拍 → rq_bias_m/rq_mult_m
+    // 乘加拍级 1（S_REQ_MUL）：bias/mult/rcl6 RAM 读打拍 → rq_bias_m/rq_mult_m/rq_rcl6_m
     // （bias 加法与 DSP 乘法各拆独立一拍，断 M10K pass-through 读路径组合穿透）
     always @(posedge clk) begin
         if (state == S_REQ_MUL) begin
             for (ln = 0; ln < 8; ln = ln + 1) begin
                 rq_bias_m[ln] <= rq_bias_q[ln];
+                rq_rcl6_m[ln] <= rq_rcl6_q[ln];
             end
         end
     end
@@ -1015,27 +1020,38 @@ module cnn_core #(
                     v_rq64_l[ln] <= v_sum_lo[ln] + v_sum_hi[ln];
             end
         end else if (state == S_REQ_MULC) begin
-            // 乘后 bias 加法：v_rq64_l += bias_mul<<8（q22 左移 8 对齐 q30 域）
-            for (ln = 0; ln < 8; ln = ln + 1) begin
-                v_out_ch = o_group * 8 + ln;
-                if (v_out_ch >= out_c_reg)
-                    v_rq64_l[ln] <= 64'sd0;
-                else
-                    v_rq64_l[ln] <= v_rq64_l[ln] +
-                                    {{32{rq_bias_m[ln][31]}}, rq_bias_m[ln], 8'd0};
-            end
-        end else if (state == S_REQ_ACT) begin
-            // relu/rcl6 mux（乘后域，64-bit）
-            // 2026-08-10：relu6 去掉 rcl6 钳位（黑盒实测无 min6，见
-            // BLACKBOX_NUMERICS.md；CPU 语义的 min(6/os) 与黑盒不符，且
-            // box 头输入直接来自 relu6_1/relu6_3 输出，钳位改变检测头
-            // 输入 → 上板几百框误检）。act==1 与 act==2 现行为相同。
+            // 乘后 bias 加法：v_rq64_l += bias_mul<<8（q22 左移 8 对齐 q30 域）；
+            // 同时预计算 relu6 上限 rcl6<<8（下一拍 S_REQ_ACT 只做比较+mux，
+            // 不把 32-bit 移位放进 64-bit 比较组合链）
             for (ln = 0; ln < 8; ln = ln + 1) begin
                 v_out_ch = o_group * 8 + ln;
                 if (v_out_ch >= out_c_reg) begin
                     v_rq64_l[ln] <= 64'sd0;
-                end else if (act_reg == 2'd1 || act_reg == 2'd2) begin
+                    v_rcl6_l[ln] <= 64'sd0;
+                end else begin
+                    v_rq64_l[ln] <= v_rq64_l[ln] +
+                                    {{32{rq_bias_m[ln][31]}}, rq_bias_m[ln], 8'd0};
+                    v_rcl6_l[ln] <= {{32{rq_rcl6_m[ln][31]}}, rq_rcl6_m[ln], 8'd0};
+                end
+            end
+        end else if (state == S_REQ_ACT) begin
+            // act mux（乘后域，64-bit，cpu_ref cvt_kernel<int8_t> 语义）：
+            //   act==0：原样（v_rq64_l 保持）
+            //   act==1 relu：max(v, 0)
+            //   act==2 relu6：min(max(v, 0), rcl6<<8)（上限 6/os，int8 域）
+            for (ln = 0; ln < 8; ln = ln + 1) begin
+                v_out_ch = o_group * 8 + ln;
+                if (v_out_ch >= out_c_reg) begin
+                    v_rq64_l[ln] <= 64'sd0;
+                end else if (act_reg == 2'd1) begin
                     v_rq64_l[ln] <= v_rq64_l[ln][63] ? 64'sd0 : v_rq64_l[ln];
+                end else if (act_reg == 2'd2) begin
+                    if (v_rq64_l[ln][63])
+                        v_rq64_l[ln] <= 64'sd0;
+                    else if (v_rq64_l[ln] > v_rcl6_l[ln])
+                        v_rq64_l[ln] <= v_rcl6_l[ln];
+                    else
+                        v_rq64_l[ln] <= v_rq64_l[ln];
                 end
             end
         end
@@ -1103,7 +1119,9 @@ module cnn_core #(
         end
     end
 
-    // round 拍级 2（S_REQ_ROUND2）：v_rq64_l + v_rnd_delta → v_round_l（64-bit 加法单独一拍，~3ns）
+    // round 拍级 2（S_REQ_ROUND2）：v_rq64_l + v_rnd_delta - sign → v_round_l
+    // round-half-away（cpu_ref fcvtas/cvt_kernel 语义）：
+    //   v≥0：floor((v+half)/2^s)；v<0：ceil((v-half)/2^s) = (v+half-1)>>s
     always @(posedge clk) begin
         if (state == S_REQ_ROUND2) begin
             for (ln = 0; ln < 8; ln = ln + 1) begin
@@ -1111,7 +1129,8 @@ module cnn_core #(
                 if (v_out_ch >= out_c_reg)
                     v_round_l[ln] <= 64'sd0;
                 else
-                    v_round_l[ln] <= v_rq64_l[ln] + v_rnd_delta[ln];
+                    v_round_l[ln] <= v_rq64_l[ln] + v_rnd_delta[ln]
+                                     - (v_rq64_l[ln][63] ? 64'sd1 : 64'sd0);
             end
         end
     end
@@ -1129,21 +1148,21 @@ module cnn_core #(
         end
     end
 
-    // 输出拍（S_REQ_OUT3）：移位值 8 位截断（wrap）→ o_data
-    // 黑盒语义（BLACKBOX_NUMERICS.md 实测）：y = r & 0xFF，非饱和！
-    // 饱和会把 box 头（act=0）超出 int8 范围的 logits 全部钳成 ±127，
-    // 抹平 softmax 区分度 → 全图高 score 误检框（上板实测几百框）。
-    // wrap 保留字节差异（超出部分翻转为对端符号，与黑盒位模式一致）。
+    // 输出拍（S_REQ_OUT3）：饱和 int8[-127,127] → o_data
+    // cpu_ref 语义：saturate_cast<int8_t>(round(x)) 钳 [-128,127]，再 -128→-127，
+    // 即最终 [-127,127]（wrap 会在越界时翻转符号位，抹平 logits 区分度）。
     always @(posedge clk) begin
         if (state == S_REQ_OUT3) begin
             for (ln = 0; ln < 8; ln = ln + 1) begin
                 v_out_ch = o_group * 8 + ln;
                 if (v_out_ch >= out_c_reg)
                     v_q[ln] = 8'd0;
+                else if (v_shifted[ln] > 64'sd127)
+                    v_q[ln] = 8'd127;
+                else if (v_shifted[ln] < -64'sd127)
+                    v_q[ln] = 8'd129;   // -127 的 8-bit 补码
                 else
-                    // 黑盒实测（BLACKBOX_NUMERICS.md）：round 后负值 -1（floor 除法特性）。
-                    // box 头（act=0）负 logits 无此修正会偏大 1-2 LSB（2026-08-10）
-                    v_q[ln] = (v_shifted[ln] - {63'd0, v_shifted[ln][63]}) & 64'hFF;
+                    v_q[ln] = v_shifted[ln][7:0];
             end
             o_data <= {v_q[7], v_q[6], v_q[5], v_q[4],
                        v_q[3], v_q[2], v_q[1], v_q[0]};

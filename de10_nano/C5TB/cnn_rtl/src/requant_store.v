@@ -2,12 +2,13 @@
 // requant_store — 单 lane requant 参数存储（cnn_core 内 8 份实例化）
 //=============================================================================
 // 从 cnn_core_v2 拆出（原 8×3 组内联展开约 800 行 → 本模块 ×8 实例）。
-// 每 lane 独立 M10K：cfg_sel 1/2/3 = bias/mult/shift，addr = 输出通道。
+// 每 lane 独立 M10K：cfg_sel 1/2/3/4 = bias/mult/shift/rcl6，addr = 输出通道。
 // 8 lane 并行读 8 个不同通道地址（v_out_ch = o_group*8+ln），单端口 RAM
-// 每拍只能 1 地址 → 每 lane 一份（8×3 组，约 78 块 M10K）。
+// 每拍只能 1 地址 → 每 lane 一份（8×4 组）。
 // M10K 同步读 1 拍延迟：bias 于 S_REQ_ADDR 发起（S_REQ_MUL 用）、
 // mult 于 S_REQ_MUL 发起（S_REQ_MUL2 用）、shift 于 S_REQ_MUL2 发起
-// （S_REQ_OUT 用）——正好插入现有 requant 流水，事件序列不变。
+// （S_REQ_OUT 用）、rcl6 于 S_REQ_MUL 发起（S_REQ_ACT 用）——
+// 正好插入现有 requant 流水，事件序列不变。
 //
 // 写端口（A 口）：cfg_we + cfg_sel 选择存储，cfg_addr[9:0] 通道地址，
 //   值域 ≤1023 与 1024 深匹配（cfg_addr[19:0] < G_MAX_C 判定禁写越界）。
@@ -24,7 +25,7 @@ module requant_store #(
 )(
     input  wire        clk,
 
-    // ---- 配置写（A 口，sel 1/2/3 = bias/mult/shift）----
+    // ---- 配置写（A 口，sel 1/2/3/4 = bias/mult/shift/rcl6）----
     input  wire        cfg_we,
     input  wire [2:0]  cfg_sel,
     input  wire [19:0] cfg_addr,
@@ -36,13 +37,15 @@ module requant_store #(
     // ---- 输出（同步读，1 拍延迟）----
     output wire signed [31:0] q_bias,
     output wire [31:0] q_mult,
-    output wire [7:0]  q_shift
+    output wire [7:0]  q_shift,
+    output wire [31:0] q_rcl6
 );
 
 `ifdef SIMULATION
     (* ramstyle = "M10K" *) reg signed [31:0] bias_store [0:G_MAX_C-1];
     (* ramstyle = "M10K" *) reg [31:0] rq_m_store [0:G_MAX_C-1];
     (* ramstyle = "M10K" *) reg [7:0]  rq_r_store [0:G_MAX_C-1];
+    (* ramstyle = "M10K" *) reg [31:0] rq_rcl6_store [0:G_MAX_C-1];
     always @(posedge clk) begin
         if (cfg_we && cfg_sel == 3'd1 && cfg_addr < G_MAX_C)
             bias_store[cfg_addr[9:0]] <= cfg_wdata;
@@ -55,17 +58,24 @@ module requant_store #(
         if (cfg_we && cfg_sel == 3'd3 && cfg_addr < G_MAX_C)
             rq_r_store[cfg_addr[9:0]] <= cfg_wdata[7:0];
     end
+    always @(posedge clk) begin
+        if (cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C)
+            rq_rcl6_store[cfg_addr[9:0]] <= cfg_wdata;
+    end
     reg signed [31:0] q_bias_r;
     reg [31:0] q_mult_r;
     reg [7:0]  q_shift_r;
+    reg [31:0] q_rcl6_r;
     always @(posedge clk) begin
         q_bias_r  <= bias_store[raddr];
         q_mult_r  <= rq_m_store[raddr];
         q_shift_r <= rq_r_store[raddr];
+        q_rcl6_r  <= rq_rcl6_store[raddr];
     end
     assign q_bias  = q_bias_r;
     assign q_mult  = q_mult_r;
     assign q_shift = q_shift_r;
+    assign q_rcl6  = q_rcl6_r;
 `else
     // 综合版：显式 altsyncram，read_during_write_mode_mixed_ports = OLD_DATA
     altsyncram #(
@@ -136,6 +146,29 @@ module requant_store #(
         .data_a(cfg_wdata[7:0]),
         .address_b(raddr),
         .q_b(q_shift)
+    );
+    altsyncram #(
+        .operation_mode("DUAL_PORT"),
+        .width_a(32), .widthad_a(10), .numwords_a(G_MAX_C),
+        .width_b(32), .widthad_b(10), .numwords_b(G_MAX_C),
+        .read_during_write_mode_mixed_ports("OLD_DATA"),
+        .outdata_reg_b("CLOCK0"),
+        .address_aclr_a("NONE"),
+        .address_aclr_b("NONE"),
+        .outdata_aclr_b("NONE"),
+        .clock_enable_input_a("BYPASS"),
+        .clock_enable_input_b("BYPASS"),
+        .clock_enable_output_b("BYPASS"),
+        .power_up_uninitialized("FALSE"),
+        .intended_device_family("Cyclone V")
+    ) u_rq_rcl6 (
+        .clock0(clk),
+        .clock1(clk),
+        .address_a(cfg_addr[9:0]),
+        .wren_a(cfg_we && cfg_sel == 3'd4 && cfg_addr < G_MAX_C),
+        .data_a(cfg_wdata),
+        .address_b(raddr),
+        .q_b(q_rcl6)
     );
 `endif
 

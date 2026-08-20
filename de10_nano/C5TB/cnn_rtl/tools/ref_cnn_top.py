@@ -193,22 +193,27 @@ def conv_tile_np(p, in_hw, w_np):
 
 
 def post_np(p, acc, co0):
-    """raw+bias → act → requant → 8 位截断（wrap）int8。acc: [Ho,Wo,Co] int32
-    wrap 为黑盒语义（y = r & 0xFF，非饱和）；字节按 int8 解释"""
+    """raw+bias → act → round-half-away → 饱和 int8[-127,127]。
+    acc: [Ho,Wo,Co] int32。语义对齐 cpu_ref cvt_kernel<int8_t>：
+      y = acc·mult + bias_mul<<8（q30 乘后域）
+      act: relu = max(0,y)；relu6 = min(max(0,y), rcl6<<8)
+      out = clamp(round_half_away(y/2^shift), -127, 127)
+    """
     out_c = min(8, p.out_c - co0)
     bias = np.array(p.bias_mul[co0:co0 + out_c], dtype=np.int64)
     mult = np.array(p.mult[co0:co0 + out_c], dtype=np.int64)
+    rcl6 = np.array(p.rcl6[co0:co0 + out_c], dtype=np.int64)
     acc = acc[:, :, :out_c]  # 块末不足 8 通道：截取有效通道
     v = acc.astype(np.int64) * mult[None, None, :] + (bias[None, None, :] << 8)  # 乘后域 q30 对齐（bias_mul 为 q22）
-    if p.act == 1 or p.act == 2:
-        # relu/relu6：仅 max(0, v)。黑盒实测 relu6 无 min(6)（BLACKBOX_NUMERICS.md），
-        # box 头输入直接来自 relu6_1/relu6_3，钳位会改变检测头输入（上板几百框）。
-        # 与 CPU cvt_kernel 的 min(x, 6/os) 不同——以黑盒为准。
+    if p.act == 1:
         v = np.maximum(v, 0)
-    v = (v + (1 << (p.shift - 1))) >> p.shift
-    v = np.where(v < 0, v - 1, v)   # 黑盒实测：round 后负值 -1（2026-08-10 与 RTL 同步）
-    v = v & 0xFF                        # 8 位截断（wrap）
-    v = np.where(v >= 128, v - 256, v)  # 字节按 int8 解释
+    elif p.act == 2:
+        v = np.maximum(v, 0)
+        v = np.minimum(v, (rcl6[None, None, :] << 8))  # 6/os（q22→q30）
+    half = 1 << (p.shift - 1)
+    # round-half-away：正半区 +half，负半区 +half-1（ceil(x-0.5) 语义）
+    v = np.where(v >= 0, v + half, v + half - 1) >> p.shift
+    v = np.clip(v, -127, 127)  # CPU saturate_cast<int8_t> + tmp<-127→-127
     return v.astype(np.int8)
 
 

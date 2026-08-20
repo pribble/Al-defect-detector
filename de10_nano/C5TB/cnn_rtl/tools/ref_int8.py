@@ -49,10 +49,12 @@ def quantize_params(ws, is_, os_, b, shift=30):
 def act_s8(x, act, clamp6):
     if act == 0:
         return x
-    if act == 1 or act == 2:
-        # relu/relu6：仅 max(0, x)。黑盒实测 relu6 无 min(6)（BLACKBOX_NUMERICS.md），
-        # box 头输入直接来自 relu6_1/relu6_3，钳位会改变检测头输入（上板几百框）。
+    if act == 1:
+        # relu：max(0, x)（CPU cvt_kernel act==1）
         return max(x, 0)
+    if act == 2:
+        # relu6：min(max(0, x), 6/os)（CPU cvt_kernel act==2 语义）
+        return min(max(x, 0), clamp6)
     raise ValueError(f"unsupported act={act}")
 
 
@@ -86,18 +88,21 @@ def conv_s8(x, w, bias_mul, mult, shift, act=1, rcl6_mul=None, pad=1, stride=1):
                                 raw += x[ci][hi][wj] * w[co][ci][ki][kj]
                 v = raw * mult[co] + (bias_mul[co] << 8)  # 乘后域 q30 对齐（bias_mul 为 q22）
                 a = act_s8(v, act,
-                           rcl6_mul[co] if rcl6_mul is not None else (1 << 40))
+                           (rcl6_mul[co] << 8) if rcl6_mul is not None else (1 << 40))
                 rq = a
                 if shift > 0:
-                    rq += 1 << (shift - 1)
+                    half = 1 << (shift - 1)
+                    if rq >= 0:
+                        rq += half
+                    else:
+                        rq += half - 1   # round-half-away 负半区（ceil(x-0.5)）
                 rq >>= shift
-                if rq < 0:
-                    rq -= 1   # 黑盒实测：round 后负值 -1（floor 除法特性，2026-08-10 与 RTL 同步）
-                # 8 位截断（wrap）——黑盒语义 y = r & 0xFF（非饱和！）；
-                # 字节按 int8 解释（软件 OutputRearrange 读回）
-                out[co][ho][wo] = rq & 0xFF
-                if out[co][ho][wo] >= 128:
-                    out[co][ho][wo] -= 256
+                # 饱和截断到 [-127,127]（CPU saturate_cast<int8_t> + tmp<-127→-127）
+                if rq < -127:
+                    rq = -127
+                elif rq > 127:
+                    rq = 127
+                out[co][ho][wo] = rq
                 raw_out[co][ho][wo] = raw
     return out, raw_out
 
@@ -125,8 +130,8 @@ def conv_float(x, w, ws, is_, os_, b, act=1, pad=1, stride=1):
                 if act == 1:
                     v = max(v, 0.0)
                 elif act == 2:
-                    v = max(0.0, min(v, 6.0))
-                out[co][ho][wo] = max(-128, min(127, round_half_away(v)))
+                    v = max(0.0, min(v, 6.0 / os_))  # int8 域上限 6/os（CPU alpha=6/output_scale）
+                out[co][ho][wo] = max(-127, min(127, round_half_away(v)))
     return out
 
 
@@ -147,7 +152,9 @@ def self_test(seed=0, rounds=2000, act=1):
         is_ = 10 ** rng.uniform(-2.5, -1.5)
         os_ = 10 ** rng.uniform(-1.5, 0.0)
         b = [rng.uniform(-5.0, 5.0) for _ in range(Co)]
-        shift = rng.choice([15, 20, 25, 30])
+        # 硬件固定 shift=30（bias_mul/rcl6 为 q22，经 <<8 对齐 q30）；
+        # 其它 shift 会破坏 q22 对齐，仅作边界探索无意义。
+        shift = 30
 
         mult, bias_mul, rcl6, sh = quantize_params(ws, is_, os_, b, shift)
         out_i, _ = conv_s8(x, w, bias_mul, mult, sh, act=act, rcl6_mul=rcl6,
