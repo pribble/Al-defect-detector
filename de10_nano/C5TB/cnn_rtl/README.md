@@ -130,7 +130,8 @@ cnn_rtl/
 | 2 ✅ | `cnn_core` **S_ACC_CLR 与 S_LOAD 并行**：首 cb 装载期间同拍清 acc（lb/acc 独立 RAM，写口互斥），清完直接进 S_WEIGHT，未清完保留 S_ACC_CLR 兜底续清 | `run_cnn_core_v2.sh` 16/16 PASS、`run_cnn_top.sh` 6/6 PASS |
 | 3 ✅ | `cnn_core` **lb 双缓冲 + 输入预取**：MAC 期间预取下一 cb 到 ~mac_buf_sel（新增 `i_pf_ready`、预取控制器、`S_PF_WAIT`/`S_LOAD_FLUSH`）；`cnn_top_core` `lr_read` 支持预取就绪与中间段解锁；**M10K 超量修复：`G_MAX_W` 512→304**（软件实际 ≤302）；**时序修复：`S_MAC_ACC` 预计算 `mac_r`/`mac_c_cl`**，拆 stride mux→lb_raddr 长路径 | `run_cnn_core_v2.sh` 16/16 PASS、`run_cnn_top.sh` 6/6 PASS（Quartus 待复验） |
 | 4 ✅ | `cnn_top_core` **load master 改 burst 读**：lr/wr 各加 32×64b FWFT FIFO 解耦返回与消费；cmd FIFO 扩展为 `{type,beats_left}`；load master 发 ≤4 拍突发（wr 优先、busy 锁存保 waitrequest 稳定）；删除 `lr_round_end_q`/`wr_round_end_q` 旧轮停等状态机；容量预算按 `fifo_cnt + inflight` 防 FIFO 溢出；**时序修复：段尾判断改预计算阈值比较 + 满突发恒 4/尾拍恒 1，拆 `dma_ibeat→lr_address` 长组合链** | `run_cnn_top.sh` 6/6 PASS、`run_cnn_core_v2.sh` 16/16 PASS（Quartus 待复验） |
-| 5 ⏳ | 下一步待定（候选：MAC tap II=1 / requant II=1 重做 / 150MHz） | — |
+| 5 ✅ | `cnn_core` **MAC tap II=1 流水化**：旧 6 状态串行 tap 循环改为单态 `S_MAC_RUN` + `mv[0:4]` 有效位链，每拍 issue 1 个 tap，6 级数据通路（issue/RD/MUL/MUL2/MUL3/ACC）重叠执行；`acc_q`/`w_q`/首末 tap 标志随 tap 打拍走，末 tap 写回地址在 stage5 锁存防覆盖；**不合并任何流水级**（`mac_p_r`/`v_sum_r` 均保留，避开 6→4 合并的 -18ns 路径） | `run_cnn_core_v2.sh` 16/16 PASS、`run_cnn_top.sh` 6/6 PASS、verilator `--x-initial` 16/16 PASS、iverilog 16/16 PASS（Quartus 待复验） |
+| 6 ⏳ | 下一步待定（候选：requant II=1 重做 / requant 拍数压缩 / 150MHz） | — |
 
 ## 时序收敛（2026-08-05，150MHz 目标）
 
