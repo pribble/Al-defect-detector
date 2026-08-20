@@ -323,33 +323,16 @@ class Consumer(threading.Thread):
 
     def run(self):
         database.create_database()
-        frame_counter = 0
 
         while True:
             time.sleep(0.01)
             try:
                 self._process_sampling_frame()
-                frame_counter += 1
-                # 周期性记录进程 RSS, 供排查内存缓慢增长 (Linux /proc)
-                if frame_counter % 300 == 0:
-                    self._log_rss()
 
             except Exception as e:
                 # 记录最近一次异常到 shared, 供 /get_status 诊断; exc_info 输出完整堆栈
                 shared.last_consumer_error = '{}'.format(e)
                 logger.error('consumer thread error：{}'.format(str(e)), exc_info=True)
-
-    @staticmethod
-    def _log_rss():
-        """读取 /proc/self/status 的 VmRSS 并记 INFO 日志 (非 Linux 环境静默跳过)."""
-        try:
-            with open('/proc/self/status') as f:
-                for line in f:
-                    if line.startswith('VmRSS'):
-                        logger.info('RSS: %s', line.strip())
-                        break
-        except Exception:
-            pass
 
     # ---- 单帧处理 ----
 

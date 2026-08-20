@@ -278,7 +278,7 @@ min_radius_ratio = 0.15
 max_radius_ratio = 0.50
 circularity = 0.60     # 圆形度下限（mask 方法, 过滤非圆亮斑）
 mask_threshold = 0     # 0=Otsu(带下限), >0=固定阈值
-otsu_min_threshold = 50
+otsu_min_threshold = 20
 draw_overlay = 1       # 标注图/调试流上画圆与裁剪框
 hough_param1 = 100     # hough 方法: Canny 高阈值
 hough_param2 = 30      # hough 方法: 累加器阈值
