@@ -57,7 +57,7 @@ endmodule
 module cnn_core #(
     parameter G_MAX_IN_ROWS= 41,   // 最大输入行块高度（模型 max in_tile=39）
     parameter G_MAX_OROWS  = 20,   // 最大输出行块高度（模型 max tile=19）
-    parameter G_MAX_W      = 512,  // 输入行缓冲最大列数（2 的幂：lb 地址乘法变移位，150MHz 收敛；软件实际 ≤302）
+    parameter G_MAX_W      = 304,  // 输入行缓冲最大列数（软件实际 ≤302；原 512 为 150MHz 收敛用，双缓冲后 M10K 超量，改为 304 常数乘法在 100MHz 下时序可收敛）
     parameter G_MAX_OW     = 150,  // 最大输出宽度（OUTPUT_MAX_W）
     parameter G_MAX_C      = 1024  // 最大输出通道数（requant 数组容量，模型 out_c 最大 1024）
 )(
