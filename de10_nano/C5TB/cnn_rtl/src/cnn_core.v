@@ -191,6 +191,8 @@ module cnn_core #(
 
     // w_q：权重读寄存器（S_MAC_RD 拍与 lb_q 同步采样，拆掉 mac_t→wbuf 读 mux）
     reg [7:0] w_q [0:7][0:7];
+    // w_q_mul：乘法用权重打拍（II=1 下 w_q 每拍被新 tap 覆盖，MUL2 级需上一拍寄存值）
+    reg [7:0] w_q_mul [0:7][0:7];
     // mac_p_r：乘法结果寄存器（S_MAC_MUL 拍采样），把 lb M10K 输出→乘法→
     // 加法树→v_sum_r 的组合链再拆一段（4 拍/tap：RD/MUL/MUL2/ACC）
     reg signed [15:0] mac_p_r [0:7][0:7];
@@ -204,13 +206,13 @@ module cnn_core #(
                 if (mac_lane_i < 4) begin : u_dsp
                     mac8x8_dsp u_mac (
                         .a (mac_a_q[8*mac_m_i +: 8]),
-                        .b (w_q[mac_m_i][mac_lane_i]),
+                        .b (w_q_mul[mac_m_i][mac_lane_i]),
                         .p (mac_p[mac_lane_i][mac_m_i])
                     );
                 end else begin : u_lut
                     mac8x8_lut u_mac (
                         .a (mac_a_q[8*mac_m_i +: 8]),
-                        .b (w_q[mac_m_i][mac_lane_i]),
+                        .b (w_q_mul[mac_m_i][mac_lane_i]),
                         .p (mac_p[mac_lane_i][mac_m_i])
                     );
                 end
@@ -235,6 +237,7 @@ module cnn_core #(
     (* preserve *) reg [15:0]       acc_addr_mac_r;   // preserve：阻止吸收进 M10K 地址寄存器（mac_row→porta_address_reg 组合链 -4.223）
     (* preserve *) reg [15:0]       acc_raddr_r;      // requant 读地址打拍（preserve：拆 rq_row→porta_address_reg 组合链 -4.181）
     (* preserve *) reg [15:0]       acc_wa_q;         // acc 写口统一地址（每拍采样：S_MAC_ACC 拍取写回地址、其他拍取清零地址，写口单一寄存器源）
+    reg [15:0]                      acc_wa_wr_q;      // 末 tap 写回地址打拍（stage5 锁存，避免 II=1 下被下一 tap 的 stage4 覆盖）
     (* preserve *) reg [15:0]       acc_clr_wa;       // acc 清零地址（S_ACC_CLR 沿前 = 上拍寄存的推进后地址，断 rq_row→porta 组合链 P1）
 
     // lb 写（流水打拍 + 乒乓双缓冲）：
@@ -269,6 +272,24 @@ module cnn_core #(
     reg         acc_wr_we_q;   // 写回脉冲：末 tap 沿后置 1，写拍沿清 0（单拍）
 
     //-----------------------------------------------------------------------
+    // MAC tap II=1 流水链（每拍 issue 1 个 tap，6 级数据通路重叠）
+    //   mv[k]：tap 有效位链（k 级前 issue 的 tap 当前在本级）
+    //   mv_cv：列有效（mac_c_valid）随 tap 走；mv_first/mv_last：首/末 tap 标志
+    //   mv_last_tap：i_group 最后一个 tap（末像素末窗口位）
+    //   acc_q_d：acc 读值随 tap 走到 ACC 级（避免被后续 tap 的采样覆盖）
+    //-----------------------------------------------------------------------
+    reg [0:4] mv;              // 有效位链：bit0=上一拍 issue，bit4=ACC 级（ascending，与 rq_v 同序）
+    reg [0:4] mv_cv;           // 列有效随 tap 走（MUL 级用 bit1 前值）
+    reg [0:4] mv_first;        // 首 tap 标志链
+    reg [0:4] mv_last;         // 末 tap 标志链
+    reg [0:4] mv_last_tap;     // i_group 末 tap 标志链
+    reg [15:0] mv_acc_wa [0:3]; // acc 写地址随 tap 走（MUL3 级取 [2] 前值）
+    reg signed [255:0] acc_q_d [0:3];   // acc 读值随 tap 走（ACC 级用 [3] 前值）
+    reg [3:0]  mv_tap_t_r;     // 上一拍 issue 的 mac_t（S_MAC_RD 级采 w_q 用）
+    reg        mac_issue_done; // 末 tap 已 issue，流水排空后转 requant/下一 cb
+    reg        mac_done_q;     // 末 tap 的 ACC 级完成（下一拍写回 + 转移）
+
+    //-----------------------------------------------------------------------
     // 状态机
     //-----------------------------------------------------------------------
     localparam S_IDLE       = 5'd0;
@@ -296,6 +317,7 @@ module cnn_core #(
     localparam S_DONE       = 5'd22;
     localparam S_PF_WAIT    = 5'd23;   // 等预取完成（下一 cb 已装入 ~mac_buf_sel）
     localparam S_LOAD_FLUSH = 5'd24;   // S_LOAD 末字补写拍（首 cb 后）
+    localparam S_MAC_RUN    = 5'd25;   // MAC tap II=1 流水运行态（6 级流水重叠）
 
     reg [4:0] state;
     reg [11:0] load_row, load_col;
@@ -348,6 +370,18 @@ module cnn_core #(
             mac_buf_sel <= 0;
             pf_start <= 0;
             mac_c_valid_r <= 0;
+            mv <= 5'd0;
+            mv_cv <= 5'd0;
+            mv_first <= 5'd0;
+            mv_last <= 5'd0;
+            mv_last_tap <= 5'd0;
+            mv_tap_t_r <= 4'd0;
+            mac_issue_done <= 0;
+            mac_done_q <= 0;
+            for (lane = 0; lane < 4; lane = lane + 1)
+                mv_acc_wa[lane] <= 16'd0;
+            for (lane = 0; lane < 4; lane = lane + 1)
+                acc_q_d[lane] <= 256'sd0;
             acc_local <= 256'sd0;   // 复位归并到主状态机（单一驱动，避免 Quartus 10028）
             acc_wr_q <= 256'sd0;
             acc_wr_we_q <= 0;
@@ -360,6 +394,7 @@ module cnn_core #(
             lb_wd_q <= 64'h0;
             acc_addr_mac_r <= 16'd0;
             acc_clr_wa <= 16'd0;
+            acc_wa_wr_q <= 16'd0;
         end else begin
             pf_start <= 0;   // 单拍脉冲，默认清零；S_WEIGHT 完成拍置 1
             case (state)
@@ -486,121 +521,142 @@ module cnn_core #(
                             mac_kh_q <= 4'd0; mac_kw_q <= 4'd0;
                             mac_r_q <= 12'd0;          // 首 tap 行 = 0
                             mac_c_cl_q <= first_mac_c_cl;  // 首 tap 列 = -pad
+                            // MAC II=1：清流水链与 issue/完成标志
+                            mv <= 5'd0;
+                            mv_cv <= 5'd0;
+                            mv_first <= 5'd0;
+                            mv_last <= 5'd0;
+                            mv_last_tap <= 5'd0;
+                            mac_issue_done <= 0;
+                            mac_done_q <= 0;
                             // 启动下一 cb 预取（CONV 且还有后续输入 cb）
                             pf_start <= (type_reg != 4 && i_group + 1 < in_cb_reg);
-                            state <= S_MAC_ADDR;
+                            state <= S_MAC_RUN;
                         end else
                             wf_cnt <= wf_cnt + 1;
                     end
                 end
 
-                //---- 窗口 MAC（地址拍）：组合计算 lb/acc 读地址并寄存，
-                //     断开 32-bit 常量乘法链直通 M10K 地址端口的长路径 ----
-                S_MAC_ADDR: begin
+                //---- 窗口 MAC（II=1 流水运行态）：每拍 issue 1 个 tap，
+                //     6 级流水（issue/RD/MUL/MUL2/MUL3/ACC）重叠执行。
+                //     数据通路每级仍只做一拍逻辑（与旧 6 拍状态机相同），
+                //     不合并任何流水级，时序关键路径长度不变 ----
+                S_MAC_RUN: begin
                     // 末 tap 写回（延后 1 拍搭车，case 内写点保 M10K 推断；写拍沿清脉冲）
                     if (acc_wr_we_q) begin
-                        acc[acc_wa_q] <= acc_wr_q;
+                        acc[acc_wa_wr_q] <= acc_wr_q;
                         acc_wr_we_q <= 0;
                     end
-                    lb_addr_r      <= lb_raddr[15:0];
-                    acc_addr_mac_r <= acc_raddr_mac[15:0];
-                    state <= S_MAC_RD;
-                end
 
-                //---- 窗口 MAC（请求拍）：地址已寄存，上升沿同步采样 lb_q/acc_q ----
-                S_MAC_RD: begin
-                    mac_c_valid_r <= mac_c_valid;   // 组合 valid 寄存（断 k_reg→乘加树链）
-                    state <= S_MAC_MUL;
-                end
+                    // 流水链整体右移（全部用沿前值，串行 shift 语义正确）
+                    mv          <= {!mac_issue_done, mv[0:3]};
+                    mv_cv       <= {(!mac_issue_done) && mac_c_valid, mv_cv[0:3]};
+                    mv_first    <= {(!mac_issue_done) && mac_first_c, mv_first[0:3]};
+                    mv_last     <= {(!mac_issue_done) && mac_last_c, mv_last[0:3]};
+                    mv_last_tap <= {(!mac_issue_done) && mac_last_c &&
+                                    (mac_col == out_w_reg - 1) &&
+                                    (mac_row == out_row_tile_reg - 1),
+                                    mv_last_tap[0:3]};
+                    mv_acc_wa[1] <= mv_acc_wa[0];
+                    mv_acc_wa[2] <= mv_acc_wa[1];
+                    mv_acc_wa[3] <= mv_acc_wa[2];
+                    acc_q_d[0] <= acc_q;
+                    acc_q_d[1] <= acc_q_d[0];
+                    acc_q_d[2] <= acc_q_d[1];
+                    acc_q_d[3] <= acc_q_d[2];
 
-                //---- 窗口 MAC（乘拍）：乘加树 → v_sum_r 寄存（拆开累加，缩短组合链）----
-                S_MAC_MUL: begin
-                    // a 输入打拍：lb_q（S_MAC_RD 沿的新值）→ mac_a_q，拆 lb M10K
-                    // pass-through 读路径与 DSP 乘法；b 输入 w_q 已在 S_MAC_RD 沿采样
-                    mac_a_q <= mac_c_valid_r ? lb_q : 64'sd0;
-                    state <= S_MAC_MUL2;
-                end
-                S_MAC_MUL2: begin
-                    // 乘拍：mac_a_q × w_q → mac_p → mac_p_r（原 S_MAC_MUL 内容移来）
-                    for (lane = 0; lane < 8; lane = lane + 1)
-                        for (m = 0; m < 8; m = m + 1)
-                            mac_p_r[lane][m] <= mac_p[lane][m];
-                    // 首/末 tap 标志提前寄存（32-bit 比较拆出 S_MAC_ACC 拍）
-                    mac_first_q <= (mac_t == 4'd0);
-                    mac_last_q  <= (mac_t == (k_reg == 1 ? 4'd0 : 4'd8));
-                    state <= S_MAC_MUL3;
-                end
-                S_MAC_MUL3: begin
-                    // 加法树拍：mac_p_r（寄存器）→ 8 项加法树 → v_sum_r
-                    for (lane = 0; lane < 8; lane = lane + 1)
-                        v_sum[lane] =
-                            mac_p_r[lane][0] + mac_p_r[lane][1] + mac_p_r[lane][2] + mac_p_r[lane][3] +
-                            mac_p_r[lane][4] + mac_p_r[lane][5] + mac_p_r[lane][6] + mac_p_r[lane][7];
-                    for (lane = 0; lane < 8; lane = lane + 1)
-                        v_sum_r[lane] <= v_sum[lane];
-                    state <= S_MAC_ACC;
-                end
-
-                //---- 窗口 MAC（累加拍）：用上拍寄存的 v_sum_r 累加到 acc_local；
-                //     首 tap（mac_t==0）以 acc_q 初始化；末 tap（k=3：mac_t==8；k=1：mac_t==0）写回 acc ----
-                S_MAC_ACC: begin
-                    // 8 lane 独立 32-bit 累加（acc_local 打包为 256-bit，但每个 lane
-                    // 是独立 int32，无跨 lane 进位；整体 256-bit 加法器进位链过长，
-                    // 拆成 lane 级加法消除，语义不变）
-                    // 注意：必须先用组合变量拼成整字再整字写 acc_local/acc——
-                    // 直接 part-select 写（acc[...][32*lane +: 32] <= ...）会阻止
-                    // Quartus 把 acc 推断为 M10K，导致 A&S 内存反弹（10+GB）。
-                    for (lane = 0; lane < 8; lane = lane + 1) begin
-                        if (mac_first_q)
-                            acc_next[32*lane +: 32] = acc_q[32*lane +: 32] + v_sum_r[lane];
-                        else
-                            acc_next[32*lane +: 32] = acc_local[32*lane +: 32] + v_sum_r[lane];
-                    end
-                    acc_local <= acc_next;
-                    // 预计算下一 tap 的 lb 读地址分量（拆 stride mux→lb_raddr 长路径）
-                    mac_r_q <= nxt_mac_r;
-                    mac_c_cl_q <= nxt_mac_c_cl;
-                    if (mac_last_q) begin
-                        // 末 tap：写回最终值（acc_local 尚缺本 tap 部分和；
-                        // k=1 单 tap 时直接用 acc_q 累加，避免旧 acc_local 串扰）
-                        for (lane = 0; lane < 8; lane = lane + 1)
-                            acc_wr_next[32*lane +: 32] = (k_reg == 1) ?
-                                (acc_q[32*lane +: 32] + v_sum_r[lane]) :
-                                (acc_local[32*lane +: 32] + v_sum_r[lane]);
-                        acc_wr_q <= acc_wr_next;   // 写数据打拍（下一拍随转移状态写回）
-                        acc_wr_we_q <= 1;       // 写回脉冲（写拍沿清 0）
-                        mac_t <= 0;
-                        mac_kh_q <= 4'd0;
-                        mac_kw_q <= 4'd0;
-                        if (mac_col == out_w_reg - 1) begin
-                            mac_col <= 0;
-                            if (mac_row == out_row_tile_reg - 1) begin
-                                mac_row <= 0;
-                                if (type_reg == 4 || i_group == in_cb_reg - 1) begin
-                                    rq_row <= 0; rq_col <= 0;
-                                    acc_clr_wa <= 16'd0;   // requant 从 (0,0) 起，清零地址同步归零
-                                    state <= S_REQ_ADDR;
-                                end else begin
-                                    i_group <= i_group + 1;
-                                    if (pf_done_q) begin
-                                        mac_buf_sel <= ~mac_buf_sel;
-                                        state <= S_WEIGHT;   // 下一 cb 已预取进 ~mac_buf_sel
-                                    end else
-                                        state <= S_PF_WAIT;  // 等预取完成
-                                end
-                            end else begin
-                                mac_row <= mac_row + 1;
-                                state <= S_MAC_ADDR;
-                            end
+                    // issue 级（stage0）：锁存本 tap 地址、预计算下一 tap 地址、推进指针
+                    if (!mac_issue_done) begin
+                        mv_tap_t_r <= mac_t;
+                        mv_acc_wa[0] <= acc_waddr_mac[15:0];
+                        lb_addr_r <= lb_raddr[15:0];
+                        acc_addr_mac_r <= acc_raddr_mac[15:0];
+                        mac_r_q <= nxt_mac_r;
+                        mac_c_cl_q <= nxt_mac_c_cl;
+                        if (mac_last_c) begin
+                            mac_t <= 0; mac_kh_q <= 0; mac_kw_q <= 0;
+                            if (mac_col == out_w_reg - 1) begin
+                                mac_col <= 0;
+                                if (mac_row == out_row_tile_reg - 1) begin
+                                    mac_row <= 0;
+                                    mac_issue_done <= 1;
+                                end else
+                                    mac_row <= mac_row + 1;
+                            end else
+                                mac_col <= mac_col + 1;
                         end else begin
-                            mac_col <= mac_col + 1;
-                            state <= S_MAC_ADDR;
+                            mac_t <= mac_t + 1;
+                            mac_kh_q <= (k_reg == 3) ? mac_kh_next : 4'd0;
+                            mac_kw_q <= (k_reg == 3) ? mac_kw_next : 4'd0;
                         end
-                    end else begin
-                        mac_t <= mac_t + 1;
-                        mac_kh_q <= (k_reg == 3) ? mac_kh_next : 4'd0;
-                        mac_kw_q <= (k_reg == 3) ? mac_kw_next : 4'd0;
-                        state <= S_MAC_ADDR;
+                    end
+
+                    // MUL 级（stage2）：a 输入打拍（lb_q → mac_a_q），权重打拍
+                    //（w_q → w_q_mul，避免下一拍 RD 覆盖 w_q 污染本 tap 乘法）
+                    if (mv[1]) begin
+                        mac_a_q <= mv_cv[1] ? lb_q : 64'sd0;
+                        for (lane = 0; lane < 8; lane = lane + 1)
+                            for (m = 0; m < 8; m = m + 1)
+                                w_q_mul[lane][m] <= w_q[lane][m];
+                    end
+
+                    // MUL2 级（stage3）：乘法结果寄存
+                    if (mv[2]) begin
+                        for (lane = 0; lane < 8; lane = lane + 1)
+                            for (m = 0; m < 8; m = m + 1)
+                                mac_p_r[lane][m] <= mac_p[lane][m];
+                    end
+
+                    // MUL3 级（stage4）：8 项加法树 → v_sum_r
+                    if (mv[3]) begin
+                        for (lane = 0; lane < 8; lane = lane + 1)
+                            v_sum[lane] =
+                                mac_p_r[lane][0] + mac_p_r[lane][1] + mac_p_r[lane][2] + mac_p_r[lane][3] +
+                                mac_p_r[lane][4] + mac_p_r[lane][5] + mac_p_r[lane][6] + mac_p_r[lane][7];
+                        for (lane = 0; lane < 8; lane = lane + 1)
+                            v_sum_r[lane] <= v_sum[lane];
+                    end
+
+                    // ACC 级（stage5）：累加 / 末 tap 写回 / 末 tap 完成标记
+                    if (mv[4]) begin
+                        for (lane = 0; lane < 8; lane = lane + 1) begin
+                            if (mv_first[4])
+                                acc_next[32*lane +: 32] = acc_q_d[2][32*lane +: 32] + v_sum_r[lane];
+                            else
+                                acc_next[32*lane +: 32] = acc_local[32*lane +: 32] + v_sum_r[lane];
+                        end
+                        acc_local <= acc_next;
+                        if (mv_last[4]) begin
+                            for (lane = 0; lane < 8; lane = lane + 1)
+                                acc_wr_next[32*lane +: 32] = (k_reg == 1) ?
+                                    (acc_q_d[2][32*lane +: 32] + v_sum_r[lane]) :
+                                    (acc_local[32*lane +: 32] + v_sum_r[lane]);
+                            acc_wr_q <= acc_wr_next;
+                            acc_wa_wr_q <= acc_wa_q;   // 锁存本 tap 写回地址（stage4 已就绪）
+                            acc_wr_we_q <= 1;
+                        end
+                        if (mv_last_tap[4])
+                            mac_done_q <= 1;
+                    end
+
+                    // 末 tap 写回完成拍：转移（requant 或下一 cb 权重/预取等待）
+                    if (mac_done_q) begin
+                        mac_done_q <= 0;
+                        mac_issue_done <= 0;
+                        mv <= 5'd0; mv_cv <= 5'd0; mv_first <= 5'd0;
+                        mv_last <= 5'd0; mv_last_tap <= 5'd0;
+                        if (type_reg == 4 || i_group == in_cb_reg - 1) begin
+                            rq_row <= 0; rq_col <= 0;
+                            acc_clr_wa <= 16'd0;
+                            state <= S_REQ_ADDR;
+                        end else begin
+                            i_group <= i_group + 1;
+                            if (pf_done_q) begin
+                                mac_buf_sel <= ~mac_buf_sel;
+                                state <= S_WEIGHT;
+                            end else
+                                state <= S_PF_WAIT;
+                        end
                     end
                 end
 
@@ -807,13 +863,18 @@ module cnn_core #(
                             + $signed(mac_kw_q) - $signed(pad_reg);
     wire mac_c_valid = (mac_c >= 0) && (mac_c < in_w_reg);
 
-    // 下一 tap 的地址（S_MAC_ACC 预计算，拆 stride mux→lb_raddr 的长路径）：
-    // 末 tap 后下一 tap = 下一像素首 tap（mac_last_q 已寄存），否则同像素下一窗口位。
-    wire [11:0] nxt_mac_row = mac_last_q ? ((mac_col == out_w_reg - 1) ?
+    // 首/末 tap 组合标志（issue 级用；原 mac_first_q/mac_last_q 为流水寄存，
+    // II=1 下改为随 tap 走的链，见 mv_first/mv_last）
+    wire mac_first_c = (mac_t == 4'd0);
+    wire mac_last_c  = (mac_t == (k_reg == 1 ? 4'd0 : 4'd8));
+
+    // 下一 tap 的地址（issue 级预计算，拆 stride mux→lb_raddr 的长路径）：
+    // 末 tap 后下一 tap = 下一像素首 tap，否则同像素下一窗口位。
+    wire [11:0] nxt_mac_row = mac_last_c ? ((mac_col == out_w_reg - 1) ?
                               ((mac_row == out_row_tile_reg - 1) ? 12'd0 : mac_row + 12'd1) : mac_row) : mac_row;
-    wire [11:0] nxt_mac_col = mac_last_q ? ((mac_col == out_w_reg - 1) ? 12'd0 : mac_col + 12'd1) : mac_col;
-    wire [3:0]  nxt_mac_kh  = mac_last_q ? 4'd0 : mac_kh_next;
-    wire [3:0]  nxt_mac_kw  = mac_last_q ? 4'd0 : mac_kw_next;
+    wire [11:0] nxt_mac_col = mac_last_c ? ((mac_col == out_w_reg - 1) ? 12'd0 : mac_col + 12'd1) : mac_col;
+    wire [3:0]  nxt_mac_kh  = mac_last_c ? 4'd0 : mac_kh_next;
+    wire [3:0]  nxt_mac_kw  = mac_last_c ? 4'd0 : mac_kw_next;
     wire [11:0] nxt_mac_r   = ((stride_reg == 2) ? {nxt_mac_row[10:0], 1'b0} : nxt_mac_row) + nxt_mac_kh;
     wire signed [12:0] nxt_mac_c = $signed((stride_reg == 2) ? {nxt_mac_col[10:0], 1'b0} : nxt_mac_col)
                                 + $signed(nxt_mac_kw) - $signed(pad_reg);
@@ -833,21 +894,19 @@ module cnn_core #(
             acc_q <= 256'sd0;
         end else begin
             lb_q <= mac_buf_sel ? lb1[lb_addr_r] : lb0[lb_addr_r];
-            // 权重采样（S_MAC_RD 拍）：mac_t 在 S_MAC_ACC 末更新，隔 S_MAC_ADDR 拍到
-            // S_MAC_RD 沿共 2 拍窗口，拆 mac_t→wbuf 72:1 mux 组合链（原每拍采样
-            // 窗口仅 1 拍，w_q 路径 slack -5.189；S_MAC_ADDR/RD 拍不用 w_q，
-            // 乘法仍在 S_MAC_MUL 拍用新值，拍序不变）
-            if (state == S_MAC_RD) begin
+            // 权重采样（MAC II=1 的 RD 级）：用上一拍 issue 寄存的 mac_t
+            // （mv_tap_t_r），拆 mac_t→wbuf 72:1 mux 组合链
+            if (state == S_MAC_RUN && mv[0]) begin
                 for (lane = 0; lane < 8; lane = lane + 1)
                     for (m = 0; m < 8; m = m + 1)
-                        w_q[lane][m] <= wbuf[lane][m][mac_t];
+                        w_q[lane][m] <= wbuf[lane][m][mv_tap_t_r];
             end
             acc_raddr_r <= acc_raddr_clr[15:0];   // requant 读地址打拍（每拍采样，rq_row 推进后首拍锁存新值）
             rq_raddr_q <= rq_raddr;                 // requant 参数读地址打拍（每拍，断 o_group 布线）
-            // acc 写口统一地址：S_MAC_MUL3 拍取写回地址（当轮 mac_row），S_MAC_ACC 拍写回
-            // 用沿前值；其他拍取清零地址（rq_row 稳定）——写口永不直接连组合
-            if (state == S_MAC_MUL3)
-                acc_wa_q <= acc_waddr_mac[15:0];
+            // acc 写口统一地址：MAC II=1 的 MUL3 级取随 tap 走的写回地址；
+            // 其他拍取清零地址（rq_row 稳定）——写口永不直接连组合
+            if (state == S_MAC_RUN && mv[3])
+                acc_wa_q <= mv_acc_wa[3];
             // acc_q 采样：requant 首拍（S_REQ_ADDR）时 acc_raddr_r 尚是旧地址
             //（S_REQ_OUT3 末拍才推进 rq_row/rq_col，acc_raddr_r 同步采样的是沿前
             // 旧值），S_REQ_MUL 拍才采到新地址——两拍连续采样取后者（S_REQ_MULB
@@ -856,8 +915,8 @@ module cnn_core #(
             // Quartus 可合并成 1 端口，改 if/else if（带保持）后被推断成 2 个读
             // 端口 = 2 份 acc RAM（≈75 个 M10K），超 5CSEMA5F31 容量报 276003；
             // 显式单表达式强制 1 端口，功能/时序不变。
-            if (state == S_MAC_RD || state == S_REQ_ADDR || state == S_REQ_MUL)
-                acc_q <= acc[(state == S_MAC_RD) ? acc_addr_mac_r : acc_raddr_r];
+            if ((state == S_MAC_RUN && mv[0]) || state == S_REQ_ADDR || state == S_REQ_MUL)
+                acc_q <= acc[((state == S_MAC_RUN && mv[0])) ? acc_addr_mac_r : acc_raddr_r];
         end
     end
 
