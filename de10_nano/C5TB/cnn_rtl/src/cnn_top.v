@@ -92,6 +92,7 @@ module cnn_top #(
     wire [63:0] lr_readdata, wr_readdata, ow_writedata;
     wire        pr_waitrequest, sr_waitrequest, lr_waitrequest, wr_waitrequest;
     wire        ow_waitrequest;
+    wire [4:0]  load_burstcount;
 
     // 权重读复用 load master（黑盒无独立权重 master；core 的 S_LOAD/S_WEIGHT
     // 串行，lr_read 与 wr_read 不同时拉高）。注意 readdatavalid 是广播的：
@@ -134,7 +135,8 @@ module cnn_top #(
         .ow_address    (ow_address),
         .ow_write      (ow_write),
         .ow_writedata  (ow_writedata),
-        .ow_waitrequest(ow_waitrequest)
+        .ow_waitrequest(ow_waitrequest),
+        .load_burstcount(load_burstcount)
     );
 
     // ---- Avalon 主接口适配 ----
@@ -144,7 +146,7 @@ module cnn_top #(
     assign param_avm_read       = pr_read;
 
     assign load_avm_address     = lr_read ? lr_address : wr_address;
-    assign load_avm_burstcount  = 5'd1;
+    assign load_avm_burstcount  = load_burstcount;
     assign load_avm_byteenable  = {(LOAD_M_AXI_DATA_WIDTH/8){1'b1}};
     assign load_avm_read        = lr_read || wr_read;
 

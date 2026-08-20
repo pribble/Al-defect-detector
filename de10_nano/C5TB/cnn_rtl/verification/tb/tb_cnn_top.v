@@ -55,6 +55,7 @@ module tb_cnn_top;
     wire        ow_write;
     wire [63:0] ow_writedata;
     reg         ow_waitrequest = 0;
+    wire [4:0]  load_burstcount;
 
     cnn_top_core dut (
         .clk(clk), .rst_n(rst_n),
@@ -70,7 +71,8 @@ module tb_cnn_top;
         .wr_address(wr_address), .wr_read(wr_read), .wr_readdata(wr_readdata),
         .wr_readdatavalid(wr_rdv), .wr_waitrequest(wr_waitrequest),
         .ow_address(ow_address), .ow_write(ow_write), .ow_writedata(ow_writedata),
-        .ow_waitrequest(ow_waitrequest)
+        .ow_waitrequest(ow_waitrequest),
+        .load_burstcount(load_burstcount)
     );
 
     // DDR 内存
@@ -168,32 +170,40 @@ module tb_cnn_top;
 
     //---- 共享 load master（lr/wr 复用，cnn_top.v 真实接法）----
     // 多笔在途（深度 4 = MAX_PENDING_RESPONSES，返回保序），每笔命令接受
-    // 拍入队锁存地址，RD_LAT 拍后按序出队；readdatavalid/readdata 广播到
-    // lr/wr 两路（cnn_top.v 中 .lr_readdatavalid/.wr_readdatavalid 同接
-    // load_avm_readdatavalid）。桥满（occ==4）时 waitrequest 反压。
+    // 拍入队 {addr, lat, beats_left}；RD_LAT 拍后按序逐拍返回 beats_left 拍，
+    // 每拍地址 +8；最后一拍返回后出队。桥满（occ==4）时 waitrequest 反压。
     reg [31:0] ld_addr_q [0:3];
     reg [7:0]  ld_lat_q  [0:3];
+    reg [2:0]  ld_beats_q [0:3];
     reg [1:0]  ld_head, ld_tail;
     reg [2:0]  ld_occ;
     integer ld_i;
     wire ld_accept = (lr_read || wr_read) && !lr_waitrequest;
-    wire ld_pop    = (ld_occ != 3'd0) && (ld_lat_q[ld_head] == 8'd0);
+    wire ld_pop    = (ld_occ != 3'd0) && (ld_lat_q[ld_head] == 8'd0) &&
+                     (ld_beats_q[ld_head] == 3'd1);
 
     always @(posedge clk) begin
         if (!rst_n) begin
             ld_head <= 0; ld_tail <= 0; ld_occ <= 0;
-            for (ld_i = 0; ld_i < 4; ld_i = ld_i + 1)
+            for (ld_i = 0; ld_i < 4; ld_i = ld_i + 1) begin
                 ld_lat_q[ld_i] <= 8'd0;
+                ld_beats_q[ld_i] <= 3'd0;
+            end
         end else begin
             for (ld_i = 0; ld_i < 4; ld_i = ld_i + 1)
                 if (ld_lat_q[ld_i] != 8'd0)
                     ld_lat_q[ld_i] <= ld_lat_q[ld_i] - 8'd1;
-            // 单语句净 0：同拍出+入 = occ 不变，但 head 必须同步推进
-            // （两条 if 分开写会后写覆盖；同拍分支漏 head 推进会重复
-            // 出队同一地址 → 数据错位）
+            // 队首就绪且剩余拍 >0：本拍返回一字，地址 +8、剩余 -1
+            if (ld_occ != 3'd0 && ld_lat_q[ld_head] == 8'd0 &&
+                ld_beats_q[ld_head] != 3'd0) begin
+                ld_addr_q[ld_head]  <= ld_addr_q[ld_head] + 8;
+                ld_beats_q[ld_head] <= ld_beats_q[ld_head] - 3'd1;
+            end
+            // 命令入队/出队（单语句净 0，同拍 head/tail 同步推进）
             if (ld_accept && (ld_occ < 3'd4)) begin
-                ld_addr_q[ld_tail] <= lr_read ? lr_address : wr_address;
-                ld_lat_q[ld_tail]  <= RD_LAT;
+                ld_addr_q[ld_tail]  <= lr_read ? lr_address : wr_address;
+                ld_lat_q[ld_tail]   <= RD_LAT;
+                ld_beats_q[ld_tail] <= load_burstcount[2:0];
                 ld_tail <= ld_tail + 2'd1;
                 if (ld_pop) begin
                     ld_head <= ld_head + 2'd1;   // 同拍出队：head 推进、occ 不变
@@ -209,8 +219,9 @@ module tb_cnn_top;
     wire lr_rdv, wr_rdv;
     assign lr_readdata = mem[ld_addr_q[ld_head] >> 3];
     assign wr_readdata = mem[ld_addr_q[ld_head] >> 3];
-    assign lr_rdv = ld_pop;
-    assign wr_rdv = ld_pop;
+    assign lr_rdv = (ld_occ != 3'd0) && (ld_lat_q[ld_head] == 8'd0) &&
+                    (ld_beats_q[ld_head] != 3'd0);
+    assign wr_rdv = lr_rdv;
     // 桥满反压（MAX_PENDING_RESPONSES=4）
     assign lr_waitrequest = (ld_occ >= 3'd4);
     assign wr_waitrequest = (ld_occ >= 3'd4);
@@ -347,7 +358,7 @@ module tb_cnn_top;
                              dut.cmd_is_wr, dut.lr_read, dut.lr_readdatavalid,
                              dut.lr_got, dut.core_i_ready, dut.core_i_valid,
                              dut.dma_icb, dut.dma_ibeat, dut.dma_wbeat,
-                             dut.wr_round_end_q, dut.core_ow_ready,
+                             dut.load_busy, dut.core_ow_ready,
                              dut.core.wf_cnt, dut.core.o_group,
                              dut.in_seg_words_r, dut.load_rows_r,
                              dut.lr_last_cb_r);
