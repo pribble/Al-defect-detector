@@ -54,6 +54,49 @@ static void dbg_dump_layer_output(const char *name, const int8_t *base,
   fflush(g_dump_f);
 }
 
+// ---- DUMP_LAYER_REF：与 DUMP_LAYER_OUT 配套，dump 每层输入/权重/定点 scale，
+// 供 rtl_ref_check.py 用 numpy 重算参考输出，不依赖旧黑盒 log（新模型权重
+// 变化后仍可用）。输出到 rtl_ref.log ----
+static FILE *g_ref_f = nullptr;
+static void dbg_dump_hex(FILE *f, const uint8_t *p, int nbytes) {
+  for (int i = 0; i < nbytes; i += 32) {
+    fprintf(f, "%08x:", i);
+    int jmax = (nbytes - i < 32) ? (nbytes - i) : 32;
+    for (int j = 0; j < jmax; j++) fprintf(f, " %02x", p[i + j]);
+    fprintf(f, "\n");
+  }
+}
+static void dbg_dump_layer_ref(const char *name,
+                               const FpgaConvParam *argp) {
+  if (!g_ref_f) {
+    g_ref_f = fopen("rtl_ref.log", "wb");
+    if (!g_ref_f) return;
+  }
+  const struct parameter &pm = argp->param;
+  const int in_cb = (pm.in_c + 7) / 8;
+  const int out_cb = (pm.out_c + 7) / 8;
+  const int in_bytes = in_cb * pm.in_h * pm.in_w * 8;
+  // DW（type=4）权重区只分配对角块（dw_conv2d_weight_reorganize：
+  // out_cb × 1 × 8 × k² × 8），不是 conv 的 in_cb 倍
+  const int w_bytes = out_cb * (pm.type == 4 ? 1 : in_cb) * 8 *
+                      pm.kernel * pm.kernel * 8;
+  const int scale_bytes = 4 * pm.output_c * 4;
+  fprintf(g_ref_f,
+          "[RINFO] %s type=%d in=%d,%d,%d out=%d,%d,%d k=%d s=%d p=%d act=%d"
+          " in_off=%d w_off=%d out_off=%d\n",
+          name, pm.type, pm.in_c, pm.in_h, pm.in_w, pm.output_c, pm.output_h,
+          pm.output_w, pm.kernel, pm.stride, pm.in_pad, pm.relu,
+          pm.input_offset, pm.weight_offset, pm.output_offset);
+  fprintf(g_ref_f, "[RSCALE] %s n=%d\n", name, scale_bytes);
+  dbg_dump_hex(g_ref_f, (const uint8_t *)argp->scale, scale_bytes);
+  fprintf(g_ref_f, "[RIN] %s off=0 n=%d\n", name, in_bytes);
+  dbg_dump_hex(g_ref_f, (const uint8_t *)udata + pm.input_offset * 8, in_bytes);
+  fprintf(g_ref_f, "[RWD] %s off=0 n=%d\n", name, w_bytes);
+  dbg_dump_hex(g_ref_f, (const uint8_t *)uweight + pm.weight_offset * 8,
+               w_bytes);
+  fflush(g_ref_f);
+}
+
 static int fpga_fd = -1;
 static bool fpga_init_status = false;
 static int weight_offset = 0;
@@ -629,6 +672,7 @@ int intelfpga_subgraph(struct DeviceGraphNode *node) {
         const int obytes = ((oc + 7) / 8) * oh * ow * 8;
         dbg_dump_layer_output(node->name_.c_str(), (const int8_t *)udata,
                               argp->param.output_offset * 8, obytes);
+        dbg_dump_layer_ref(node->name_.c_str(), argp);
       }
 
       clock_gettime(CLOCK_MONOTONIC, &hw_end);
