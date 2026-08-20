@@ -76,8 +76,6 @@ body{width:100%;height:100vh;overflow:hidden}
 
 /* History images */
 .main-center-center{flex:0 0 240px;margin-left:15px}
-.main-center-center .hist-scroll{overflow-y:auto}
-.main-center-center .hist-pager{flex:0 0 44px;display:flex;align-items:center;justify-content:center}
 .main-center-center .hist-item{display:flex;flex-flow:column;padding:6px 0}
 .main-center-center .hist-item .img-blck{width:100%;height:155px;display:flex;align-items:center;background-color:#0a0a0a}
 .main-center-center .hist-item img{width:100%;cursor:pointer}
@@ -228,7 +226,7 @@ body{width:100%;height:100vh;overflow:hidden}
         <!-- Center-center: history images -->
         <div class="border main-center-center">
           <h5 class="title"><span class="icon"></span>最近检测结果图</h5>
-          <div class="centent hist-scroll">
+          <div class="centent">
             <div class="hist-item" v-for="(item, idx) in imgHistory" :key="idx">
               <div class="img-blck">
                 <img :src="item.img" @click="imgDetail(item)" alt="history">
@@ -236,16 +234,6 @@ body{width:100%;height:100vh;overflow:hidden}
               <p class="hist-text" :title="item.text">{{ item.text }}</p>
               <p class="hist-time" v-if="item.time">{{ item.time }}</p>
             </div>
-          </div>
-          <div class="hist-pager">
-            <el-pagination
-              small
-              layout="prev, pager, next"
-              :total="historyTotal"
-              :page-size="historyPageSize"
-              :current-page.sync="historyPage"
-              @current-change="fetchHistory">
-            </el-pagination>
           </div>
         </div>
 
@@ -330,7 +318,7 @@ function apiUseArm(conf, data){
 // Detection server APIs (port 7777, same origin if nginx proxies)
 function apiGetConf(conf){ return http.get(conf.url+'/get_conf') }
 function apiChangeConf(conf, data){ return http.post(conf.url+'/change_conf', data) }
-function apiGetHistory(conf, params){ return http.get(conf.url+'/get_history', {params:params}) }
+function apiGetHistory(conf){ return http.get(conf.url+'/get_history') }
 function apiGetOriginalPic(conf){ return http.get(conf.url+'/get_original_pic') }
 function apiGetDetectPic(conf){ return http.get(conf.url+'/get_detect_pic') }
 function apiGetStatistics(conf){ return http.get(conf.url+'/get_statistics') }
@@ -376,7 +364,6 @@ var app = new Vue({
     // Images
     originalImg: '', testingImg: '', testingText: '',
     imgHistory: [],
-    historyPage: 1, historyPageSize: 20, historyTotal: 0,
 
     // Dialog
     dialog: { visible: false, img: '' },
@@ -487,16 +474,14 @@ var app = new Vue({
     // ==================== Image fetching ====================
     fetchHistory: function(){
       var self = this;
-      apiGetHistory(CONFIG, {page: this.historyPage, page_size: this.historyPageSize}).then(function(r){
-        if (!r || !r.items) return;
-        self.imgHistory = r.items.map(function(it){
+      apiGetHistory(CONFIG).then(function(items){
+        if (!items || !items.length) return;
+        self.imgHistory = items.map(function(it){
           var names = (it.name||[]).map(function(n){
             return self.defectKeys[n[0]] || n[0];
           });
           return { img: it.img, text: names.join('，') || '正常', time: it.time || '' };
         });
-        self.historyTotal = r.total || 0;
-        self.historyPage = r.page || 1;
       });
     },
     fetchOriginalPic: function(){

@@ -59,29 +59,10 @@ def change_conf():
 
 @bp.route('/get_history', methods=['GET'])
 def get_history():
-    """分页获取历史检测图片 (base64). 参数: page(1起)/page_size(默认20, 上限100)."""
-    try:
-        page = int(request.args.get('page', 1))
-    except (TypeError, ValueError):
-        page = 1
-    try:
-        page_size = int(request.args.get('page_size', 20))
-    except (TypeError, ValueError):
-        page_size = 20
-    page = max(page, 1)
-    page_size = min(max(page_size, 1), 100)
-
-    total = database.query_value(
-        'count(distinct path)', 'defect_list',
-        "where path is not null and path != 'detect.jpg'"
-    ) or 0
-    total_pages = (total + page_size - 1) // page_size if total else 0
-
+    """获取最新 4 张历史检测图片 (base64)"""
     recent_paths = database.query(
-        'path', 'defect_list',
-        "where path is not null and path != 'detect.jpg'"
-        " group by path order by max(id) DESC limit ? offset ?",
-        params=(page_size, (page - 1) * page_size)
+        'distinct path', 'defect_list',
+        "where path is not null and path != 'detect.jpg' order by id DESC limit 4"
     )
     image_files = []
     for row in recent_paths:
@@ -95,10 +76,7 @@ def get_history():
             "img": _image_to_base64(image_file),
             "time": detail_rows[0][1] if detail_rows else ''
         })
-    return json.dumps({
-        "items": image_files, "total": total,
-        "page": page, "page_size": page_size, "total_pages": total_pages,
-    }, ensure_ascii=False)
+    return json.dumps(image_files)
 
 
 @bp.route('/get_original_pic', methods=['GET'])
