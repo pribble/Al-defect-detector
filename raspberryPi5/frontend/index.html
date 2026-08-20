@@ -327,7 +327,7 @@ http.interceptors.response.use(function(r){ return r.status===200?r.data:r });
 
 function loadConfig(){ return http.get('config.json?v=4') }
 
-// Arm control APIs (same port 7777 after service merge, same origin)
+// Arm control APIs (same origin, port 8080)
 function apiGetArm(conf, id){
   return http.get(conf.ip+'/get_arm', {params:{id:id}})
 }
@@ -335,7 +335,7 @@ function apiUseArm(conf, data){
   return http.post(conf.ip+'/use_arm', data)
 }
 
-// Detection server APIs (port 7777, same origin if nginx proxies)
+// Detection server APIs (same origin, port 8080)
 function apiGetConf(conf){ return http.get(conf.url+'/get_conf') }
 function apiChangeConf(conf, data){ return http.post(conf.url+'/change_conf', data) }
 function apiGetHistory(conf, params){ return http.get(conf.url+'/get_history', {params:params}) }
@@ -344,7 +344,6 @@ function apiGetDetectPic(conf){ return http.get(conf.url+'/get_detect_pic') }
 function apiGetStatistics(conf){ return http.get(conf.url+'/get_statistics') }
 function apiGetMonthNum(conf){ return http.get(conf.url+'/get_this_month_num') }
 function apiGetTodayNum(conf){ return http.get(conf.url+'/get_today_num') }
-function apiGetNum(conf){ return http.get(conf.url+'/get_num') }
 function apiGetNumByRange(conf, range){ return http.get(conf.url+'/get_num_by_range', {params:{range:range}}) }
 function apiGetSevenDaysByType(conf){ return http.get(conf.url+'/get_seven_days_by_type') }
 function apiCalibration(conf, mode){ return http.post(conf.url+'/calibration', {mode:mode}) }
@@ -406,7 +405,7 @@ var app = new Vue({
       self.config = cfg;
       self.title = cfg.title;
       self.version = cfg.version;
-      self.streamUrl = cfg.url + '/img_disc';   // 带圆检测叠加的视频流 (原 /img 保留)
+      self.streamUrl = cfg.url + '/img_disc';   // 带圆检测叠加的视频流
 
       // Load arm config
       apiGetConf(cfg).then(function(r){
@@ -465,7 +464,6 @@ var app = new Vue({
     saveConfig: function(){
       apiChangeConf(CONFIG, {
         time: this.grabTimeout,
-        speed: '1300',
         camera_distance: this.cameraDist
       });
     },
@@ -542,7 +540,7 @@ var app = new Vue({
         self.statsInfo.time = Number(r.average_prediction_time||0).toFixed(2);
         self.statsInfo.averageScore = Number(r.average_score||0).toFixed(2);
         self.statsInfo.totalNum = r.total_num || 0;
-        // Pie chart driven by get_num (5 types), not statistics
+        // Pie chart driven by get_num_by_range (5 types), not statistics
       });
     },
     fetchDefectNum: function(){

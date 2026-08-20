@@ -9,7 +9,7 @@ import sqlite3
 import threading
 
 __all__ = [
-    'create_database', 'insert_data', 'query', 'query_value', 'select_day_data',
+    'create_database', 'insert_data', 'query', 'query_value',
 ]
 
 _DB_FILE = 'defect.db'
@@ -80,23 +80,3 @@ def query_value(columns: str, source: str, condition: str, params=()):
     """
     rows = query(columns, source, condition, params)
     return rows[0][0] if rows else None
-
-
-def select_day_data(offset_start: str, offset_end: str) -> int:
-    """
-    查询某天的检测数量.
-
-    Args:
-        offset_start: 起始偏移, 如 ＂+0＂ 表示今天, ＂-1＂ 表示昨天
-        offset_end:   结束偏移 (排他), 如 ＂+1＂ 表示明天
-
-    Returns: 计数
-    """
-    return query_value(
-        'count()', 'defect_list',
-        "where path is not null"
-        "  and path != 'detect.jpg'"
-        "  and CreatedTime >= datetime('now', 'start of day', ? || ' day')"
-        "  and CreatedTime <  datetime('now', 'start of day', ? || ' day')",
-        (offset_start, offset_end),
-    ) or 0

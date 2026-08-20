@@ -12,14 +12,15 @@ import os
 import time
 
 import cv2
-import numpy as np
-from flask import Blueprint, Response, render_template, request
+from flask import Blueprint, Response, request, send_from_directory
 
 import database
 import shared
 from disc_detect import find_disc_robust, crop_box
 
 bp = Blueprint('main', __name__)
+
+_FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'frontend')
 
 
 # ============================================================
@@ -28,28 +29,27 @@ bp = Blueprint('main', __name__)
 
 @bp.route('/get_conf', methods=['GET'])
 def get_conf():
-    """读取当前配置文件 (Configuration + defect_name)"""
-    config_item = dict(shared.config.items('Configuration'))
-    config_item['defect_name'] = shared.defect_name
+    """读取当前运行时可调配置 (time/camera_distance + defect_name)"""
+    config_item = {
+        'time': shared.GRAB_DELAY,
+        'camera_distance': shared.CAMERA_DISTANCE,
+        'defect_name': shared.defect_name,
+    }
     return json.dumps([config_item])
 
 
 @bp.route('/change_conf', methods=['POST'])
 def change_conf():
-    """修改配置文件并写入磁盘, 同时更新内存缓存"""
+    """更新运行时可调配置 (内存直改, 不再写 config.ini)"""
     data = json.loads(request.get_data(as_text=True))
 
-    for key in ['time', 'speed', 'camera_distance']:
-        value = data.get(key, '')
-        if len(value) > 0:
-            shared.config.set("Configuration", key, value)
+    value = data.get('time', '')
+    if len(value) > 0:
+        shared.GRAB_DELAY = value
+    value = data.get('camera_distance', '')
+    if len(value) > 0:
+        shared.CAMERA_DISTANCE = value
 
-    with open("config.ini", 'w', encoding='utf-8') as f:
-        shared.config.write(f)
-
-    # 同步内存缓存 (routes 和 api 共享同一份 shared 模块)
-    shared.GRAB_SPEED = shared.config.get("Configuration", "speed")
-    shared.GRAB_DELAY = shared.config.get("Configuration", "time")
     return data
 
 
@@ -133,16 +133,6 @@ def get_detect_pic():
 # 路由 — 统计
 # ============================================================
 
-@bp.route('/get_num', methods=['GET'])
-def get_num():
-    """按缺陷类型统计总数"""
-    defect_counts = database.query(
-        'name, count(1) AS counts', 'defect_list',
-        "where path is not null and path != 'detect.jpg' group by name"
-    )
-    return json.dumps([[{row[0]: row[1]} for row in defect_counts]])
-
-
 @bp.route('/get_this_month_num', methods=['GET'])
 def get_this_month_num():
     """按缺陷类型统计当月总数"""
@@ -195,13 +185,29 @@ def _get_week_labels() -> list:
     return [(d - datetime.timedelta(days=i)).strftime('%m-%d') for i in range(6, -1, -1)]
 
 
-@bp.route('/get_seven_days_num', methods=['GET'])
-def get_seven_days_num():
-    """返回最近 7 天每日检测量"""
+@bp.route('/get_seven_days_by_type', methods=['GET'])
+def get_seven_days_by_type():
+    """返回最近 7 天每种类型的每日数量, 用于多线趋势图"""
+    defect_types = ['ca_shang', 'zhen_kong', 'zang_wu', 'zhe_zhou', 'zheng_chang']
     offsets = ["+0", "-1", "-2", "-3", "-4", "-5", "-6"]
-    counts = [database.select_day_data(o, str(int(o) + 1)) for o in offsets]
     week_labels = _get_week_labels()
-    result = {week_labels[i]: counts[6 - i] for i in range(7)}
+
+    result = {}
+    for i, offset in enumerate(offsets):
+        label = week_labels[6 - i]
+        day_data = {}
+        for dtype in defect_types:
+            count = database.query_value(
+                'count(1)', 'defect_list',
+                "where path is not null and path != 'detect.jpg'"
+                " and name=?"
+                " and CreatedTime >= datetime('now', 'start of day', ? || ' day')"
+                " and CreatedTime <  datetime('now', 'start of day', ? || ' day')",
+                params=(dtype, offset, str(int(offset) + 1))
+            ) or 0
+            day_data[dtype] = count
+        result[label] = day_data
+
     return json.dumps(result)
 
 
@@ -232,32 +238,6 @@ def get_statistics():
     })
 
 
-@bp.route('/get_seven_days_by_type', methods=['GET'])
-def get_seven_days_by_type():
-    """返回最近 7 天每种类型的每日数量, 用于多线趋势图"""
-    defect_types = ['ca_shang', 'zhen_kong', 'zang_wu', 'zhe_zhou', 'zheng_chang']
-    offsets = ["+0", "-1", "-2", "-3", "-4", "-5", "-6"]
-    week_labels = _get_week_labels()
-
-    result = {}
-    for i, offset in enumerate(offsets):
-        label = week_labels[6 - i]
-        day_data = {}
-        for dtype in defect_types:
-            count = database.query_value(
-                'count(1)', 'defect_list',
-                "where path is not null and path != 'detect.jpg'"
-                " and name=?"
-                " and CreatedTime >= datetime('now', 'start of day', ? || ' day')"
-                " and CreatedTime <  datetime('now', 'start of day', ? || ' day')",
-                params=(dtype, offset, str(int(offset) + 1))
-            ) or 0
-            day_data[dtype] = count
-        result[label] = day_data
-
-    return json.dumps(result)
-
-
 # ============================================================
 # 路由 — 标定模式
 # ============================================================
@@ -281,7 +261,7 @@ def calibration_status():
     samples = list(shared.calibration_samples)
     if len(samples) >= 3:
         median_speed = sorted(samples)[len(samples) // 2]
-        camera_dist = float(shared.config.get("Configuration", "camera_distance"))
+        camera_dist = float(shared.CAMERA_DISTANCE)
         suggested_delay = round(camera_dist / median_speed, 1) if median_speed > 0 else 0
     else:
         median_speed = 0
@@ -305,77 +285,6 @@ def _image_to_base64(path: str) -> str:
             return "data:image/jpg;base64," + str(base64.b64encode(f.read()), encoding='utf-8')
     except (FileNotFoundError, IOError):
         return ""
-
-
-def _encode_frame() -> bytes:
-    """将当前视频帧编码为 JPEG 字节"""
-    try:
-        _ret, jpeg = cv2.imencode('.jpg', shared.stream_image_ref[0])
-        return jpeg.tobytes()
-    except Exception as e:
-        shared.logger.error('get frame error：%s', e, exc_info=True)
-        return None
-
-
-def _generate_frames():
-    """视频流生成器: MJPEG multipart 响应"""
-    while True:
-        time.sleep(0.1)
-        frame = _encode_frame()
-        if frame is None:
-            continue
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n\r\n')
-
-
-def _generate_debug_frames():
-    """SSIM 调试帧生成器: 二值掩码 + SSIM/ratio 叠加"""
-    while True:
-        time.sleep(0.1)
-        mask = getattr(shared, 'debug_mask', None)
-        if mask is None:
-            continue
-        display = cv2.resize(mask, (640, 480), interpolation=cv2.INTER_NEAREST)
-        ssim = getattr(shared, 'last_ssim', -1)
-        wr = getattr(shared, 'last_white_ratio', -1)
-        cv2.putText(display, 'SSIM={:.3f}  ratio={:.2f}'.format(ssim, wr),
-                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, 128, 1)
-        _ret, jpeg = cv2.imencode('.jpg', display)
-        yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n\r\n')
-
-
-@bp.route('/debug_mask')
-def debug_mask():
-    """SSIM 调试流: 实时二值掩码 + SSIM/ratio"""
-    return Response(_generate_debug_frames(), mimetype='multipart/x-mixed-replace;boundary=frame')
-
-
-def _generate_stage_frames():
-    """软处理中间结果调试流: diff / binary / mask 三列并排"""
-    while True:
-        time.sleep(0.1)
-        stages = getattr(shared, 'debug_intermediates', None)
-        if not stages:
-            continue
-        diff = stages.get('diff')
-        if diff is None:
-            continue
-        panels = []
-        for key in ('diff', 'binary', 'mask'):
-            img = stages.get(key)
-            if img is None:
-                img = np.zeros_like(diff)
-            up = cv2.resize(img, (320, 240), interpolation=cv2.INTER_NEAREST)
-            panels.append(cv2.cvtColor(up, cv2.COLOR_GRAY2BGR))
-        canvas = np.hstack(panels)
-        _ret, jpeg = cv2.imencode('.jpg', canvas)
-        yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n\r\n')
-
-
-@bp.route('/debug_stages')
-def debug_stages():
-    """软处理中间结果调试流: diff/binary/mask 逐段可视化"""
-    return Response(_generate_stage_frames(), mimetype='multipart/x-mixed-replace;boundary=frame')
 
 
 def _disc_frame_overlay(display, frame):
@@ -411,39 +320,6 @@ def _disc_frame_overlay(display, frame):
     return False, detail
 
 
-def _generate_disc_debug_frames():
-    """圆识别调试流: 对实时帧直接跑 find_disc_robust, 叠加检出圆(绿)与裁剪框(黄).
-
-    注意: 这里是实时检测, 与生产推理管线(SSIM 触发后才定圆)解耦——调试时把
-    铝片/任意物体放进画面即可立刻看到检出结果与失败原因.
-    """
-    while True:
-        time.sleep(0.1)
-        frame = shared.stream_image_ref[0]
-        if frame is None:
-            continue
-        if frame.ndim == 2:
-            display = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-        else:
-            display = frame.copy()
-        display = cv2.resize(display, (640, 480), interpolation=cv2.INTER_AREA)
-
-        found, detail = _disc_frame_overlay(display, frame)
-        enabled = getattr(shared, 'disc_enabled', 1)
-        method = getattr(shared, 'disc_method', 'mask')
-        cv2.putText(display, 'disc: enabled={} method={} found={}'.format(enabled, method, found),
-                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 1)
-        cv2.putText(display, detail, (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
-        _ret, jpeg = cv2.imencode('.jpg', display)
-        yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n\r\n')
-
-
-@bp.route('/debug_disc')
-def debug_disc():
-    """圆识别 + 智能裁剪调试流: 实时帧叠加检出圆(绿)与裁剪框(黄)"""
-    return Response(_generate_disc_debug_frames(), mimetype='multipart/x-mixed-replace;boundary=frame')
-
-
 def _generate_disc_stream_frames():
     """主监控页视频流: 实时帧 + 圆检测叠加 (绿圆 + 黄裁剪框, 无文字)"""
     while True:
@@ -468,52 +344,7 @@ def img_disc():
     return Response(_generate_disc_stream_frames(), mimetype='multipart/x-mixed-replace;boundary=frame')
 
 
-def _fmt_ts(ts):
-    """时间戳 → 本地时间字符串 (None/0 返回 None)"""
-    if not ts:
-        return None
-    return time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts))
-
-
-@bp.route('/get_status')
-def get_status():
-    """触发/推理链路健康状态 (JSON): 现场诊断"铝片经过但无推理图"断点位置.
-
-    判读:
-      - trigger_state 恒为 0 且 last_trigger_time=None → 触发未发生 (基线/前景信号问题)
-      - last_trigger_time 有更新但 last_inference_time=None → 卡在 TRACKING (铝片未离开视野)
-      - last_inference_time 有更新但无图片 → 推理/存图失败 (看 last_consumer_error)
-      - last_consumer_error 非 None → Consumer 线程异常详情
-    """
-    st = getattr(shared, 'trigger_state', 0)
-    baseline = getattr(shared, 'baseline_stats', None)
-    return json.dumps({
-        'trigger_state': st,
-        'state_name': {0: 'IDLE', 1: 'TRACKING', 2: 'COOLDOWN'}.get(st, '?'),
-        'last_trigger_time': _fmt_ts(getattr(shared, 'last_trigger_time', None)),
-        'last_inference_time': _fmt_ts(getattr(shared, 'last_inference_time', None)),
-        'last_consumer_error': getattr(shared, 'last_consumer_error', None),
-        'last_ssim': getattr(shared, 'last_ssim', None),
-        'last_white_ratio': getattr(shared, 'last_white_ratio', None),
-        'baseline': None if baseline is None else {
-            'mean': round(float(baseline[0]), 5),
-            'std': round(float(baseline[1]), 5),
-            'n': int(baseline[2]),
-        },
-        'disc_enabled': getattr(shared, 'disc_enabled', 1),
-        'disc_method': getattr(shared, 'disc_method', 'mask'),
-        'last_disc': getattr(shared, 'last_disc', None),
-        'last_crop_box': getattr(shared, 'last_crop_box', None),
-    }, ensure_ascii=False)
-
-
-@bp.route('/img')
-def video_feed():
-    """实时视频流 (MJPEG)"""
-    return Response(_generate_frames(), mimetype='multipart/x-mixed-replace;boundary=frame')
-
-
 @bp.route('/')
 def index():
-    """主页面 (Bootstrap 模板)"""
-    return render_template('index.html')
+    """主监控页面 (frontend/ SPA)"""
+    return send_from_directory(_FRONTEND_DIR, 'index.html')

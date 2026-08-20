@@ -1,11 +1,12 @@
 """
-主服务 (Flask :7777) — 缺陷检测 + 机械臂分拣 (合并自 GrabImage :7777 与 ArmControl :8899)
+主服务 (Flask :8080) — 缺陷检测 + 机械臂分拣
 
 通过 Hikvision 工业相机实时采集图像, 调用 FPGA 推理服务进行缺陷检测,
-根据检测结果直接入队机械臂分拣任务 (本地调用, 不再 HTTP 自调用) 和蜂鸣器报警。
+根据检测结果直接入队机械臂分拣任务 (本地调用) 和蜂鸣器报警。
 机械臂控制逻辑见 arm_control.py (Blueprint 'arm' 挂载到同一 app)。
+前端监控 SPA (frontend/) 由本服务静态托管, 与 API/视频流同端口同源。
 
-依赖: MVS SDK (MvImport), opencv-python, scikit-image (SSIM), pyserial, Arm_Lib
+依赖: MVS SDK (MvImport), opencv-python, numpy, pyserial, Arm_Lib
 """
 
 import json
@@ -21,7 +22,6 @@ import serial
 from flask import Flask
 from flask_cors import CORS
 from PIL import Image, ImageFont, ImageDraw
-from skimage.metrics import structural_similarity as compare_ssim
 
 from logger import setup_log
 
@@ -55,9 +55,6 @@ shared.detect_image_path = detect_image_path
 shared.logger = setup_log('main', 'server.log')
 logger = shared.logger
 
-shared.config.read('config.ini', encoding='utf-8')
-shared.defect_name = dict(shared.config.items('defect_name'))
-
 # ============================================================
 # 常量
 # ============================================================
@@ -73,100 +70,74 @@ ALARM_CMD = bytes.fromhex('7E FF 06 03 00 00 01 EF')
 
 SAVE_IMAGE_NUM = 10
 CLEANUP_INTERVAL = 60  # 周期清理间隔 (秒): 防止运行期间 files/ 被缺陷图占满磁盘
-SSIM_WIDTH = 64
-SSIM_HEIGHT = 48
-REFERENCE_IMAGE = 'yuanshi.jpg'
+SSIM_WIDTH = 64   # 处理用低分辨率 (宽)
+SSIM_HEIGHT = 48  # 处理用低分辨率 (高)
 
-SSIM_TRIGGER_THRESHOLD = 0.8
-WHITE_RATIO_THRESHOLD = 0.1
-STABILITY_STD_THRESHOLD = 0.01
-STABILITY_MEAN_THRESHOLD = 0.8
-SSIM_HISTORY_SIZE = 9
 TRIGGER_COOLDOWN = 5  # 触发后冷却帧数, 防同一铝片重复触
 
 LABEL_NORMAL = 'zheng_chang'
 
-GAUSSIAN_KERNEL = int(shared.config.get("Configuration", "gaussian_kernel", fallback="21"))
+GAUSSIAN_KERNEL = 21
 BINARY_THRESHOLD_1 = 100
-DILATE_ITERATIONS = 4
 
 
-def _det_cfg(key, fallback):
-    """读取 [detection] 段配置 (config.ini 缺段/缺键时回退默认值)."""
-    return shared.config.get("detection", key, fallback=fallback)
-
-
-# ---- 软处理参数 (config.ini [detection] 段, 现场可调; 改动后需重启服务) ----
-USE_SOFT_PROCESSING = int(_det_cfg("use_soft_processing", "1"))
-BINARIZE_MODE = _det_cfg("binarize_mode", "otsu")
-OTSU_MIN_THRESHOLD = float(_det_cfg("otsu_min_threshold", "50"))
-ADAPTIVE_BLOCK = int(_det_cfg("adaptive_block", "21"))
-ADAPTIVE_C = int(_det_cfg("adaptive_c", "8"))
-MORPH_OPEN = int(_det_cfg("morph_open", "1"))
-MORPH_CLOSE = int(_det_cfg("morph_close", "2"))
-MIN_COMPONENT_AREA = float(_det_cfg("min_component_area", "0.002"))
-BACKGROUND_ALPHA = float(_det_cfg("background_alpha", "0.03"))
-BASELINE_INIT_FRAMES = int(_det_cfg("baseline_init_frames", "30"))
-BASELINE_WINDOW = int(_det_cfg("baseline_window", "60"))
-TRIGGER_K = float(_det_cfg("trigger_k", "3.0"))
-TRIGGER_CONFIRM = int(_det_cfg("trigger_confirm_frames", "3"))
-CAL_RATIO_THRESHOLD = float(_det_cfg("cal_ratio_threshold", "0.01"))
-USE_SSIM_GATE = int(_det_cfg("use_ssim_gate", "0"))
+# ---- 软处理参数 (原 config.ini [detection], 现改为 Python 直写; 改动后需重启服务) ----
+BINARIZE_MODE = "otsu"
+OTSU_MIN_THRESHOLD = 50.0
+ADAPTIVE_BLOCK = 21
+ADAPTIVE_C = 8
+MORPH_OPEN = 1
+MORPH_CLOSE = 2
+MIN_COMPONENT_AREA = 0.002
+BACKGROUND_ALPHA = 0.03
+BASELINE_INIT_FRAMES = 30
+BASELINE_WINDOW = 60
+TRIGGER_K = 3.0
+TRIGGER_CONFIRM = 3
+CAL_RATIO_THRESHOLD = 0.01
 # TRACKING 超时帧数: 进入跟踪后超过该帧数仍不回落, 强制取中间帧推理 (防铝片停
 # 留在视野内导致状态机永久卡死、后续铝片不再触发)
-TRACKING_TIMEOUT_FRAMES = int(_det_cfg("tracking_timeout_frames", "90"))
+TRACKING_TIMEOUT_FRAMES = 180
 # 灯光/环境突变保护阈值: 帧均值相对背景均值偏差超过此值 且 fg_ratio 超过
 # LIGHT_CHANGE_FG_RATIO 时判定环境变化(关灯/换灯)——背景重置为当前帧并清空基线
 # 重新暖机, 状态机强制回 IDLE; THRESHOLD=0 关闭
-LIGHT_CHANGE_THRESHOLD = float(_det_cfg("light_change_threshold", "40"))
+LIGHT_CHANGE_THRESHOLD = 40.0
 # fg_ratio 上限门 (区分"局部变亮"与"全局变亮"): 铝片圆面积最多约占画面 ~45%
 # (fg_ratio ≤ ~0.5, 实测完整时 ~0.42), 关灯/大幅换灯时 diff 覆盖全画面
 # (fg_ratio ≥ ~0.7) —— fg_ratio 必须超过此值才判定灯光突变, 防铝片经过被误判
-LIGHT_CHANGE_FG_RATIO = float(_det_cfg("light_change_fg_ratio", "0.6"))
+LIGHT_CHANGE_FG_RATIO = 0.6
 
-# ---- 圆形铝片识别 + 智能裁剪参数 (config.ini [disc] 段, 改动后需重启服务) ----
+# ---- 圆形铝片识别 + 智能裁剪参数 (原 config.ini [disc], 现改为 Python 直写; 改动后需重启服务) ----
 
-def _disc_cfg(key, fallback):
-    """读取 [disc] 段配置 (config.ini 缺段/缺键时回退默认值)."""
-    return shared.config.get("disc", key, fallback=fallback)
-
-
-DISC_ENABLED = int(_disc_cfg("enabled", "1"))
-DISC_METHOD = _disc_cfg("method", "mask")
-DISC_MARGIN_RATIO = float(_disc_cfg("margin_ratio", "0.10"))
-DISC_DRAW_OVERLAY = int(_disc_cfg("draw_overlay", "1"))
+DISC_ENABLED = 1
+DISC_METHOD = "mask"
+DISC_MARGIN_RATIO = 0.10
+DISC_DRAW_OVERLAY = 1
 # 裁剪最低完整度: 检出的圆在画面内占比低于此值时回退整帧 (低于该值说明铝片
 # 未完整进入视野, 硬裁会切掉铝片)
-DISC_MIN_COMPLETENESS = float(_disc_cfg("min_completeness", "0.7"))
+DISC_MIN_COMPLETENESS = 0.7
 # 横向居中优先级: 圆完整度 ≥ 此值的帧进入"完整帧"档, 档内选圆心最接近画面
 # 水平中心的帧 (原长方形图中铝片横向最中间); 低于此值按完整度打分选帧
-DISC_CENTER_COMPLETE = float(_disc_cfg("center_complete", "0.9"))
+DISC_CENTER_COMPLETE = 0.9
 # 圆半径相对帧短边占比下限 (选帧软降级用): 检出圆 r/帧短边 低于此值的帧在
 # 选帧时降为档 0 —— 排在所有达标帧之后, 档内仍按完整度互相比较 (不淘汰,
 # 保证 TRACKING 超时强制推理时仍有相对最好的候选, 不额外回退整帧); 用于过滤
 # "铝片刚进入/偏远"导致的过小圆帧, 正常完整铝片 (r/帧短边≈0.24) 不受影响
-DISC_MIN_RADIUS_RATIO_FRAME = float(_disc_cfg("min_radius_ratio_frame", "0.18"))
+DISC_MIN_RADIUS_RATIO_FRAME = 0.18
 DISC_CFG = {
-    "min_radius_ratio": float(_disc_cfg("min_radius_ratio", "0.15")),
-    "max_radius_ratio": float(_disc_cfg("max_radius_ratio", "0.50")),
-    "circularity": float(_disc_cfg("circularity", "0.60")),
-    "mask_threshold": float(_disc_cfg("mask_threshold", "0")),
-    "otsu_min_threshold": float(_disc_cfg("otsu_min_threshold", "50")),
-    "hough_param1": float(_disc_cfg("hough_param1", "100")),
-    "hough_param2": float(_disc_cfg("hough_param2", "30")),
-    "hough_min_dist": float(_disc_cfg("hough_min_dist", "0")),
-    "method_fallback": int(_disc_cfg("method_fallback", "1")),
+    "min_radius_ratio": 0.15,
+    "max_radius_ratio": 0.50,
+    "circularity": 0.60,
+    "mask_threshold": 0.0,
+    "otsu_min_threshold": 20.0,
+    "hough_param1": 100.0,
+    "hough_param2": 30.0,
+    "hough_min_dist": 0.0,
+    "method_fallback": 1,
 }
 shared.disc_method = DISC_METHOD
-shared.disc_enabled = DISC_ENABLED
 shared.disc_cfg = DISC_CFG
 shared.disc_margin_ratio = DISC_MARGIN_RATIO
-
-# 机械臂控制参数缓存 (路由 /change_conf 同步更新)
-GRAB_SPEED = shared.config.get("Configuration", "speed")
-GRAB_DELAY = shared.config.get("Configuration", "time")
-shared.GRAB_SPEED = GRAB_SPEED
-shared.GRAB_DELAY = GRAB_DELAY
 
 # ============================================================
 # 全局状态
@@ -174,7 +145,8 @@ shared.GRAB_DELAY = GRAB_DELAY
 
 alarm_serial = None
 
-app = Flask(__name__)
+FRONTEND_DIR = os.path.join(BASE_DIR, '..', 'frontend')
+app = Flask(__name__, static_folder=FRONTEND_DIR, static_url_path='')
 CORS(app, supports_credentials=True)
 
 
@@ -220,26 +192,6 @@ def trigger_grab(flags: str):
 
 
 # ============================================================
-# SSIM 图像比较
-# ============================================================
-
-# 参考图内存缓存 (避免每帧读磁盘)
-_cached_ref_gray = None
-
-
-def compare_image(image_gray) -> float:
-    """将当前帧与参考图 (yuanshi.jpg) 做 SSIM 比较, 返回相似度 (1=相同)."""
-    global _cached_ref_gray
-    if _cached_ref_gray is None:
-        ref = cv2.imread(REFERENCE_IMAGE)
-        ref = cv2.resize(ref, (SSIM_WIDTH, SSIM_HEIGHT), interpolation=cv2.INTER_AREA)
-        _cached_ref_gray = cv2.cvtColor(ref, cv2.COLOR_BGR2GRAY)
-    score = compare_ssim(_cached_ref_gray, image_gray)
-    logger.debug("SSIM: {}".format(score))
-    return score
-
-
-# ============================================================
 # 软处理: 光照鲁棒前景提取 (背景差分 → 自适应二值化 → 形态学 → 连通域)
 # ============================================================
 
@@ -281,13 +233,13 @@ def _filter_components(binary):
 
 
 def _extract_fg_ratio(gray, background):
-    """软处理前景提取: 返回 (fg_ratio, 中间结果 dict 供调试)."""
+    """软处理前景提取: 返回 (fg_ratio, 前景掩码 mask)."""
     diff = cv2.absdiff(gray, background.astype(np.uint8))
     binary = _binarize(diff)
     opened = _morph(binary)
     mask = _filter_components(opened)
     fg_ratio = np.count_nonzero(mask) / mask.size
-    return fg_ratio, {"diff": diff, "binary": binary, "mask": mask}
+    return fg_ratio, mask
 
 
 # ============================================================
@@ -296,12 +248,11 @@ def _extract_fg_ratio(gray, background):
 
 class Consumer(threading.Thread):
     """
-    从 frame_queue 消费帧, 执行 SSIM 触发检测、FPGA 推理、结果处理.
+    从 frame_queue 消费帧, 执行前景触发检测、FPGA 推理、结果处理.
     """
 
     def __init__(self):
         super().__init__()
-        self._ssim_history = [0] * SSIM_HISTORY_SIZE
         self._state = 0  # 0=IDLE, 1=TRACKING, 2=COOLDOWN
         self._cooldown = 0  # 冷却倒计帧数
         self._tracking_count = 0  # 跟踪周期帧总数
@@ -311,7 +262,7 @@ class Consumer(threading.Thread):
         self._crop_box = None  # 本次推理的裁剪信息 (x0, y0, side); None=整帧缩放
         self._record_box = None  # 保存记录图时应用的裁剪框 (同 _crop_box); None=整帧
         self._buf = 0  # 状态切换缓冲计数（入口/出口共用）
-        # 标定模式: 追踪 white_ratio 变化以计算传送带速度
+        # 标定模式: 追踪 fg_ratio 变化以计算传送带速度
         self._cal_last_ratio = 0.0
         self._cal_entry_time = None
         self._cal_peak_ratio = 0.0
@@ -330,31 +281,23 @@ class Consumer(threading.Thread):
                 self._process_sampling_frame()
 
             except Exception as e:
-                # 记录最近一次异常到 shared, 供 /get_status 诊断; exc_info 输出完整堆栈
-                shared.last_consumer_error = '{}'.format(e)
                 logger.error('consumer thread error：{}'.format(str(e)), exc_info=True)
 
     # ---- 单帧处理 ----
 
     def _process_sampling_frame(self):
-        """每帧入口: 按 USE_SOFT_PROCESSING 选软/硬检测, 再走统一状态机."""
+        """每帧入口: 软处理检测 (背景差分→二值化→连通域), 再走统一状态机."""
         image = frame_queue.get()
         if image is None:
             return
 
         gray = cv2.resize(image, (SSIM_WIDTH, SSIM_HEIGHT), interpolation=cv2.INTER_AREA)
 
-        if USE_SOFT_PROCESSING:
-            enter, exit_cond, ratio = self._soft_detect(gray)
-            self._calibration_update(ratio, CAL_RATIO_THRESHOLD)
-        else:
-            enter, exit_cond, ratio = self._hard_detect(gray, image)
-            self._calibration_update(ratio, 0.02)
+        enter, exit_cond, ratio = self._soft_detect(gray)
+        self._calibration_update(ratio, CAL_RATIO_THRESHOLD)
 
-        # 供 /debug_disc 与智能裁剪使用: EMA 背景 (硬处理路径下为 None → 走原始阈值)
+        # 供 /img_disc 视频流定圆使用: EMA 背景模型
         shared.debug_background = getattr(self, '_background', None)
-        # 供 /get_status 诊断: 空皮带基线统计 (暖机期 n < BASELINE_INIT_FRAMES)
-        shared.baseline_stats = (self._baseline_mean, self._baseline_std, len(self._baseline))
 
         # 圆完整度打分 + 选帧排序键:
         #   完整帧 (in_frac ≥ DISC_CENTER_COMPLETE): 键 = (2, -|圆心x-画面宽/2|)
@@ -388,13 +331,7 @@ class Consumer(threading.Thread):
     # ---- 软处理: 光照鲁棒前景提取 (背景建模 + 自适应二值化) ----
 
     def _init_background(self, gray):
-        """用参考图(存在时)或首帧初始化 EMA 背景."""
-        if os.path.exists(REFERENCE_IMAGE):
-            ref = cv2.imread(REFERENCE_IMAGE, cv2.IMREAD_GRAYSCALE)
-            if ref is not None:
-                ref = cv2.resize(ref, (SSIM_WIDTH, SSIM_HEIGHT), interpolation=cv2.INTER_AREA)
-                self._background = ref.astype(np.float32)
-                return
+        """用首帧初始化 EMA 背景."""
         self._background = gray.astype(np.float32)
 
     def _recalc_baseline(self):
@@ -449,59 +386,15 @@ class Consumer(threading.Thread):
         """软处理: 背景差分→自适应二值化→连通域, 返回 (进入条件, 退出条件, fg_ratio)."""
         if self._background is None:
             self._init_background(gray)
-        fg_ratio, stages = _extract_fg_ratio(gray, self._background)
+        fg_ratio, mask = _extract_fg_ratio(gray, self._background)
         self._update_background(gray, fg_ratio)
         triggered = self._triggered(fg_ratio)
 
-        # 归一化 SSIM (背景 vs 当前帧): 默认仅观测; USE_SSIM_GATE=1 时参与触发
-        a = self._background.astype(np.float32)
-        b = gray.astype(np.float32)
-        sa, sb = float(a.std()), float(b.std())
-        if sa < 1e-6 or sb < 1e-6:
-            n_ssim = 0.0
-        else:
-            a = (a - a.mean()) / sa
-            b = (b - b.mean()) / sb
-            n_ssim = float(compare_ssim(a, b, data_range=1.0))
-
-        shared.debug_mask = stages["mask"]
-        shared.debug_intermediates = stages
-        shared.last_ssim = n_ssim
-        shared.last_white_ratio = fg_ratio
-
-        if USE_SSIM_GATE:
-            triggered = triggered and n_ssim < SSIM_TRIGGER_THRESHOLD
-
+        shared.debug_mask = mask
         return triggered, (not triggered), fg_ratio
 
-    def _hard_detect(self, gray, image):
-        """原硬处理链 (固定阈值+SSIM+单快照参考), 保留用于回滚."""
-        global _cached_ref_gray
-        blurred = cv2.GaussianBlur(gray, (GAUSSIAN_KERNEL, GAUSSIAN_KERNEL), 0)
-        _, img_binary = cv2.threshold(blurred, BINARY_THRESHOLD_1, 255, cv2.THRESH_BINARY)
-        thresh = cv2.dilate(img_binary, None, iterations=DILATE_ITERATIONS)
-
-        white_ratio = np.count_nonzero(thresh) / thresh.size
-        current_ssim = compare_image(gray)
-
-        shared.debug_mask = thresh
-        shared.last_ssim = current_ssim
-        shared.last_white_ratio = white_ratio
-
-        self._ssim_history[:-1] = self._ssim_history[1:]
-        self._ssim_history[-1] = current_ssim
-        ssim_std = np.std(self._ssim_history)
-        ssim_mean = np.mean(self._ssim_history)
-        if ssim_std < STABILITY_STD_THRESHOLD and ssim_mean < STABILITY_MEAN_THRESHOLD and all(self._ssim_history):
-            cv2.imwrite(REFERENCE_IMAGE, image)
-            _cached_ref_gray = None  # 缓存失效, 下次重载
-
-        enter = current_ssim < SSIM_TRIGGER_THRESHOLD and white_ratio > WHITE_RATIO_THRESHOLD
-        exit_cond = current_ssim > SSIM_TRIGGER_THRESHOLD and white_ratio < WHITE_RATIO_THRESHOLD
-        return enter, exit_cond, white_ratio
-
     def _calibration_update(self, ratio, threshold):
-        """标定模式: 追踪 ratio 变化测量传送带速度 (语义与原 white_ratio 一致)."""
+        """标定模式: 追踪 ratio 变化测量传送带速度."""
         if not shared.calibration_active:
             return
         now = time.time()
@@ -539,7 +432,6 @@ class Consumer(threading.Thread):
                     self._best_key = frame_key
                     self._best_frame = image.copy()
                     self._buf = 0
-                    shared.last_trigger_time = time.time()
                     logger.info('触发进入 TRACKING, ratio=%.3f, key=%s', ratio, frame_key)
             else:
                 self._buf = 0
@@ -577,9 +469,6 @@ class Consumer(threading.Thread):
             self._cooldown -= 1
             if self._cooldown <= 0:
                 self._state = 0
-
-        # 实时反映状态机位置 (供 /get_status 诊断)
-        shared.trigger_state = self._state
 
     # ---- 圆形铝片识别 + 智能裁剪 ----
 
@@ -667,7 +556,6 @@ class Consumer(threading.Thread):
     # ---- 推理管线 ----
 
     def _run_inference_pipeline(self):
-        shared.last_inference_time = time.time()  # 供 /get_status 诊断
         annotated_image = self._selected_frame.copy()
         original_image = annotated_image.copy()
 
@@ -840,6 +728,6 @@ if __name__ == "__main__":
     Producer(shared.stream_image_ref).start()
     Consumer().start()
     threading.Thread(target=cleanup_loop).start()
-    # threaded=True 必须开: MJPEG 流 (/img /debug_disc /debug_stages) 是长驻生成器,
-    # 单线程下第一个流会占死唯一 HTTP 线程, 其余请求全部排队阻塞直至内存堆积
-    app.run(host='0.0.0.0', debug=False, use_reloader=False, port=7777, threaded=True)
+    # threaded=True 必须开: MJPEG 流 (/img_disc) 是长驻生成器,
+    # 单线程下会占死唯一 HTTP 线程, 其余请求全部排队阻塞直至内存堆积
+    app.run(host='0.0.0.0', debug=False, use_reloader=False, port=8080, threaded=True)

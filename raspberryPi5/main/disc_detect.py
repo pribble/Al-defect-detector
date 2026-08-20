@@ -7,7 +7,7 @@
        压缩成 300×300 导致缺陷变形;
     2. 圆心信息本身可用于确认铝片位于裁剪图中央.
 
-定圆方法 (config.ini [disc] method):
+定圆方法 (api.py DISC_METHOD):
   mask (默认): 二值化 → 形态学开/闭 → 最大外轮廓 → minEnclosingCircle.
        - 传入 background(EMA 背景) 时走【背景差分】路径: 在 48×64 低分辨率下
          absdiff → 高斯模糊 → Otsu(带下限) → 放大掩码 → 形态学。与触发链路
@@ -23,7 +23,7 @@
        过滤剔除超大/超小误检.
 
 调试: probe_disc() 返回 (circle, info), info["reject"] 给出未检出/被过滤的
-      原因(中文), 供 /debug_disc 调试流实时展示; find_disc() 是它的薄封装.
+      原因(中文); find_disc() 是它的薄封装.
 
 依赖: opencv-python, numpy. 不依赖 api.py, 可独立测试.
 """
@@ -31,7 +31,7 @@
 import cv2
 import numpy as np
 
-# 默认参数 (与 config.ini [disc] 段对应, 便于独立使用)
+# 默认参数 (与 api.py DISC_CFG 对应, 便于独立使用)
 DEFAULTS = {
     "min_radius_ratio": 0.15,     # 半径下限 = 该值 × min(宽,高)
     "max_radius_ratio": 0.50,     # 半径上限 = 该值 × min(宽,高)
@@ -171,12 +171,12 @@ def _sanity_check(cx, cy, r, h, w, cfg):
 
 def probe_disc(gray, method="mask", cfg=None, background=None):
     """
-    定位铝片圆心与半径, 并附带诊断信息 (供 /debug_disc 调试流展示).
+    定位铝片圆心与半径, 并附带诊断信息.
 
     Args:
         gray: 灰度帧 (BGR 会自动转灰度).
         method: "mask" | "hough".
-        cfg: dict, 缺省用 DEFAULTS (与 config.ini [disc] 段一致).
+        cfg: dict, 缺省用 DEFAULTS.
         background: 可选 EMA 背景模型 (float32 低分辨率); mask 方法给定时走
                     背景差分路径, 光照鲁棒性更强.
 
@@ -221,7 +221,7 @@ def probe_disc(gray, method="mask", cfg=None, background=None):
 
 def find_disc_robust(gray, method="mask", cfg=None, background=None):
     """
-    主方法 + 回退链定圆 (生产与 /debug_disc 共用的入口).
+    主方法 + 回退链定圆 (生产推理与视频流叠加共用的入口).
 
     尝试顺序 (method_fallback=1 时):
       method=mask + 有背景: mask(背景差分) → hough

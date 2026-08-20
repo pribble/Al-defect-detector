@@ -1,7 +1,7 @@
 """
 机械臂控制模块 — 合并后的主服务 (main/) 中负责机械臂分拣的部分.
 
-原独立的 ArmControl 服务 (:8899) 已与检测服务合并为单进程单端口 (:7777):
+原独立的 ArmControl 服务已与检测服务合并为单进程单端口 (:8080):
   - grab_task(): OK/NG 分拣动作序列 (串行队列执行, 防并发冲突)
   - GrabTaskConsumer: 单槽缓存 + 串行消费
   - HTTP API: /grab /use_arm /get_arm (Blueprint 'arm', 由 api.py 挂载到同一 app)
@@ -219,7 +219,7 @@ def enqueue_grab(flags: str, delay: float = 0):
 
     Args:
         flags: "OK" 或 "NG"
-        delay: 传送带延迟秒数 (相机到吸取点), 即 config.ini [Configuration] time
+        delay: 传送带延迟秒数 (相机到吸取点), 即 shared.GRAB_DELAY
     """
     global _grab_pending
     raw = json.dumps({"flags": flags, "time": delay})

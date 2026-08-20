@@ -10,13 +10,13 @@ Yahboom 机械臂 + 气动吸盘按 OK/NG 结果分拣。主控制器为树莓�
 ## 系统数据流
 
 ```
-Hikvision Camera ──frame_queue──> main (:7777, 树莓派)
+Hikvision Camera ──frame_queue──> main (:8080, 树莓派)
                                        │
                                        ├── POST /predict ──> DE10-Nano FPGA (172.16.68.110:8080)
                                        │                         └── ssd_detection（Paddle Lite + CNN 加速器）
                                        ├── 本地入队 enqueue_grab ──> /dev/XIPAN（5-DOF 机械臂）
                                        ├── SQLite (defect.db)
-                                       └── MJPEG /img ──> nginx (:80/:8080) ──> 浏览器前端
+                                       └── MJPEG /img_disc + 静态前端 SPA ──> 浏览器 (同源 :8080)
 ```
 
 ### 推理管线（300×300 raw，无 JPEG）
@@ -45,13 +45,12 @@ FPGA: Mat(300×300, CV_8UC1) → NEON 1ch→3ch NCHW tensor → SSD MobileNet V1
 
 | 服务 | 地址 | 端口 |
 |------|------|------|
-| main（Flask，检测 + 机械臂） | 172.16.68.111 | 7777 |
-| nginx（前端） | 172.16.68.111 | 80 / 8080 |
+| main（Flask，检测 + 机械臂 + 前端） | 172.16.68.111 | 8080 |
 | FPGA 推理 | 172.16.68.110 | 8080 |
 
 ## 快速开始
 
-### 树莓派服务（:7777）
+### 树莓派服务（:8080）
 
 ```bash
 # 主服务（检测 + 机械臂，合并自原 GrabImage/ArmControl）
@@ -117,9 +116,9 @@ README.md（本文档）
 ## 前端
 
 自包含单页应用（Vue 2 + Element UI + ECharts），无构建步骤，库本地化于
-`frontend/vendor/`。地址 `http://172.16.68.111`（:80 与 :8080），后端地址配置在
-`frontend/config.json`。功能：实时 MJPEG 画面（`/img`）、检测统计、手动机械臂
-控制、传送带速度标定、历史缺陷图浏览。
+`frontend/vendor/`。由 Flask 在 `http://172.16.68.111:8080` 同端口静态托管，
+后端地址走同源相对路径（`frontend/config.json` 的 ip/url 为空）。功能：实时 MJPEG
+画面（`/img_disc`）、检测统计、手动机械臂控制、传送带速度标定、历史缺陷图浏览。
 
 ## 依赖
 
