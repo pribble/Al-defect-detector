@@ -59,10 +59,29 @@ def change_conf():
 
 @bp.route('/get_history', methods=['GET'])
 def get_history():
-    """获取最新 4 张历史检测图片 (base64)"""
+    """分页获取历史检测图片 (base64). 参数: page(1起)/page_size(默认20, 上限100)."""
+    try:
+        page = int(request.args.get('page', 1))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        page_size = int(request.args.get('page_size', 20))
+    except (TypeError, ValueError):
+        page_size = 20
+    page = max(page, 1)
+    page_size = min(max(page_size, 1), 100)
+
+    total = database.query_value(
+        'count(distinct path)', 'defect_list',
+        "where path is not null and path != 'detect.jpg'"
+    ) or 0
+    total_pages = (total + page_size - 1) // page_size if total else 0
+
     recent_paths = database.query(
-        'distinct path', 'defect_list',
-        "where path is not null and path != 'detect.jpg' order by id DESC limit 4"
+        'path', 'defect_list',
+        "where path is not null and path != 'detect.jpg'"
+        " group by path order by max(id) DESC limit ? offset ?",
+        params=(page_size, (page - 1) * page_size)
     )
     image_files = []
     for row in recent_paths:
@@ -76,7 +95,10 @@ def get_history():
             "img": _image_to_base64(image_file),
             "time": detail_rows[0][1] if detail_rows else ''
         })
-    return json.dumps(image_files)
+    return json.dumps({
+        "items": image_files, "total": total,
+        "page": page, "page_size": page_size, "total_pages": total_pages,
+    }, ensure_ascii=False)
 
 
 @bp.route('/get_original_pic', methods=['GET'])
@@ -141,6 +163,28 @@ def get_today_num():
         "where path is not null and path != 'detect.jpg'"
         " and CreatedTime >= datetime('now', 'start of day')"
         " group by name"
+    )
+    return json.dumps([[{row[0]: row[1]} for row in defect_counts]])
+
+
+@bp.route('/get_num_by_range', methods=['GET'])
+def get_num_by_range():
+    """按时间范围统计各缺陷类型数量: range=day|week|month|quarter (默认 month).
+
+    day=当日; week=近7天; month=当月; quarter=近3个月 (近似一个季度).
+    """
+    rng = request.args.get('range', 'month')
+    if rng == 'day':
+        cond = " and CreatedTime >= datetime('now', 'start of day')"
+    elif rng == 'week':
+        cond = " and CreatedTime >= datetime('now', '-7 days')"
+    elif rng == 'quarter':
+        cond = " and CreatedTime >= datetime('now', '-3 months')"
+    else:  # month
+        cond = " and CreatedTime >= datetime('now', 'start of month', '+1 seconds')"
+    defect_counts = database.query(
+        'name, count(1) AS counts', 'defect_list',
+        "where path is not null and path != 'detect.jpg'" + cond + " group by name"
     )
     return json.dumps([[{row[0]: row[1]} for row in defect_counts]])
 

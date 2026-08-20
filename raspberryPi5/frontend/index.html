@@ -76,6 +76,8 @@ body{width:100%;height:100vh;overflow:hidden}
 
 /* History images */
 .main-center-center{flex:0 0 240px;margin-left:15px}
+.main-center-center .hist-scroll{overflow-y:auto}
+.main-center-center .hist-pager{flex:0 0 44px;display:flex;align-items:center;justify-content:center}
 .main-center-center .hist-item{display:flex;flex-flow:column;padding:6px 0}
 .main-center-center .hist-item .img-blck{width:100%;height:155px;display:flex;align-items:center;background-color:#0a0a0a}
 .main-center-center .hist-item img{width:100%;cursor:pointer}
@@ -87,6 +89,7 @@ body{width:100%;height:100vh;overflow:hidden}
 .echarts-wrap{width:100%;height:100%;display:flex;flex-flow:column}
 .echarts-item{flex:1;display:flex;flex-flow:column}
 .echarts-item-title{font-size:14px;flex:0 0 24px;line-height:24px;padding:0 15px;font-weight:600}
+.echarts-item-title .pie-range{float:right}
 .echarts-item-content{flex:1;padding:0 10px 10px}
 .echarts-item-content.perf-row{padding:0 30px;display:flex}
 .echarts-item-content.perf-row .perf-half{flex:1;text-align:center}
@@ -188,7 +191,7 @@ body{width:100%;height:100vh;overflow:hidden}
             <el-input size="mini" class="delay-input" v-model="grabTimeout"
               @change="saveConfig"
               onkeyup="value=value.replace(/^(0+)|[^\d]+/g,'')"></el-input>
-            <span style="font-size:14px">秒 (备用)</span>
+            <span style="font-size:14px">秒</span>
           </div>
 
         </div>
@@ -226,7 +229,7 @@ body{width:100%;height:100vh;overflow:hidden}
         <!-- Center-center: history images -->
         <div class="border main-center-center">
           <h5 class="title"><span class="icon"></span>最近检测结果图</h5>
-          <div class="centent">
+          <div class="centent hist-scroll">
             <div class="hist-item" v-for="(item, idx) in imgHistory" :key="idx">
               <div class="img-blck">
                 <img :src="item.img" @click="imgDetail(item)" alt="history">
@@ -234,6 +237,16 @@ body{width:100%;height:100vh;overflow:hidden}
               <p class="hist-text" :title="item.text">{{ item.text }}</p>
               <p class="hist-time" v-if="item.time">{{ item.time }}</p>
             </div>
+          </div>
+          <div class="hist-pager">
+            <el-pagination
+              small
+              layout="prev, pager, next"
+              :total="historyTotal"
+              :page-size="historyPageSize"
+              :current-page.sync="historyPage"
+              @current-change="fetchHistory">
+            </el-pagination>
           </div>
         </div>
 
@@ -245,6 +258,15 @@ body{width:100%;height:100vh;overflow:hidden}
 
               <!-- Chart 1: Pie + stats text -->
               <div class="echarts-item">
+                <h6 class="echarts-item-title">
+                  缺陷分布统计<span>（个）</span>
+                  <el-radio-group v-model="pieRange" size="mini" class="pie-range" @change="fetchDefectNum">
+                    <el-radio-button label="day">一日内</el-radio-button>
+                    <el-radio-button label="week">一周内</el-radio-button>
+                    <el-radio-button label="month">一个月内</el-radio-button>
+                    <el-radio-button label="quarter">一个季度内</el-radio-button>
+                  </el-radio-group>
+                </h6>
                 <div class="echarts-item-content perf-row">
                   <div class="perf-half">
                     <div class="pie-box" ref="pieChart"></div>
@@ -318,13 +340,13 @@ function apiUseArm(conf, data){
 // Detection server APIs (port 7777, same origin if nginx proxies)
 function apiGetConf(conf){ return http.get(conf.url+'/get_conf') }
 function apiChangeConf(conf, data){ return http.post(conf.url+'/change_conf', data) }
-function apiGetHistory(conf){ return http.get(conf.url+'/get_history') }
+function apiGetHistory(conf, params){ return http.get(conf.url+'/get_history', {params:params}) }
 function apiGetOriginalPic(conf){ return http.get(conf.url+'/get_original_pic') }
 function apiGetDetectPic(conf){ return http.get(conf.url+'/get_detect_pic') }
-function apiGetNum(conf){ return http.get(conf.url+'/get_num') }
 function apiGetStatistics(conf){ return http.get(conf.url+'/get_statistics') }
 function apiGetMonthNum(conf){ return http.get(conf.url+'/get_this_month_num') }
 function apiGetTodayNum(conf){ return http.get(conf.url+'/get_today_num') }
+function apiGetNumByRange(conf, range){ return http.get(conf.url+'/get_num_by_range', {params:{range:range}}) }
 function apiGetSevenDaysByType(conf){ return http.get(conf.url+'/get_seven_days_by_type') }
 function apiCalibration(conf, mode){ return http.post(conf.url+'/calibration', {mode:mode}) }
 function apiCalStatus(conf){ return http.get(conf.url+'/calibration_status') }
@@ -364,6 +386,8 @@ var app = new Vue({
     // Images
     originalImg: '', testingImg: '', testingText: '',
     imgHistory: [],
+    historyPage: 1, historyPageSize: 20, historyTotal: 0,
+    pieRange: 'month',
 
     // Dialog
     dialog: { visible: false, img: '' },
@@ -474,14 +498,16 @@ var app = new Vue({
     // ==================== Image fetching ====================
     fetchHistory: function(){
       var self = this;
-      apiGetHistory(CONFIG).then(function(items){
-        if (!items || !items.length) return;
-        self.imgHistory = items.map(function(it){
+      apiGetHistory(CONFIG, {page: this.historyPage, page_size: this.historyPageSize}).then(function(r){
+        if (!r || !r.items) return;
+        self.imgHistory = r.items.map(function(it){
           var names = (it.name||[]).map(function(n){
             return self.defectKeys[n[0]] || n[0];
           });
           return { img: it.img, text: names.join('，') || '正常', time: it.time || '' };
         });
+        self.historyTotal = r.total || 0;
+        self.historyPage = r.page || 1;
       });
     },
     fetchOriginalPic: function(){
@@ -522,7 +548,7 @@ var app = new Vue({
     },
     fetchDefectNum: function(){
       var self = this;
-      apiGetNum(CONFIG).then(function(r){
+      apiGetNumByRange(CONFIG, this.pieRange).then(function(r){
         if (!r || !r.length || !r[0].length) return;
         var pieData = [];
         var total = 0;

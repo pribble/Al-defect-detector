@@ -655,16 +655,6 @@ class Consumer(threading.Thread):
                 cv2.rectangle(image, (x0, y0), (x0 + side, y0 + side), (0, 255, 255), 1)
         return image
 
-    def _original_overlay(self, original_image):
-        """原始图片(全帧)叠加绿圆+黄裁剪框: 不画缺陷框、不裁剪, 保持"原始"语义."""
-        if not DISC_DRAW_OVERLAY:
-            return original_image
-        try:
-            img = cv2.cvtColor(original_image, cv2.COLOR_GRAY2RGB)
-        except Exception:
-            img = original_image
-        return self._draw_disc_overlay(img, force_crop_box=True)
-
     def _make_record(self, image):
         """生成记录图: 裁剪成功时把(已标注/原)图裁成以铝片为中心的方形记录; 否则原样返回."""
         box = self._record_box
@@ -735,7 +725,7 @@ class Consumer(threading.Thread):
         self._draw_disc_overlay(annotated_image, force_crop_box=True)  # 全帧叠加绿圆+黄框
         cv2.imwrite(file_name, annotated_image)  # 历史图: 未裁剪全帧标注图
         database.insert_data(uid, file_name, 'zheng_chang', None, None)
-        cv2.imwrite(original_image_path, self._original_overlay(original_image))
+        cv2.imwrite(original_image_path, original_image)  # 原始图片: 全帧原图(无标注)
         if os.path.exists(detect_image_path):
             os.remove(detect_image_path)
 
@@ -766,7 +756,7 @@ class Consumer(threading.Thread):
             pass
         self._draw_disc_overlay(annotated_image, force_crop_box=True)
         cv2.imwrite(file_name, annotated_image)  # 历史图: 未裁剪全帧标注图
-        cv2.imwrite(original_image_path, self._original_overlay(original_image))
+        cv2.imwrite(original_image_path, original_image)  # 原始图片: 全帧原图(无标注)
         record = self._make_record(annotated_image)  # detect.jpg 保持裁剪标注图
         cv2.imwrite(detect_image_path, record)
 
