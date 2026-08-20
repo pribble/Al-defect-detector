@@ -292,8 +292,8 @@ min_radius_ratio_frame = 0.18  # 圆 r/帧短边 占比下限: 低于此值的�
 > 说明：`gaussian_kernel` 可从 config 读（默认 21）；`grab_position`/
 > `release_position` 旧键已移除。`[disc]` 段为启动时读取，改动需重启服务。
 > 软处理参数在 `[detection]` 段（`use_soft_processing`、`binarize_mode`、
-> `trigger_k`、`tracking_timeout_frames`、`light_change_threshold` 等），同样
-> 启动时读取。
+> `trigger_k`、`tracking_timeout_frames`、`light_change_threshold`、
+> `light_change_fg_ratio` 等），同样启动时读取。
 
 ## 运行
 

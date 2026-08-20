@@ -117,10 +117,14 @@ USE_SSIM_GATE = int(_det_cfg("use_ssim_gate", "0"))
 # TRACKING 超时帧数: 进入跟踪后超过该帧数仍不回落, 强制取中间帧推理 (防铝片停
 # 留在视野内导致状态机永久卡死、后续铝片不再触发)
 TRACKING_TIMEOUT_FRAMES = int(_det_cfg("tracking_timeout_frames", "90"))
-# 灯光/环境突变保护阈值: 当前帧亮度均值相对背景均值偏差超过此值时判定环境变化
-# (关灯/换灯/亮度跳变)——背景重置为当前帧并清空基线重新暖机, 状态机强制回 IDLE;
-# 0=关闭。正常铝片经过只改变局部亮度, 帧均值变化 (≈20-30) 远小于 40, 不误触发
+# 灯光/环境突变保护阈值: 帧均值相对背景均值偏差超过此值 且 fg_ratio 超过
+# LIGHT_CHANGE_FG_RATIO 时判定环境变化(关灯/换灯)——背景重置为当前帧并清空基线
+# 重新暖机, 状态机强制回 IDLE; THRESHOLD=0 关闭
 LIGHT_CHANGE_THRESHOLD = float(_det_cfg("light_change_threshold", "40"))
+# fg_ratio 上限门 (区分"局部变亮"与"全局变亮"): 铝片圆面积最多约占画面 ~45%
+# (fg_ratio ≤ ~0.5, 实测完整时 ~0.42), 关灯/大幅换灯时 diff 覆盖全画面
+# (fg_ratio ≥ ~0.7) —— fg_ratio 必须超过此值才判定灯光突变, 防铝片经过被误判
+LIGHT_CHANGE_FG_RATIO = float(_det_cfg("light_change_fg_ratio", "0.6"))
 
 # ---- 圆形铝片识别 + 智能裁剪参数 (config.ini [disc] 段, 改动后需重启服务) ----
 
@@ -447,7 +451,9 @@ class Consumer(threading.Thread):
         """
         if self._background is not None and LIGHT_CHANGE_THRESHOLD > 0:
             delta = abs(float(gray.mean()) - float(self._background.mean()))
-            if delta > LIGHT_CHANGE_THRESHOLD:
+            # fg_ratio 上限门: 铝片经过只让局部变亮 (fg_ratio ≤ ~0.5), 关灯/大幅
+            # 换灯是全画面变化 (fg_ratio ≥ ~0.7) —— 两者都满足才判环境突变
+            if delta > LIGHT_CHANGE_THRESHOLD and fg_ratio > LIGHT_CHANGE_FG_RATIO:
                 logger.warning('灯光/环境突变: 帧均值偏差 %.1f > %.0f, 重置背景并回 IDLE',
                                delta, LIGHT_CHANGE_THRESHOLD)
                 self._background = gray.astype(np.float32)
