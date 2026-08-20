@@ -32,14 +32,14 @@ module cnn_top_core (
 
     // ---- param 读（32-bit）----
     output reg  [31:0]         pr_address,
-    output reg                 pr_read,
+    output wire                pr_read,
     input  wire [31:0]         pr_readdata,
     input  wire                pr_readdatavalid,
     input  wire                pr_waitrequest,
 
     // ---- scale 读（32-bit）----
     output reg  [31:0]         sr_address,
-    output reg                 sr_read,
+    output wire                sr_read,
     input  wire [31:0]         sr_readdata,
     input  wire                sr_readdatavalid,
     input  wire                sr_waitrequest,
@@ -138,6 +138,9 @@ module cnn_top_core (
     reg [1:0]  p_k;   // 窄化（k ∈ {1,3}，比较/选择变短，拆 p_k→w_rb_beats_r 乘法链）
     reg [7:0]  p_out_row_tile, p_in_row_tile, p_in_cb, p_out_cb, p_row_block;   // ≤19/4
 
+    // 4*out_c（scale 读取总字数；p_out_c ≤ 1024，移位替代乘法）
+    wire [15:0] sr_total_w = p_out_c << 2;
+
     //-----------------------------------------------------------------------
     // 派生量预计算（消除 S_RUN 每拍 32-bit 变量乘法链——setup 违例 -30.8ns 主因）
     // 层级常量（每层一次，S_PREP_L 拍）：in_cb_stride / out_cb_stride /
@@ -188,9 +191,19 @@ module cnn_top_core (
     localparam S_NEXT_RB  = 4'd10;  // 下一行块 / 完成
 
     reg [3:0] state;
-    reg [31:0] rd_cnt;          // param/scale 读计数
+    reg [31:0] rd_cnt;          // param/scale 读返回计数（解析用）
     reg [31:0] cfg_idx;         // cfg 写入索引
     reg [15:0] rb;              // 行块索引（≤row_block）
+
+    // pr/sr 多笔在途：命令计数与在途笔数分离，read 保持拉高直到
+    // 命令发完或在途笔数达到桥上限（4 = MAX_PENDING_RESPONSES）。
+    reg [4:0]  pr_cmd_cnt;      // pr 已发命令数（0..20）
+    reg [15:0] sr_cmd_cnt;      // sr 已发命令数（0..4*out_c）
+    reg [7:0]  pr_pending;      // pr 在途笔数（≤4）
+    reg [7:0]  sr_pending;      // sr 在途笔数（≤4）
+
+    assign pr_read = (state == S_RD_PARAM) && (pr_cmd_cnt < 5'd20) && (pr_pending < 8'd4);
+    assign sr_read = (state == S_RD_SCALE) && (sr_cmd_cnt < sr_total_w) && (sr_pending < 8'd4);
 
     // DMA 计数器
     reg [7:0]  dma_icb;                 // 输入：块（≤4）
@@ -330,6 +343,20 @@ module cnn_top_core (
         end
     end
 
+    // pr/sr 多笔在途计数（数据返回 -1、命令接受 +1；同拍净 0）。
+    // pr/sr 各走独立 master，返回保序，无 lr/wr 的共享广播问题。
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            pr_pending <= 0;
+            sr_pending <= 0;
+        end else begin
+            pr_pending <= pr_pending + (pr_read && !pr_waitrequest)
+                        - (pr_readdatavalid && pr_pending != 8'd0);
+            sr_pending <= sr_pending + (sr_read && !sr_waitrequest)
+                        - (sr_readdatavalid && sr_pending != 8'd0);
+        end
+    end
+
     //-----------------------------------------------------------------------
     // 主状态机
     //-----------------------------------------------------------------------
@@ -337,7 +364,7 @@ module cnn_top_core (
         if (!rst_n) begin
             state <= S_IDLE; reg_start <= 0;
             rb <= 0; rd_cnt <= 0; cfg_idx <= 0;
-            pr_read <= 0; sr_read <= 0;
+            pr_cmd_cnt <= 0; sr_cmd_cnt <= 0;
             core_cfg_we <= 0; core_start <= 0;
             dma_icb <= 0; dma_ibeat <= 0; dma_wbeat <= 0;
             dma_ocb <= 0; dma_obeat <= 0;
@@ -349,19 +376,23 @@ module cnn_top_core (
                     if (as_write && (as_address == 8'h00) && as_writedata[0]) begin
                         reg_start <= 1;
                         rd_cnt <= 0;
-                        pr_read <= 1;
+                        pr_cmd_cnt <= 0;
                         pr_address <= reg_param;
                         sr_address <= reg_scale;
                         state <= S_RD_PARAM;
                     end
                 end
 
-                //---- 读 param 块（20 字，0..19）：每笔 read 拉高 → 接受后拉低 → 等 readdatavalid ----
+                //---- 读 param 块（20 字，0..19）：多笔在途流水读 ----
                 // 跳过的索引：2=scale_offset（软件每层 memcpy 到同一 cb_scale，恒 0）、
                 // 12=out_pad、16=output_channel_block_num、20+=软件记账（input_scale/lr/...）
                 S_RD_PARAM: begin
-                    if (pr_readdatavalid) begin
+                    // 多笔在途：命令接受拍推进地址/命令计数；数据返回拍解析
+                    if (pr_read && !pr_waitrequest) begin
                         pr_address <= pr_address + 4;
+                        pr_cmd_cnt <= pr_cmd_cnt + 1;
+                    end
+                    if (pr_readdatavalid) begin
                         case (rd_cnt)
                             0: p_input_offset  <= pr_readdata;
                             1: p_weight_offset <= pr_readdata;
@@ -383,20 +414,16 @@ module cnn_top_core (
                             default: ;
                         endcase
                         if (rd_cnt == 19) begin
-                            pr_read <= 0;
                             rd_cnt <= 0;
+                            pr_cmd_cnt <= 0;
                             p_in_cb <= (p_in_c  + 7) >> 3;
                             p_out_cb <= (p_out_c + 7) >> 3;
                             cfg_idx <= 0;
                             rb <= 0;
                             state <= S_PREP_L;
                         end else begin
-                            pr_read <= 1;
                             rd_cnt <= rd_cnt + 1;
                         end
-                    end else if (pr_read && !pr_waitrequest) begin
-                        // 命令被桥接受：拉低 read，只发这一笔，等 readdatavalid
-                        pr_read <= 0;
                     end
                 end
 
@@ -421,7 +448,7 @@ module cnn_top_core (
                         w_rb_beats_r    <= w_cb_r * wr_slice_q;   // 16×8 乘法（原 32-bit×mux 链）
                         w_rb_beats_last_q <= w_cb_r * wr_slice_q - 24'd1;   // 末值-1 提前（拆 S_RUN 减法链）
 
-                        sr_read <= 1;
+                        sr_cmd_cnt <= 0;
                         state <= S_RD_SCALE;
                     end
                 end
@@ -433,6 +460,11 @@ module cnn_top_core (
                 // 无依赖（core 按地址索引）。
                 S_RD_SCALE: begin
                     core_cfg_we <= sr_readdatavalid;
+                    // 多笔在途：命令接受拍推进地址/命令计数；数据返回拍解析
+                    if (sr_read && !sr_waitrequest) begin
+                        sr_address <= sr_address + 4;
+                        sr_cmd_cnt <= sr_cmd_cnt + 1;
+                    end
                     if (sr_readdatavalid) begin
                         core_cfg_wdata <= sr_readdata;
                         if (rd_cnt < p_out_c) begin
@@ -448,17 +480,13 @@ module cnn_top_core (
                             core_cfg_sel  <= 3'd4;                 // rcl6
                             core_cfg_addr <= rd_cnt - 3 * p_out_c;
                         end
-                        sr_address <= sr_address + 4;
-                        if (rd_cnt == 4 * p_out_c - 1) begin
-                            sr_read <= 0;
+                        if (rd_cnt == sr_total_w - 1) begin
                             rd_cnt <= 0;
+                            sr_cmd_cnt <= 0;
                             state <= S_WR_CFG;
                         end else begin
                             rd_cnt <= rd_cnt + 1;
-                            sr_read <= 1;
                         end
-                    end else if (sr_read && !sr_waitrequest) begin
-                        sr_read <= 0;
                     end
                 end
 

@@ -120,7 +120,14 @@ cnn_rtl/
 | 9 | （软硬件接口审查暴露）**param offset 被忽略**：`conv_op.cc` 每层累加分配 input/weight/output 偏移（字偏移×8 为字节），FPGA 却只用 `fpga_init` 固定的 `reg_ddrin/ddrw/ddrout` 基址——层 0 偏移恰好全 0 掩盖问题，**第 1 层起输入/权重/输出全部错位**（检测不出目标的根因之一） | `897a40f`：S_CFG 解析 `param_buf[0/1/3]`，`S_START` 与 `lr_round_reset`(conv 分支) 地址 = 基址 + `(offset<<3)` + 行块偏移；`scale_offset` 不需用（软件每层 memcpy 到同一 `cb_scale`） |
 | 10 | Flow Summary 依旧异常（memory bits 1,568,896、registers 119,711 逐位不变）——即使 `ip/` 与 `submodules/` 文件已是最新 | **写端口 case 多分支写多数组**：`case(cfg_sel)` 里 4 个 requant 数组共享一个写 always，Quartus 视为多写端口 RAM → M10K（单写端口）推断失败 → 32 个数组全展开（map.rpt 实测仅有 lb/acc 两个 altsyncram；`bias_store[1023][0]` 等逐 bit 展开） | `c5d0d6a`：写 always 拆成每数组独立（`if (cfg_we && cfg_sel==N && ...)`，去掉 case）；verilator 回归 16/16 层通过 |
 
-**遗留**：上板检测正确性已确认（2026-08-10 修复后 47 层黑盒 log 逐层对比：主干 100%、box 头 97-100%，见上方已知问题表）；性能（装载/MAC 未重叠、pr/sr 仍单笔在途）待优化；tb 覆盖仅小通道参数（见上节验证覆盖边界）。
+**遗留**：上板检测正确性已确认（2026-08-10 修复后 47 层黑盒 log 逐层对比：主干 100%、box 头 97-100%，见上方已知问题表）；性能（装载/MAC 未重叠）待优化；tb 覆盖仅小通道参数（见上节验证覆盖边界）。
+
+## 流水线化改造（分步进行，每步 verilator 对拍兜底）
+
+| 步骤 | 内容 | 验证 |
+|---|---|---|
+| 1 ✅ | pr/sr 参数读单笔在途 → **多笔在途（≤4）流水读**：`cnn_top_core` 命令计数/返回计数分离，read 连续拉高直至发完或在途满；`tb_cnn_top` pr/sr 读模型改 4 深队列 | `run_cnn_top.sh` 6/6 PASS、`run_cnn_core_v2.sh` 16/16 PASS |
+| 2 ⏳ | 下一步待定（候选：S_ACC_CLR 与 S_LOAD 并行 / lb 双缓冲 / requant II=1） | — |
 
 ## 时序收敛（2026-08-05，150MHz 目标）
 

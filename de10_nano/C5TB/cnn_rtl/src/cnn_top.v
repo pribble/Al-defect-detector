@@ -40,11 +40,11 @@ module cnn_top #(
 
     // ---- param_read_avalon（Avalon 主接口 #1：读 param 指令块，32-bit）----
     // S_RD_PARAM 状态用：从 cb_param（reg_param 基址）逐字读 struct parameter
-    // （27 个字），单笔在途（burstcount 恒 1）
-    output wire [CFG_M_AXI_ADDR_WIDTH-1:0]   param_avm_address,  // 读地址（DDR 物理地址，= reg_param + 4×rd_cnt）
+    // （20 个字），多笔在途（≤4，burstcount 恒 1）
+    output wire [CFG_M_AXI_ADDR_WIDTH-1:0]   param_avm_address,  // 读地址（DDR 物理地址，= reg_param + 4×已发命令数）
     output wire [4:0]          param_avm_burstcount,  // 突发长度（恒 5'd1 = 单拍）
     output wire [CFG_M_AXI_DATA_WIDTH/8-1:0] param_avm_byteenable,  // 字节使能（恒全 1）
-    output wire                param_avm_read,       // 读请求（read 拉高 → 命令接受（!waitrequest）→ 拉低，只发一笔）
+    output wire                param_avm_read,       // 读请求（多笔在途：命令发完或在途=4 时拉低）
     input  wire [CFG_M_AXI_DATA_WIDTH-1:0]   param_avm_readdata,   // 读数据（与 readdatavalid 同拍有效）
     input  wire                param_avm_readdatavalid,  // 数据返回标志（流水桥：延迟于命令，必须以此判完成）
     input  wire                param_avm_waitrequest,   // 桥反压（=1 时命令不被接受）
@@ -76,11 +76,11 @@ module cnn_top #(
     // ---- scale_avm_avalon（Avalon 主接口 #4：读 requant 定点参数，32-bit）----
     // S_RD_SCALE 状态用：从 cb_scale（reg_scale 基址）读每通道 4 个 int32
     // （mult/bias_int/shift/rcl6，共 4×out_c 字），边读边写 core requant 数组。
-    // 单笔在途；接口名 avm 重复为黑盒时代遗留
-    output wire [SCALE_M_AXI_ADDR_WIDTH-1:0] scale_avm_address,  // 读地址（= reg_scale + 4×rd_cnt）
+    // 多笔在途（≤4）；接口名 avm 重复为黑盒时代遗留
+    output wire [SCALE_M_AXI_ADDR_WIDTH-1:0] scale_avm_address,  // 读地址（= reg_scale + 4×已发命令数）
     output wire [4:0]          scale_avm_burstcount,  // 突发长度（恒 5'd1）
     output wire [SCALE_M_AXI_DATA_WIDTH/8-1:0] scale_avm_byteenable,  // 字节使能（恒全 1）
-    output wire                scale_avm_read,       // 读请求（单笔在途：拉高 → 接受 → 拉低 → 等 readdatavalid）
+    output wire                scale_avm_read,       // 读请求（多笔在途：命令发完或在途=4 时拉低）
     input  wire [SCALE_M_AXI_DATA_WIDTH-1:0]  scale_avm_readdata,   // 读数据（32-bit）
     input  wire                scale_avm_readdatavalid,  // 数据返回标志（以此判完成）
     input  wire                scale_avm_waitrequest   // 桥反压

@@ -33,14 +33,14 @@ module tb_cnn_top;
     // 主接口
     wire [31:0] pr_address;
     wire        pr_read;
-    reg  [31:0] pr_readdata;
-    reg         pr_readdatavalid;
-    reg         pr_waitrequest = 0;
+    wire [31:0] pr_readdata;
+    wire        pr_readdatavalid;
+    wire        pr_waitrequest;
     wire [31:0] sr_address;
     wire        sr_read;
-    reg  [31:0] sr_readdata;
-    reg         sr_readdatavalid;
-    reg         sr_waitrequest = 0;
+    wire [31:0] sr_readdata;
+    wire        sr_readdatavalid;
+    wire        sr_waitrequest;
     wire [31:0] lr_address;
     wire        lr_read;
     wire [63:0] lr_readdata;
@@ -62,9 +62,9 @@ module tb_cnn_top;
         .as_writedata(as_writedata), .as_readdata(as_readdata),
         .as_waitrequest(as_waitrequest),
         .pr_address(pr_address), .pr_read(pr_read), .pr_readdata(pr_readdata),
-        .pr_readdatavalid(pr_rdv), .pr_waitrequest(pr_waitrequest),
+        .pr_readdatavalid(pr_readdatavalid), .pr_waitrequest(pr_waitrequest),
         .sr_address(sr_address), .sr_read(sr_read), .sr_readdata(sr_readdata),
-        .sr_readdatavalid(sr_rdv), .sr_waitrequest(sr_waitrequest),
+        .sr_readdatavalid(sr_readdatavalid), .sr_waitrequest(sr_waitrequest),
         .lr_address(lr_address), .lr_read(lr_read), .lr_readdata(lr_readdata),
         .lr_readdatavalid(lr_rdv), .lr_waitrequest(lr_waitrequest),
         .wr_address(wr_address), .wr_read(wr_read), .wr_readdata(wr_readdata),
@@ -89,46 +89,82 @@ module tb_cnn_top;
     //=====================================================================
     localparam RD_LAT = 3;   // 模拟 DDR 流水读延迟（拍）
 
-    reg [31:0] pr_addr_q;  reg [7:0] pr_lat;   reg pr_rdv;
-    reg [31:0] sr_addr_q;  reg [7:0] sr_lat;   reg sr_rdv;
+    // pr/sr 独立 4 深多笔在途模型（与 lr/wr 共享 load master 同构；
+    // pop 在 lat==1 拍输出数据，保持与旧单笔模型相同的 RD_LAT=3 有效延迟）
+    reg [31:0] pr_addr_q [0:3];
+    reg [7:0]  pr_lat_q  [0:3];
+    reg [1:0]  pr_head, pr_tail;
+    reg [2:0]  pr_occ;
+    integer    pr_i;
+    wire pr_accept = pr_read && !pr_waitrequest;
+    wire pr_pop    = (pr_occ != 3'd0) && (pr_lat_q[pr_head] == 8'd1);
 
     always @(posedge clk) begin
         if (!rst_n) begin
-            pr_addr_q <= 0; pr_lat <= 0; pr_rdv <= 0; pr_readdata <= 0;
-        end else if (pr_read && pr_lat == 0) begin
-            pr_addr_q <= pr_address;
-            pr_lat <= RD_LAT;
-            pr_rdv <= 0;
-        end else if (pr_lat != 0) begin
-            pr_lat <= pr_lat - 1;
-            if (pr_lat == 1) begin
-                pr_readdata <= pr_addr_q[2] ? mem[pr_addr_q >> 3][63:32]
-                                            : mem[pr_addr_q >> 3][31:0];
-                pr_rdv <= 1;
-            end else
-                pr_rdv <= 0;
-        end else
-            pr_rdv <= 0;
+            pr_head <= 0; pr_tail <= 0; pr_occ <= 0;
+            for (pr_i = 0; pr_i < 4; pr_i = pr_i + 1)
+                pr_lat_q[pr_i] <= 8'd0;
+        end else begin
+            for (pr_i = 0; pr_i < 4; pr_i = pr_i + 1)
+                if (pr_lat_q[pr_i] != 8'd0)
+                    pr_lat_q[pr_i] <= pr_lat_q[pr_i] - 8'd1;
+            if (pr_accept && (pr_occ < 3'd4)) begin
+                pr_addr_q[pr_tail] <= pr_address;
+                pr_lat_q[pr_tail]  <= RD_LAT;
+                pr_tail <= pr_tail + 2'd1;
+                if (pr_pop) begin
+                    pr_head <= pr_head + 2'd1;   // 同拍出+入：occ 净 0
+                end else
+                    pr_occ <= pr_occ + 1;
+            end else if (pr_pop) begin
+                pr_head <= pr_head + 2'd1;
+                pr_occ <= pr_occ - 1;
+            end
+        end
     end
+
+    assign pr_readdata = pr_addr_q[pr_head][2] ? mem[pr_addr_q[pr_head] >> 3][63:32]
+                                               : mem[pr_addr_q[pr_head] >> 3][31:0];
+    assign pr_readdatavalid = pr_pop;
+    assign pr_waitrequest = (pr_occ >= 3'd4);
+
+    // sr 同构模型
+    reg [31:0] sr_addr_q [0:3];
+    reg [7:0]  sr_lat_q  [0:3];
+    reg [1:0]  sr_head, sr_tail;
+    reg [2:0]  sr_occ;
+    integer    sr_i;
+    wire sr_accept = sr_read && !sr_waitrequest;
+    wire sr_pop    = (sr_occ != 3'd0) && (sr_lat_q[sr_head] == 8'd1);
 
     always @(posedge clk) begin
         if (!rst_n) begin
-            sr_addr_q <= 0; sr_lat <= 0; sr_rdv <= 0; sr_readdata <= 0;
-        end else if (sr_read && sr_lat == 0) begin
-            sr_addr_q <= sr_address;
-            sr_lat <= RD_LAT;
-            sr_rdv <= 0;
-        end else if (sr_lat != 0) begin
-            sr_lat <= sr_lat - 1;
-            if (sr_lat == 1) begin
-                sr_readdata <= sr_addr_q[2] ? mem[sr_addr_q >> 3][63:32]
-                                            : mem[sr_addr_q >> 3][31:0];
-                sr_rdv <= 1;
-            end else
-                sr_rdv <= 0;
-        end else
-            sr_rdv <= 0;
+            sr_head <= 0; sr_tail <= 0; sr_occ <= 0;
+            for (sr_i = 0; sr_i < 4; sr_i = sr_i + 1)
+                sr_lat_q[sr_i] <= 8'd0;
+        end else begin
+            for (sr_i = 0; sr_i < 4; sr_i = sr_i + 1)
+                if (sr_lat_q[sr_i] != 8'd0)
+                    sr_lat_q[sr_i] <= sr_lat_q[sr_i] - 8'd1;
+            if (sr_accept && (sr_occ < 3'd4)) begin
+                sr_addr_q[sr_tail] <= sr_address;
+                sr_lat_q[sr_tail]  <= RD_LAT;
+                sr_tail <= sr_tail + 2'd1;
+                if (sr_pop) begin
+                    sr_head <= sr_head + 2'd1;   // 同拍出+入：occ 净 0
+                end else
+                    sr_occ <= sr_occ + 1;
+            end else if (sr_pop) begin
+                sr_head <= sr_head + 2'd1;
+                sr_occ <= sr_occ - 1;
+            end
+        end
     end
+
+    assign sr_readdata = sr_addr_q[sr_head][2] ? mem[sr_addr_q[sr_head] >> 3][63:32]
+                                               : mem[sr_addr_q[sr_head] >> 3][31:0];
+    assign sr_readdatavalid = sr_pop;
+    assign sr_waitrequest = (sr_occ >= 3'd4);
 
     //---- 共享 load master（lr/wr 复用，cnn_top.v 真实接法）----
     // 多笔在途（深度 4 = MAX_PENDING_RESPONSES，返回保序），每笔命令接受
