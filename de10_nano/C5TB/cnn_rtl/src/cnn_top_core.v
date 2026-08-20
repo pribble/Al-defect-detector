@@ -163,6 +163,8 @@ module cnn_top_core (
     reg [15:0] w_cb_r;                  // p_out_cb * (type==4 ? 1 : p_in_cb)（窄化：实际 ≤1024，乘法树变短）
     reg [23:0] w_rb_beats_r;            // w_cb_r * 72（每行块权重拍数，窄化：≤4.7M）
     reg [23:0] w_rb_beats_last_q;       // w_rb_beats_r - 1（S_PREP_L 拍 2 预计算，拆 S_RUN 的 24-bit 减法链）
+    reg [23:0] w_rb_tail_thr_r;         // 权重尾段阈值：dma_wbeat >= 阈值 时剩余 < 4（拆时序用）
+    wire [23:0] w_rb_beats_w = w_cb_r * wr_slice_q;   // 共享乘积（S_PREP_L 派生量共用）
     reg [7:0]  wr_slice_q;              // S_PREP_L 拍 1 寄存 (p_k==1 ? 8 : 72)（拆 p_k 比较与乘法链）
     reg [7:0]  lr_last_cb_r;            // lr 轮末 cb：CONV = p_in_cb-1，DW = 0（单 cb）
     reg [31:0] in_row_w8_r;             // p_in_w * 8
@@ -172,6 +174,11 @@ module cnn_top_core (
     reg [31:0] in_rb_base_r;            // r0_in_r * p_in_w * 8（输入行块内偏移）
     reg [31:0] in_seg_words_r;          // load_rows_r * p_in_w（每输入块段拍数）
     reg [31:0] in_seg_tail_r;           // (in_seg_words_r - 1) * 8（段尾地址回退）
+    reg [31:0] in_seg_tail_thr_r;       // 段尾阈值：dma_ibeat >= 阈值 时剩余 < 4（拆时序用）
+    reg [31:0] in_seg_last_ibeat_r;     // 段尾最后拍索引（in_seg_words_r - 1）
+    reg [31:0] in_seg_full_end_r;       // 满突发段尾索引（in_seg_words_r - 4；<4 置 0）
+    reg [31:0] lr_round_base_r;         // 当前行块 lr 轮基址（CONV 轮末回跳目标）
+    reg [31:0] lr_seg_next_r;           // 下一输入段基址（= 当前段基址 + in_cb_stride）
     reg [31:0] out_rb_base_r;           // rb * out_rb_stride_r（输出行块内偏移）
     reg [15:0] out_row_prod_r;          // rb * p_out_row_tile
     reg [15:0] rb_out_rows_r;           // min(out_row_prod_r + tile, out_h) - out_row_prod_r 裁剪
@@ -354,21 +361,18 @@ module cnn_top_core (
     wire [5:0] lr_avail = 6'd32 - (lr_fifo_cnt + lr_inflight);
     wire [5:0] wr_avail = 6'd32 - (wr_fifo_cnt + wr_inflight);
 
-    // lr：段内剩余（burst 不跨段；段尾地址跳变）
-    wire [31:0] lr_seg_rem = in_seg_words_r - {16'd0, dma_ibeat};
+    // lr 突发策略（拆时序）：满突发恒 4 拍、段尾恒 1 拍。段尾判断只比较
+    // 寄存器 dma_ibeat 与 S_PREP 预计算的阈值，不进 32-bit 地址加法链。
+    wire lr_tail_cmd = ({16'd0, dma_ibeat} >= in_seg_tail_thr_r);
     wire [4:0] lr_burst_len_c =
-        (lr_seg_rem >= 32'd4 && lr_avail >= 6'd4) ? 5'd4 :
-        (lr_seg_rem >= 32'd3 && lr_avail >= 6'd3) ? 5'd3 :
-        (lr_seg_rem >= 32'd2 && lr_avail >= 6'd2) ? 5'd2 :
-        (lr_seg_rem >= 32'd1 && lr_avail >= 6'd1) ? 5'd1 : 5'd0;
+        lr_tail_cmd ? ((lr_avail >= 6'd1) ? 5'd1 : 5'd0)
+                    : ((lr_avail >= 6'd4) ? 5'd4 : 5'd0);
 
-    // wr：行块内总剩余（权重流连续，无段边界）
-    wire [23:0] wr_rem = w_rb_beats_r - dma_wbeat;
+    // wr 突发策略（同 lr）：行块内权重流连续，尾段恒 1 拍
+    wire wr_tail_cmd = (dma_wbeat >= w_rb_tail_thr_r);
     wire [4:0] wr_burst_len_c =
-        (wr_rem >= 24'd4 && wr_avail >= 6'd4) ? 5'd4 :
-        (wr_rem >= 24'd3 && wr_avail >= 6'd3) ? 5'd3 :
-        (wr_rem >= 24'd2 && wr_avail >= 6'd2) ? 5'd2 :
-        (wr_rem >= 24'd1 && wr_avail >= 6'd1) ? 5'd1 : 5'd0;
+        wr_tail_cmd ? ((wr_avail >= 6'd1) ? 5'd1 : 5'd0)
+                    : ((wr_avail >= 6'd4) ? 5'd4 : 5'd0);
 
     wire lr_issue_req = (state == S_RUN) && (cmd_cnt < 3'd4) &&
                         (lr_rounds_done < p_out_cb) && (lr_burst_len_c != 5'd0);
@@ -405,15 +409,13 @@ module cnn_top_core (
     assign load_burstcount = load_busy ? load_burst_q :
                              (wr_read ? wr_burst_len_c : lr_burst_len_c);
 
-    // lr 接受拍地址/计数推进（突发；段尾跳变，CONV 轮末回段首）
-    wire [31:0] lr_accept_beats = {27'd0, load_burstcount};
-    wire lr_accept_hits_seg_end = ({16'd0, dma_ibeat} + lr_accept_beats == in_seg_words_r);
-    wire [31:0] lr_round_base = reg_ddrin + (p_input_offset << 3) + in_rb_base_r;
-    wire [31:0] lr_next_addr =
-        lr_accept_hits_seg_end ?
-            ((p_type != 4 && dma_icb == lr_last_cb_r) ? lr_round_base :
-             lr_address + (lr_accept_beats << 3) + in_cb_stride_r - (in_seg_words_r << 3))
-        : lr_address + (lr_accept_beats << 3);
+    // lr 接受拍地址/计数推进（满突发 +32、段尾 +跳转预计算寄存器）
+    // 关键时序：段尾判断只做寄存器比较，不进 32-bit 加法链。
+    wire lr_accept_tail = ({16'd0, dma_ibeat} >= in_seg_tail_thr_r);
+    wire lr_accept_seg_end = lr_accept_tail ?
+                             ({16'd0, dma_ibeat} == in_seg_last_ibeat_r) :
+                             ({16'd0, dma_ibeat} == in_seg_full_end_r);
+    wire lr_accept_round_end = (p_type != 4) && (dma_icb == lr_last_cb_r);
 
     wire lr_cmd_complete = cmd_last_beat && !cmd_is_wr;
     wire wr_cmd_complete = cmd_last_beat &&  cmd_is_wr;
@@ -560,8 +562,10 @@ module cnn_top_core (
                         in_cb_stride_r  <= in_hw_r << 3;
                         out_cb_stride_r <= out_hw_r << 3;
                         out_rb_stride_r <= (p_out_row_tile * p_out_w) << 3;
-                        w_rb_beats_r    <= w_cb_r * wr_slice_q;   // 16×8 乘法（原 32-bit×mux 链）
-                        w_rb_beats_last_q <= w_cb_r * wr_slice_q - 24'd1;   // 末值-1 提前（拆 S_RUN 减法链）
+                        w_rb_beats_r    <= w_rb_beats_w;   // 16×8 乘法（原 32-bit×mux 链）
+                        w_rb_beats_last_q <= w_rb_beats_w - 24'd1;   // 末值-1 提前（拆 S_RUN 减法链）
+                        w_rb_tail_thr_r   <= (w_rb_beats_w > 24'd3) ?
+                                             (w_rb_beats_w - 24'd3) : 24'd0;
 
                         sr_cmd_cnt <= 0;
                         state <= S_RD_SCALE;
@@ -670,9 +674,17 @@ module cnn_top_core (
                         rd_cnt <= 4;
                         in_seg_tail_r  <= (in_seg_words_r - 1) * 8;
                         out_seg_words_r <= rb_out_rows_r * p_out_w;
+                        in_seg_tail_thr_r <= (in_seg_words_r > 32'd3) ?
+                                             (in_seg_words_r - 32'd3) : 32'd0;
+                        in_seg_last_ibeat_r <= (in_seg_words_r > 32'd0) ?
+                                                (in_seg_words_r - 32'd1) : 32'd0;
+                        in_seg_full_end_r <= (in_seg_words_r > 32'd3) ?
+                                              (in_seg_words_r - 32'd4) : 32'd0;
+                        lr_round_base_r <= reg_ddrin + (p_input_offset << 3) + in_rb_base_r;
                     end else begin
                         rd_cnt <= 0;
                         out_seg_tail_r <= (out_seg_words_r - 1) * 8;
+                        lr_seg_next_r  <= lr_round_base_r + in_cb_stride_r;
                         state <= S_WR_TILE;
                     end
                 end
@@ -704,23 +716,31 @@ module cnn_top_core (
                 S_RUN: begin
                     core_start <= 0;
 
-                    // lr：命令接受拍推进（突发；段尾跳变，CONV 轮末回段首）
+                    // lr：命令接受拍推进（满突发 +32/段尾前 +8；段尾末拍跳预计算寄存器）
                     if (lr_read && !lr_waitrequest) begin
-                        lr_address <= lr_next_addr;
-                        if (lr_accept_hits_seg_end) begin
+                        if (lr_accept_seg_end) begin
+                            if (lr_accept_round_end) begin
+                                lr_address <= lr_round_base_r;
+                                lr_seg_next_r <= lr_round_base_r + in_cb_stride_r;
+                            end else begin
+                                lr_address <= lr_seg_next_r;
+                                lr_seg_next_r <= lr_seg_next_r + in_cb_stride_r;
+                            end
                             dma_ibeat <= 0;
                             if (dma_icb == lr_last_cb_r) begin
                                 dma_icb <= 0;
                                 lr_rounds_done <= lr_rounds_done + 1;
                             end else
                                 dma_icb <= dma_icb + 1;
-                        end else
-                            dma_ibeat <= dma_ibeat + lr_accept_beats[15:0];
+                        end else begin
+                            lr_address <= lr_address + (lr_accept_tail ? 32'd8 : 32'd32);
+                            dma_ibeat <= dma_ibeat + (lr_accept_tail ? 16'd1 : 16'd4);
+                        end
                     end
-                    // wr：命令接受拍推进（突发；行块内连续）
+                    // wr：命令接受拍推进（满突发 +32；尾段 +8）
                     if (wr_read && !wr_waitrequest) begin
-                        dma_wbeat <= dma_wbeat + {14'd0, load_burstcount};
-                        wr_address <= wr_address + (load_burstcount << 3);
+                        dma_wbeat <= dma_wbeat + (wr_tail_cmd ? 20'd1 : 20'd4);
+                        wr_address <= wr_address + (wr_tail_cmd ? 32'd8 : 32'd32);
                     end
                     if (ow_got &&
                         !(dma_ocb == p_out_cb - 1 && dma_obeat == out_seg_words_r - 1)) begin
