@@ -121,14 +121,22 @@ def _mask_circle(gray, cfg, background=None):
 def _hough_circle(gray, cfg):
     """hough 方法: Canny + HoughCircles, 取半径最大(画面主导)的候选圆.
 
-    Returns: (circle, diag).
+    在 1/2 分辨率下跑 HoughCircles (全分辨率约 1.8s, 1/2 约 0.45s, 随像素数近似
+    线性下降), 再把圆心/半径按缩放系数映射回全分辨率; minDist/minRadius/maxRadius
+    同步按缩放计算, 保证半径范围语义不变.
+
+    Returns: (circle, diag). circle 为全分辨率坐标.
     """
     diag = {"radius": None, "reject": None}
-    blurred = cv2.medianBlur(gray, 5)
     h, w = gray.shape[:2]
-    min_dist = int(cfg["hough_min_dist"]) if cfg["hough_min_dist"] else max(h, w) // 4
-    min_r = int(cfg["min_radius_ratio"] * min(h, w))
-    max_r = int(cfg["max_radius_ratio"] * min(h, w))
+    scale = 0.5
+    small = cv2.resize(gray, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+    sh, sw = small.shape[:2]
+    sx, sy = w / sw, h / sh  # 实际缩放因子 (对奇数尺寸仍精确)
+    blurred = cv2.medianBlur(small, 5)
+    min_dist = int(cfg["hough_min_dist"]) if cfg["hough_min_dist"] else max(sh, sw) // 4
+    min_r = int(cfg["min_radius_ratio"] * min(sh, sw))
+    max_r = int(cfg["max_radius_ratio"] * min(sh, sw))
     circles = cv2.HoughCircles(
         blurred, cv2.HOUGH_GRADIENT, dp=1.2, minDist=min_dist,
         param1=cfg["hough_param1"], param2=cfg["hough_param2"],
@@ -139,8 +147,11 @@ def _hough_circle(gray, cfg):
         return None, diag
     circles = np.round(circles[0]).astype(int)
     best = max(circles, key=lambda c: c[2])
-    diag["radius"] = float(best[2])
-    return (float(best[0]), float(best[1]), float(best[2])), diag
+    cx = float(best[0]) * sx
+    cy = float(best[1]) * sy
+    r = float(best[2]) * (sx + sy) / 2.0  # 映射回全分辨率半径
+    diag["radius"] = r
+    return (cx, cy, r), diag
 
 
 def _sanity_check(cx, cy, r, h, w, cfg):
