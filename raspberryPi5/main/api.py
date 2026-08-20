@@ -675,16 +675,16 @@ class Consumer(threading.Thread):
         file_name = os.path.join(FILES_DIR, '{}.jpg'.format(uid))
 
         # 圆形铝片识别 + 智能裁剪: 以铝片中心裁正方形(四周留黑边), 避免整帧
-        # 3:2 图被各向异性压缩成 300×300 导致缺陷变形 (未检出圆时回退整帧)
+        # 3:2 图被各向异性压缩成 300×300 导致缺陷变形
+        # 圆门: 未检出圆(无绿圆框)时跳过推理/抓取/存图——防背景更换/反光等误触发;
+        # 真实铝片定圆失败也会被跳过 (宁漏检不误抓), 由日志区分
         inference_image, self._crop_box = self._smart_crop(annotated_image)
         if inference_image is None:
-            inference_image = annotated_image
-            self._crop_box = None
-            self._record_box = None
-        else:
-            # 裁剪成功: 保存的记录图(original.jpg / files/ / detect.jpg)同样用
-            # 以铝片为中心的方形图, 保证"提取的图片中铝片在中间"
-            self._record_box = self._crop_box
+            logger.warning('圆门: 未检出铝片圆, 跳过推理/抓取/存图')
+            return
+        # 裁剪成功: 保存的记录图(original.jpg / files/ / detect.jpg)同样用
+        # 以铝片为中心的方形图, 保证"提取的图片中铝片在中间"
+        self._record_box = self._crop_box
 
         # Resize to 300×300 for FPGA inference (SSD MobileNet input size)
         # 裁剪图/整帧均为正方形缩放: 缩小用 INTER_AREA 防锯齿, 放大用 INTER_LINEAR
