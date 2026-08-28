@@ -22,5 +22,6 @@ de10_nano/C5TB/cnn_rtl/verification/vct/
 de10_nano/C5TB/cnn_rtl/verification/vec_cnn_top*
 de10_nano/C5TB/cnn_rtl/verification/vec_core_v2*
 de10_nano/C5TB/cnn_rtl/vec_core_v2*
-# IDE
+# IDE / internal agent workspace
 .idea/
+.reasonix/

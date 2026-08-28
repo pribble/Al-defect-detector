@@ -8,7 +8,7 @@ SSD MobileNet V1 模型（`.nb`），把卷积计算卸载到 FPGA 侧的 CNN �
 以 HTTP 服务（`:8080/predict`）或离线图片检测两种模式工作。
 
 树莓派 main 把 300×300 灰度 raw 像素 POST 过来，本服务返回检测框 JSON。
-坐标在 300×300 空间，由 Pi 侧 `_draw_defect_box` 缩放回 768×512 用于标注。
+坐标在 300×300 空间，由 Pi 侧 `_draw_defect_box` 缩放回实际帧尺寸用于标注。
 
 ## 目录结构
 
@@ -21,20 +21,20 @@ SSD MobileNet V1 模型（`.nb`），把卷积计算卸载到 FPGA 侧的 CNN �
 | `lib/` | 构建产物：`libvnna.so`（intelfpga.cc）、`libpaddle_light_api_shared.so`、交叉编译的 `opencv/` |
 | `build.sh` | 3 阶段一键交叉编译（x86_64 → armv7hf） |
 | `upload.sh` | 增量同步 `deploy/` 到 FPGA 板 `172.16.68.110:/opt/paddle_frame` |
-| `deploy/` | **运行目录**：二进制、模型、配置、库、测试图片 |
+| `deploy/` | **运行目录**：配置/脚本入库；二进制、模型、库、驱动为构建产物（不入库） |
 
 ### deploy/ 运行目录
 
 ```
 deploy/
-├── ssd_detection           # 主程序（build.sh 拷贝）
-├── ssd_mobilenet_v1_opt.nb # 量化模型（6.3MB，naive_buffer 格式）
+├── ssd_detection           # 主程序（build.sh 拷贝，构建产物不入库）
+├── ssd_mobilenet_v1_opt.nb # 量化模型（6.3MB，naive_buffer 格式；需自行准备/导出，不入库）
 ├── config.txt              # 模型/标签/归一化配置
 ├── label_list              # 类别名 + 每类置信度阈值
 ├── run.sh                  # HTTP 模式启动（insmod cmadrv → ./ssd_detection config.txt）
 ├── test.sh                 # 离线图片目录检测（./ssd_detection config.txt data）
-├── paddlelite_lib/         # libpaddle_light_api_shared.so + libvnna.so
-├── cmadrv.ko               # kernel/build.sh 拷贝过来的内核驱动
+├── lib/                    # libpaddle_light_api_shared.so + libvnna.so（build.sh 生成，不入库）
+├── cmadrv.ko               # kernel/build.sh 拷贝过来的内核驱动（构建产物，不入库）
 ├── images/  data/          # 测试输入（gitignore）
 └── .last_time              # upload.sh 增量同步时间戳（gitignore）
 ```
@@ -85,7 +85,7 @@ deploy/
 HTTP 模式（`POST /predict`，multipart 字段 `image_file`）：
 
 ```
-Pi: 768×512 gray → cv2.resize(300×300) → 90000 字节 raw → POST
+Pi: 灰度帧（智能裁剪/整帧）→ cv2.resize(300×300) → 90000 字节 raw → POST
 FPGA: Mat(300×300, CV_8UC1) → preprocessImgGray（NEON 1ch→3ch NCHW，减 mean 127.5、乘 1/std）
     → 填 input[1]（input[0] im_shape、input[2] scale 构造时写死）→ PaddlePredictor::Run() → 解析 [N,6] 输出 → JSON
 ```
@@ -144,7 +144,7 @@ gcc-linaro-5.4.1-2017.05，脚本内 export PATH）：
    （`-DARCH_ABI_ARM32`、`-march=armv7-a -mfloat-abi=hard -mfpu=neon`）。
 2. **[2/3] Paddle-Lite**：`paddle_lite/build_paddlelite.sh` 增量编译
    （cmake configure 一次 + `make publish_inference`；产物拷到 `lib/` 与
-   `deploy/paddlelite_lib/`）。首次 configure 会把 `build/api/paddle_use_kernels.h`
+   `deploy/lib/`）。首次 configure 会把 `build/api/paddle_use_kernels.h`
    替换成 **25 条最小 kernel 集**（subgraph/feed/fetch/prior_box/multiclass_nms/
    reshape/calib/conv2d/depthwise_conv2d/scale/slice/softmax/transpose/layout 等，
    原本自动生成约 120 条）——SSD MobileNet FPGA 方案只需这些；新增算子要在此补充
@@ -168,7 +168,7 @@ cd de10_nano/ssd_detection && bash upload.sh   # 增量同步 deploy/ → 172.16
 
 ```bash
 cd /opt/paddle_frame
-./run.sh        # insmod cmadrv.ko → LD_LIBRARY_PATH=./paddlelite_lib → ./ssd_detection config.txt（HTTP :8080）
+./run.sh        # insmod cmadrv.ko → LD_LIBRARY_PATH=./lib → ./ssd_detection config.txt（HTTP :8080）
 ./test.sh       # 同上，但以 data 目录为参数 → 离线检测（结果写 ./result/）
 ```
 

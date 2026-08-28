@@ -54,14 +54,13 @@ GRIP_OFF = bytes.fromhex('A0 01 00 A1')   # 继电器断开 → 释放
 
 | 常量 | 用途 | 格式 |
 |------|------|------|
-| `HOME` | 初始位（竖直收起，不遮挡相机、不干涉传送带） | `[基座, 肩, 肘, 腕, 末端]` 5 个角度（度） |
-| `PICKUP` | 吸取位：正前方传送带面 200mm | `[90, 30, 62, 0, 90]` ← 需标定 |
+| `HOME` | 初始位（竖直收起，不遮挡相机、不干涉传送带） | `[基座, 肩, 肘, 腕]` 4 个角度（度） |
+| `PICKUP` | 吸取位：正前方传送带面 200mm | `[90, 30, 62, 0]` ← 需标定 |
 | `PICKUP_LIFT` | 吸取后抬高，留旋转空间 | 需标定 |
 | `OK_ABOVE` / `OK_PLACE` | OK 区上方 / OK 区放置位（基座右转） | 需标定 |
 | `NG_ABOVE` / `NG_PLACE` | NG 区上方 / NG 区放置位（基座左转） | 需标定 |
 
-`arm_move(angles, move_time)`：5 个舵机顺序写角度（ID5 末端舵机较慢，延迟与
-1.2 倍时间补偿），随后 sleep `move_time/1000` 等待到位。
+`arm_move(angles, move_time)`：4 个舵机顺序写角度，随后 sleep `move_time/1000 + 0.05` 等待到位。
 
 ### grab_task 动作序列（单次分拣）
 
@@ -76,7 +75,7 @@ GRIP_OFF = bytes.fromhex('A0 01 00 A1')   # 继电器断开 → 释放
 7. 复位 HOME（500ms）
 ```
 
-`_write_pump` 对串口写入异常自动重连（重新实例化 `serial.Serial`）。
+`_pump` 对串口写入异常仅记录日志；若串口初始化失败（`pump_serial` 为 `None`）则直接跳过。
 
 ### 分拣触发（互斥锁串行，不缓存）
 
@@ -93,11 +92,11 @@ GRIP_OFF = bytes.fromhex('A0 01 00 A1')   # 继电器断开 → 释放
 | **Producer**（camera.py） | 采集相机帧 → 裁 4:3 → 缩小 → 写 `frame_queue`（**FrameBuffer 单槽缓冲**，丢旧帧不阻塞）并更新 `stream_image_ref[0]`；遇 `CAMERA_NEED_RESTART`(2147483655) 自动重开相机 |
 | **Consumer**（api.py） | 读帧 → 前景触发状态机 → 命中后跑推理管线；异常记日志继续 |
 | **ThreadPoolExecutor**（shared.py） | fire-and-forget 异步执行 `trigger_grab`（直接跑机械臂分拣动作序列）/ `trigger_alarm`（不等待结果） |
-| **cleanup** | 保留最新 `SAVE_IMAGE_NUM=10` 张缺陷图，删除其余 |
+| **cleanup** | 保留最新 `SAVE_IMAGE_NUM=100` 张缺陷图，删除其余 |
 
 相机初始化要点（camera.py）：手动固定曝光（`ExposureAuto=0`、`GainAuto=0`、
 `ExposureTime=6000us`、`Gain=0dB`）——**避免自动曝光导致误触发**；宽高比裁到
-4:3 以内再 1/4 下采样（最终约 768×512 灰度）。
+4:3 以内再 1/4 下采样（以 3072×2048 源为例，最终约 682×512 灰度）。
 
 ## shared.py 单例模式
 
@@ -156,7 +155,7 @@ COOLDOWN: 0.5 秒冷却，防止同一铝片重复触发
 
 ### 圆识别 + 智能裁剪（默认开启）
 
-整帧 768×512（3:2）直接 `resize(300,300)` 是**各向异性压缩**（水平 2.56×、垂直 1.71×），
+整帧约 682×512（4:3）直接 `resize(300,300)` 是**各向异性压缩**（水平约 2.27×、垂直约 1.71×），
 缺陷形状会被挤压。因此推理前先定位铝片圆心：
 
 1. `find_disc_robust()`（disc_detect.py）在**选中帧**上定圆，返回 `(cx, cy, r)`，
@@ -232,8 +231,8 @@ datetime('now','localtime'), UNIQUE(uuid, path, name))`。
 
 | 路由 | 说明 |
 |------|------|
-| `POST /use_arm` | 单步手动控制：`{"id": <1-5>, "angle": <度>}` 或 `{"switch": "true"/"false"}` 气泵 |
-| `GET /get_arm?id=<1-5>` | 读取指定舵机当前角度 |
+| `POST /use_arm` | 单步手动控制：`{"id": <1-4>, "angle": <度>}` 或 `{"switch": "true"/"false"}` 气泵 |
+| `GET /get_arm?id=<1-4>` | 读取指定舵机当前角度 |
 
 CORS：api.py 统一 `CORS(app, supports_credentials=True)`，覆盖全部路由。
 

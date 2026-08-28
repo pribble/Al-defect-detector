@@ -47,7 +47,7 @@ cd de10_nano/ssd_detection && bash upload.sh
 # 4) 板上运行
 cd /opt/paddle_frame
 insmod cmadrv.ko                  # 或 ./run.sh（内含 insmod）
-export LD_LIBRARY_PATH=./paddlelite_lib:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=./lib:$LD_LIBRARY_PATH
 ./ssd_detection config.txt        # HTTP 模式，监听 0.0.0.0:8080
 ```
 
@@ -62,7 +62,7 @@ export LD_LIBRARY_PATH=./paddlelite_lib:$LD_LIBRARY_PATH
 
 ```
 build/  *.o                     # 编译中间产物
-lib/*.so                        # 预编译库：有意提交、勿误重建（build 时覆盖）
+lib/*.so                        # 构建产物：由 build.sh 生成，不入库
 C5TB/db/  C5TB/incremental_db/  C5TB/output_files/   # Quartus 输出
 C5TB/hps_isw_handoff/  C5TB/.qsys_edit/  C5TB/soc_system/  C5TB/*.qws
 C5TB/c5_pin_model_dump.txt  C5TB/hps_sdram_p0_summary.csv
@@ -70,5 +70,5 @@ ssd_detection/deploy/.last_time # upload.sh 增量时间戳
 ssd_detection/deploy/images/  ssd_detection/deploy/data/   # 测试输入
 ```
 
-`C5TB/ip/`、`C5TB/tools/`（含生成的 `soc_system.rbf/.dtb/.dts`）与
-`ssd_detection/deploy/`（含二进制与模型）均为提交内容。
+`C5TB/ip/`、`C5TB/tools/`（含生成的 `soc_system.rbf/.dtb/.dts`）均为提交内容；
+`ssd_detection/deploy/` 仅提交配置和运行脚本，二进制/模型/库/驱动为构建产物，不入库。

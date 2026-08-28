@@ -10,7 +10,7 @@
 
 | 服务 | 目录 | 端口 | 说明 |
 |------|------|------|------|
-| main（Flask） | `main/` | 8080 | 检测 + 机械臂分拣 + 前端合一：相机采集 + 前景触发 + FPGA 推理客户端 + SQLite 记录 + MJPEG 视频流 + 静态托管前端 SPA + 5-DOF 机械臂 OK/NG 分拣（互斥锁串行执行，串口 9600） |
+| main（Flask） | `main/` | 8080 | 检测 + 机械臂分拣 + 前端合一：相机采集 + 前景触发 + FPGA 推理客户端 + SQLite 记录 + MJPEG 视频流 + 静态托管前端 SPA + Yahboom 机械臂（当前软件控制 4 路舵机 + 气动吸盘）OK/NG 分拣（互斥锁串行执行，串口 9600） |
 | systemd | — | — | `detect-api.service`（唯一单元；原 `api.service` 已随服务合并废弃） |
 
 > 原 GrabImage（:7777 检测）与 ArmControl（:8899 机械臂）已合并为 `main/`

@@ -1,10 +1,12 @@
 # HaoYao — 铝片表面缺陷自动检测与分拣系统
 
+第10届集创赛-皓耀命题三等奖作品
+
 Automated aluminum sheet defect detection and sorting system.
 
 系统通过 Hikvision 工业相机（MVS SDK）采集图像，交由 FPGA 推理服务器
-（SSD MobileNet V1，Paddle Lite + 自研 CNN 加速器）检测缺陷，再由 5-DOF
-Yahboom 机械臂 + 气动吸盘按 OK/NG 结果分拣。主控制器为树莓派 5
+（SSD MobileNet V1，Paddle Lite + 自研 CNN 加速器）检测缺陷，再由 Yahboom
+机械臂（当前软件控制 4 路舵机 + 气动吸盘）按 OK/NG 结果分拣。主控制器为树莓派 5
 （Debian 12 Bookworm, aarch64），推理节点为 DE10-Nano（Cyclone V SoC）。
 
 ## 系统数据流
@@ -14,7 +16,7 @@ Hikvision Camera ──frame_queue──> main (:8080, 树莓派)
                                        │
                                        ├── POST /predict ──> DE10-Nano FPGA (172.16.68.110:8080)
                                        │                         └── ssd_detection（Paddle Lite + CNN 加速器）
-                                       ├── 本地触发 enqueue_grab ──> /dev/XIPAN（5-DOF 机械臂）
+                                       ├── 本地触发 enqueue_grab ──> /dev/XIPAN（Yahboom 机械臂）
                                        ├── SQLite (defect.db)
                                        └── MJPEG /img_disc + 静态前端 SPA ──> 浏览器 (同源 :8080)
 ```
@@ -22,7 +24,7 @@ Hikvision Camera ──frame_queue──> main (:8080, 树莓派)
 ### 推理管线（300×300 raw，无 JPEG）
 
 ```
-Pi: 768×512 gray → cv2.resize(300×300) → .tobytes() → POST /predict
+Pi: 灰度帧（智能裁剪/整帧）→ cv2.resize(300×300) → .tobytes() → POST /predict
 FPGA: Mat(300×300, CV_8UC1) → NEON 1ch→3ch NCHW tensor → SSD MobileNet V1（卷积卸载 FPGA）
 ```
 
@@ -31,9 +33,9 @@ FPGA: Mat(300×300, CV_8UC1) → NEON 1ch→3ch NCHW tensor → SSD MobileNet V1
 | 设备 | 接口 | 用途 |
 |------|------|------|
 | 树莓派 5（Debian 12） | — | 主控制器：main（检测 + 机械臂，单服务） |
-| Hikvision 工业相机 | 以太网 / USB | 图像采集（3072×2048 → 768×512） |
+| Hikvision 工业相机 | 以太网 / USB | 图像采集（3072×2048，裁到 4:3 后 1/4 下采样，约 682×512） |
 | DE10-Nano（Cyclone V SoC） | 以太网 :8080 | Paddle Lite 推理 + CNN FPGA 加速器（172.16.68.110） |
-| 5-DOF Yahboom 机械臂 | `/dev/XIPAN`（ttyUSB0，9600 baud） | OK/NG 吸取分拣 |
+| Yahboom 机械臂（当前 4 路舵机 + 气动吸盘） | `/dev/XIPAN`（ttyUSB0，9600 baud） | OK/NG 吸取分拣 |
 | 蜂鸣器报警 | `/dev/BAOJING` | 缺陷告警 |
 
 ## 网络
@@ -106,7 +108,7 @@ cd de10_nano/ssd_detection && bash upload.sh
 ```
 README.md（本文档）
 ├── raspberryPi5/README.md            # 树莓派平台：服务、网络、部署、日志、前端、MVS 绑定
-│   └── main/README.md                # 主服务（检测 + 机械臂）：线程模型、SSIM 触发、动作序列、角度标定、已知问题
+│   └── main/README.md                # 主服务（检测 + 机械臂）：线程模型、触发状态机、动作序列、角度标定、已知问题
 └── de10_nano/README.md               # FPGA 平台：三模块职责、构建/部署流程、.gitignore
     ├── ssd_detection/README.md       # 推理服务：模型 355 指令、调用链、I/O 名称、构建/调试
     ├── C5TB/README.md                # Quartus 工程：顶层/QSys 结构、rbf/dtb 生成、源与生成物
@@ -122,6 +124,6 @@ README.md（本文档）
 
 ## 依赖
 
-- Python 3.11+、Flask、OpenCV、numpy、pillow、pyserial、scikit-image、flask-cors
+- Python 3.11+、Flask、OpenCV、numpy、pillow、pyserial、flask-cors
 - Hikvision MVS SDK（`/opt/MVS/`，`raspberryPi5/MvImport/` 为 ctypes 绑定）
 - FPGA 推理服务器 `172.16.68.110:8080`
